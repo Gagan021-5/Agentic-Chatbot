@@ -1,0 +1,83 @@
+# ── Logs ──────────────────────────────────────────
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+lerna-debug.log*
+.pnpm-debug.log*
+
+# ── Runtime data ───────────────────────────────────
+pids
+*.pid
+*.seed
+*.pid.lock
+
+# ── Dependency directories ─────────────────────────
+node_modules/
+jspm_packages/
+web_modules/
+
+# ── Build outputs ──────────────────────────────────
+dist/
+build/Release
+.next/
+out/
+.nuxt/
+.svelte-kit/
+.vuepress/dist
+
+# ── Environment files ──────────────────────────────
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# ── Coverage / testing ─────────────────────────────
+coverage/
+*.lcov
+.nyc_output/
+lib-cov/
+
+# ── Cache directories ──────────────────────────────
+.cache/
+.parcel-cache/
+.rpt2_cache/
+.rts2_cache_cjs/
+.rts2_cache_es/
+.rts2_cache_umd/
+.webpack/
+.fusebox/
+.dynamodb/
+.docusaurus/
+.serverless/
+.temp/
+.grunt/
+
+# ── TypeScript ─────────────────────────────────────
+*.tsbuildinfo
+
+# ── Misc npm ───────────────────────────────────────
+.npm
+.eslintcache
+.stylelintcache
+.node_repl_history
+*.tgz
+.yarn-integrity
+.lock-wscript
+.tern-port
+
+# ── Yarn v2 ────────────────────────────────────────
+.yarn/cache
+.yarn/unplugged
+.yarn/build-state.yml
+.yarn/install-state.gz
+.pnp.*
+
+# ── OS files ───────────────────────────────────────
+.DS_Store
+Thumbs.db
+
+# ── VS Code ────────────────────────────────────────
+.vscode-test

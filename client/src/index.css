@@ -1,0 +1,273 @@
+@import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap");
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ──────────────────────────────────────────────
+   ROOT & RESETS
+   ────────────────────────────────────────────── */
+:root {
+  color-scheme: dark;
+  font-family: "Inter", system-ui, -apple-system, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  font-feature-settings: "cv11", "ss01", "ss03";
+  background: #0b0d11;
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  min-height: 100%;
+}
+
+body {
+  min-height: 100vh;
+  min-height: 100dvh;
+  background: #0b0d11;
+  color: #e4e8ef;
+  overflow: hidden;
+}
+
+/* ──────────────────────────────────────────────
+   SUBTLE GRID OVERLAY
+   ────────────────────────────────────────────── */
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+  background-image:
+    linear-gradient(rgba(255, 255, 255, 0.018) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.018) 1px, transparent 1px);
+  background-size: 48px 48px;
+  mask-image: radial-gradient(ellipse 80% 60% at 50% 0%, rgba(0, 0, 0, 0.5), transparent 70%);
+  -webkit-mask-image: radial-gradient(ellipse 80% 60% at 50% 0%, rgba(0, 0, 0, 0.5), transparent 70%);
+}
+
+/* ──────────────────────────────────────────────
+   AMBIENT GLOW
+   ────────────────────────────────────────────── */
+body::after {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+  background:
+    radial-gradient(ellipse 50% 30% at 20% 0%, rgba(124, 93, 250, 0.07), transparent),
+    radial-gradient(ellipse 40% 25% at 80% 5%, rgba(236, 72, 153, 0.05), transparent),
+    radial-gradient(ellipse 60% 35% at 50% 100%, rgba(124, 93, 250, 0.03), transparent);
+}
+
+/* ──────────────────────────────────────────────
+   SCROLLBAR
+   ────────────────────────────────────────────── */
+::-webkit-scrollbar {
+  width: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.14);
+}
+
+/* Firefox */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.08) transparent;
+}
+
+/* ──────────────────────────────────────────────
+   GLASS PANEL UTILITY
+   ────────────────────────────────────────────── */
+.glass-panel {
+  background: linear-gradient(
+    180deg,
+    rgba(255, 255, 255, 0.035) 0%,
+    rgba(255, 255, 255, 0.012) 100%
+  );
+  backdrop-filter: blur(20px) saturate(1.2);
+  -webkit-backdrop-filter: blur(20px) saturate(1.2);
+}
+
+/* ──────────────────────────────────────────────
+   MESSAGE ANIMATIONS
+   ────────────────────────────────────────────── */
+.message-enter {
+  animation: messageSlideIn 380ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@keyframes messageSlideIn {
+  from {
+    opacity: 0;
+    transform: translateY(12px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+/* ──────────────────────────────────────────────
+   THINKING DOTS
+   ────────────────────────────────────────────── */
+.dot-pulse {
+  animation: dotBounce 1.4s infinite ease-in-out;
+}
+
+.dot-pulse:nth-child(2) {
+  animation-delay: 0.16s;
+}
+
+.dot-pulse:nth-child(3) {
+  animation-delay: 0.32s;
+}
+
+@keyframes dotBounce {
+  0%, 80%, 100% {
+    transform: scale(0.55);
+    opacity: 0.25;
+  }
+  40% {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+
+/* ──────────────────────────────────────────────
+   CTA BUTTON SHINE
+   ────────────────────────────────────────────── */
+.btn-cta {
+  position: relative;
+  overflow: hidden;
+  background: linear-gradient(135deg, #7c5dfa 0%, #ec4899 50%, #f97316 100%);
+  transition: all 220ms ease;
+}
+
+.btn-cta::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    rgba(255, 255, 255, 0.12),
+    transparent
+  );
+  background-size: 200% 100%;
+  animation: shimmerBtn 2.8s infinite linear;
+  pointer-events: none;
+}
+
+.btn-cta:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 8px 24px rgba(124, 93, 250, 0.3), 0 2px 8px rgba(236, 72, 153, 0.2);
+}
+
+.btn-cta:active {
+  transform: translateY(0);
+}
+
+.btn-cta:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+  transform: none;
+  box-shadow: none;
+}
+
+.btn-cta:disabled::before {
+  display: none;
+}
+
+@keyframes shimmerBtn {
+  from {
+    background-position: 200% center;
+  }
+  to {
+    background-position: -200% center;
+  }
+}
+
+/* ──────────────────────────────────────────────
+   CARD HOVER LIFT
+   ────────────────────────────────────────────── */
+.card-hover {
+  transition: transform 220ms ease, box-shadow 220ms ease, border-color 220ms ease;
+}
+
+.card-hover:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.4), inset 0 1px 0 rgba(255, 255, 255, 0.04);
+  border-color: rgba(124, 93, 250, 0.2);
+}
+
+/* ──────────────────────────────────────────────
+   INPUT FOCUS RING
+   ────────────────────────────────────────────── */
+.input-focus-ring:focus-within {
+  border-color: rgba(124, 93, 250, 0.35);
+  box-shadow: 0 0 0 3px rgba(124, 93, 250, 0.08), 0 16px 48px rgba(0, 0, 0, 0.4);
+}
+
+/* ──────────────────────────────────────────────
+   BADGE GLOW
+   ────────────────────────────────────────────── */
+.badge-glow {
+  position: relative;
+}
+
+.badge-glow::after {
+  content: "";
+  position: absolute;
+  inset: -1px;
+  border-radius: inherit;
+  background: linear-gradient(135deg, rgba(124, 93, 250, 0.2), rgba(236, 72, 153, 0.2));
+  z-index: -1;
+  opacity: 0;
+  transition: opacity 220ms ease;
+}
+
+.badge-glow:hover::after {
+  opacity: 1;
+}
+
+/* ──────────────────────────────────────────────
+   LATEST MESSAGE PILL
+   ────────────────────────────────────────────── */
+.latest-pill {
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  animation: fadeIn 300ms ease-out;
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+/* ──────────────────────────────────────────────
+   RESPONSIVE UTILITIES
+   ────────────────────────────────────────────── */
+@layer utilities {
+  .safe-bottom {
+    padding-bottom: max(env(safe-area-inset-bottom, 0px), 20px);
+  }
+}
