@@ -25,12 +25,16 @@ function createSession(sessionId) {
   return {
     sessionId,
     step: 0,
+    awaitingConfirmation: false,
+    confirmStep: null,
     appType: null,
     modelId: null,
     modelCost: null,
     extraction: null,
     promptData: null,
+    scopeData: null,
     seoData: null,
+    budgetPath: null,
     history: []
   };
 }

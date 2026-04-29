@@ -53,7 +53,8 @@ app.post("/api/agent/chat", async (req, res) => {
       uiType: result.uiType,
       uiData: result.uiData,
       step: result.nextStep,
-      coins: result.coins ?? null
+      coins: result.coins ?? null,
+      confirm: result.confirm ?? null
     });
   } catch (error) {
     console.error("Agent chat error:", error);
@@ -63,6 +64,17 @@ app.post("/api/agent/chat", async (req, res) => {
   }
 });
 
-app.listen(PORT, () => {
+const server = app.listen(PORT, () => {
   console.log(`RentPrompts agent server listening on http://localhost:${PORT}`);
+});
+
+server.on("error", (err) => {
+  if (err.code === "EADDRINUSE") {
+    console.log(`Port ${PORT} is busy. Trying port ${PORT + 1}...`);
+    app.listen(PORT + 1, () => {
+      console.log(`RentPrompts agent server listening on http://localhost:${PORT + 1}`);
+    });
+  } else {
+    throw err;
+  }
 });

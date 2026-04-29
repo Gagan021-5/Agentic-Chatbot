@@ -7,26 +7,26 @@ function formatCoins(value) {
 
 function CostWarningCard({ data, onSendMessage }) {
   return (
-    <div className="rounded-2xl border border-red-500/30 bg-gradient-to-b from-red-500/8 to-rent-bg/95 p-4 shadow-soft sm:rounded-[22px] sm:p-5">
+    <div className="glass-panel rounded-2xl border border-red-500/20 p-4 shadow-soft sm:rounded-[22px] sm:p-5">
       <div className="flex items-center gap-3">
         <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-red-500/25 bg-red-500/10 text-lg text-red-300 sm:h-11 sm:w-11 sm:rounded-2xl">
-          !
+          ⚠️
         </div>
         <div className="min-w-0">
           <div className="text-sm font-extrabold text-white sm:text-base">Cost check before publishing</div>
-          <p className="mt-0.5 text-xs text-red-200/60 sm:mt-1 sm:text-sm">This model is powerful, but it can get expensive at scale.</p>
+          <p className="mt-0.5 text-xs text-white/45 sm:mt-1 sm:text-sm">This model is powerful, but it can get expensive at scale.</p>
         </div>
       </div>
 
       <div className="mt-4 grid gap-3 sm:mt-5 sm:gap-4 md:grid-cols-2">
-        <div className="rounded-xl border border-red-500/15 bg-black/15 p-3 sm:rounded-2xl sm:p-4">
+        <div className="rounded-xl border border-red-500/15 bg-rent-surface/80 p-3 sm:rounded-2xl sm:p-4">
           <div className="text-[10px] font-semibold uppercase tracking-[0.2em] text-white/35 sm:text-xs">Selected model</div>
           <div className="mt-2 text-lg font-extrabold text-white sm:mt-3 sm:text-xl">{data.selectedModel}</div>
           <div className="mt-1.5 text-xs text-white/55 sm:mt-2 sm:text-sm">{formatCoins(data.selectedCost)} coins per run</div>
           <div className="mt-0.5 text-xs text-white/35 sm:mt-1 sm:text-sm">100 runs = {formatCoins(data.hundredRunCost)} coins</div>
         </div>
 
-        <div className="rounded-xl border border-white/8 bg-black/15 p-3 sm:rounded-2xl sm:p-4">
+        <div className="rounded-xl border border-rent-border bg-rent-surface/80 p-3 sm:rounded-2xl sm:p-4">
           <div className="text-[10px] font-semibold uppercase tracking-[0.2em] text-white/35 sm:text-xs">Cheaper alternative</div>
           <div className="mt-2 text-lg font-extrabold text-white sm:mt-3 sm:text-xl">{data.alternativeModel}</div>
           <div className="mt-1.5 text-xs text-white/55 sm:mt-2 sm:text-sm">{formatCoins(data.alternativeCost)} coins per run</div>

@@ -45,10 +45,19 @@ function useChat() {
       return;
     }
 
+    let displayText = cleanText;
+    const lowerText = cleanText.toLowerCase();
+    
+    if (lowerText.startsWith("confirm seo::")) {
+      displayText = "Confirmed SEO Metadata ✓";
+    } else if (lowerText.startsWith("edit prompt::")) {
+      displayText = "Edited prompt template";
+    }
+
     const userMessage = {
       id: `${Date.now()}-user`,
       role: "user",
-      text: cleanText
+      text: displayText
     };
 
     startTransition(() => {
@@ -70,7 +79,8 @@ function useChat() {
         uiType: data.uiType,
         uiData: data.uiData,
         step: data.step,
-        coins: data.coins
+        coins: data.coins,
+        confirm: data.confirm || null
       };
 
       startTransition(() => {

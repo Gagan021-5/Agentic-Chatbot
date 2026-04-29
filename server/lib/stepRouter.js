@@ -1,220 +1,182 @@
 import MODELS from "./models.js";
 import mockData from "./mockData.js";
 import { extractRequirements } from "./groq.js";
-import { generatePromptTemplate, generateSEO, applyPromptInstruction, buildPromptTemplateFromSession } from "./gemini.js";
+import { generatePromptTemplate, generateSEO, generateScope, applyPromptInstruction, buildPromptTemplateFromSession } from "./gemini.js";
 import { buildBudgetTiers, getModelCost } from "./costCalculator.js";
 
-const APP_TYPE_OPTIONS = ["Text", "Image", "Audio", "Video", "Vision"];
-const COST_WARNING_THRESHOLD = 60;
+const COST_WARNING_THRESHOLD = 100;
 
-function normalizeText(message) {
-  return String(message || "").trim();
+function lower(msg) {
+  return String(msg || "").trim().toLowerCase();
 }
 
-function lower(message) {
-  return normalizeText(message).toLowerCase();
+function normalize(msg) {
+  return String(msg || "").trim();
 }
 
-function tierSortValue(tier) {
-  return {
-    free: 0,
-    fast: 1,
-    balanced: 2,
-    premium: 3,
-    ultra: 4
-  }[tier] ?? 10;
+/* ────────────────────────────────────────────
+   SMART MODEL RANKING (spec-exact)
+   ──────────────────────────────────────────── */
+function rankModels(models, userMessage, budget) {
+  const msg = (userMessage || "").toLowerCase();
+
+  return models
+    .map(m => {
+      let score = 0;
+
+      // budget signals
+      if (budget === "free") score += m.cost === 0 ? 100 : 0;
+      if (budget === "low") score += m.tier === "fast" ? 50 : 0;
+      if (budget === "high" || budget === "ultra") score += m.tier === "premium" ? 50 : 0;
+
+      // keyword matching against model tags
+      (m.tags || []).forEach(tag => {
+        if (msg.includes(tag.replace("-", " "))) score += 30;
+      });
+
+      // prefer balanced by default
+      if (m.tier === "balanced") score += 10;
+
+      // always boost free models
+      if (m.cost === 0) score += 20;
+
+      // user said cinematic/motion
+      if (msg.includes("cinematic") || msg.includes("motion")) {
+        if ((m.tags || []).includes("motion-control")) score += 60;
+      }
+
+      // user said cheap/affordable/budget
+      if (msg.includes("cheap") || msg.includes("budget") || msg.includes("affordable")) {
+        score += (100 - Math.min(m.cost, 100));
+      }
+
+      // user said best/professional/high quality
+      if (msg.includes("best") || msg.includes("professional") || msg.includes("high quality")) {
+        if (m.tier === "premium" || m.tier === "ultra") score += 40;
+      }
+
+      return { ...m, score };
+    })
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 3);
 }
 
-function mapBudgetToTiers(budget) {
-  switch (budget) {
-    case "free":
-      return ["free", "fast"];
-    case "low":
-      return ["free", "fast"];
-    case "medium":
-      return ["fast", "balanced"];
-    case "high":
-      return ["balanced", "premium"];
-    case "ultra":
-      return ["premium", "ultra"];
-    default:
-      return null;
-  }
-}
-
-function getVideoRanking(extraction) {
-  if (extraction && extraction.wantsImageInput) {
-    return ["seedance-2.0", "kling-v2.6-motion", "seedance-1.5-pro", "seedance-1-pro", "wan-2.2-fast", "kling-v2.6", "gen-4-turbo", "grok-imagine", "pixverse-v5.6", "ray-2-720p", "veo-3-fast", "veo3"];
-  }
-
-  return ["wan-2.2-fast", "seedance-1.5-pro", "gen-4-turbo", "kling-v2.6", "gen-4.5", "ray-2-720p", "veo-3-fast", "veo3", "seedance-2.0"];
-}
-
-function getRankedModels(appType, extraction) {
-  const list = MODELS[appType] || [];
-
-  if (appType === "video") {
-    const ranking = getVideoRanking(extraction);
-    return [...list].sort((a, b) => {
-      const aIndex = ranking.indexOf(a.id);
-      const bIndex = ranking.indexOf(b.id);
-      const safeA = aIndex === -1 ? ranking.length + tierSortValue(a.tier) : aIndex;
-      const safeB = bIndex === -1 ? ranking.length + tierSortValue(b.tier) : bIndex;
-      return safeA - safeB;
-    });
-  }
-
-  return [...list];
-}
-
-function pickTopModels(appType, extraction) {
-  const ranked = getRankedModels(appType, extraction);
-  const allowedTiers = mapBudgetToTiers(extraction && extraction.budget);
-
-  if (!allowedTiers) {
-    return ranked.slice(0, 3);
-  }
-
-  const filtered = ranked.filter((model) => allowedTiers.includes(model.tier));
-  const merged = [...filtered, ...ranked.filter((model) => !filtered.some((selected) => selected.id === model.id))];
-  return merged.slice(0, 3);
-}
-
-function parseSelectedModelId(message) {
-  const match = normalizeText(message).match(/^select\s+([a-z0-9.-]+)$/i);
+/* ────────────────────────────────────────────
+   PARSERS
+   ──────────────────────────────────────────── */
+function parseSelectedModelId(msg) {
+  const match = normalize(msg).match(/^select\s+([a-z0-9.-]+)$/i);
   return match ? match[1].toLowerCase() : null;
 }
 
-function parseSelectedPlan(message) {
-  const match = normalizeText(message).match(/^select\s+(lean|recommended|full)$/i);
+function parseSelectedPlan(msg) {
+  const match = normalize(msg).match(/^select\s+(lean|recommended|full)$/i);
   return match ? match[1].toLowerCase() : null;
 }
 
-function parseChipAppType(message) {
-  const value = lower(message);
-
-  if (["text", "image", "audio", "video", "vision"].includes(value)) {
-    return value;
-  }
-
+function parseChipAppType(msg) {
+  const v = lower(msg);
+  if (["text", "image", "audio", "video", "vision"].includes(v)) return v;
+  // Handle chip selections like "Images", "Video tour", "Written content"
+  if (v === "images") return "image";
+  if (v.includes("video")) return "video";
+  if (v.includes("written") || v.includes("content")) return "text";
   return null;
 }
 
-function parsePromptEditInstruction(message) {
-  if (!normalizeText(message).toLowerCase().startsWith("edit prompt::")) {
-    return null;
-  }
-
-  return normalizeText(message).slice("edit prompt::".length).trim();
+function parsePromptEditInstruction(msg) {
+  const n = normalize(msg);
+  if (!n.toLowerCase().startsWith("edit prompt::")) return null;
+  return n.slice("edit prompt::".length).trim();
 }
 
-function parseSeoPayload(message) {
-  if (!normalizeText(message).toLowerCase().startsWith("confirm seo::")) {
-    return null;
-  }
-
-  try {
-    return JSON.parse(normalizeText(message).slice("confirm seo::".length));
-  } catch (error) {
-    return null;
-  }
+function parseSeoPayload(msg) {
+  const n = normalize(msg);
+  if (!n.toLowerCase().startsWith("confirm seo::")) return null;
+  try { return JSON.parse(n.slice("confirm seo::".length)); } catch { return null; }
 }
 
-function shouldConfirmPrompt(message) {
-  const value = lower(message);
-  return value.includes("looks good") || value.includes("proceed") || value === "yes" || value.includes("confirm");
+function isYes(msg) {
+  const v = lower(msg);
+  return v === "yes" || v === "yes, proceed" || v.includes("looks good") || v.includes("proceed") || v.includes("yes,") || v === "confirm" || v.includes("sahi hai") || v.includes("haan") || v.includes("ha ");
 }
 
-function shouldConfirmSeo(message) {
-  const value = lower(message);
-  return value.includes("confirm seo") || value.includes("confirm & continue") || value === "continue";
+function isNo(msg) {
+  const v = lower(msg);
+  return v.startsWith("no") || v.startsWith("change:") || v === "nahi" || v.includes("let me change");
 }
 
-function isControlMessage(message) {
-  const value = lower(message);
-  return Boolean(
-    parseSelectedModelId(message) ||
-      parseSelectedPlan(message) ||
-      parseChipAppType(message) ||
-      parsePromptEditInstruction(message) ||
-      value.includes("proceed anyway") ||
-      value.includes("use cheaper model") ||
-      shouldConfirmPrompt(message) ||
-      shouldConfirmSeo(message)
-  );
+function isChangeMessage(msg) {
+  return lower(msg).startsWith("change:");
 }
 
-function shouldWarnForCost(model, appType) {
-  if (!model) {
-    return false;
-  }
-
-  return model.cost > 100 || (appType === "video" && model.cost >= COST_WARNING_THRESHOLD);
+function getChangeText(msg) {
+  return normalize(msg).slice("change:".length).trim();
 }
 
+/* ────────────────────────────────────────────
+   MODEL / COST HELPERS
+   ──────────────────────────────────────────── */
 function findModel(appType, modelId) {
-  return (MODELS[appType] || []).find((model) => model.id === modelId) || null;
+  return (MODELS[appType] || []).find(m => m.id === modelId) || null;
 }
 
 function findCheapestAlternative(appType, selectedModel) {
-  if (appType === "video" && selectedModel && !selectedModel.supports_image_input) {
-    return findModel(appType, "wan-2.2-fast");
-  }
-
-  if (appType === "video" && selectedModel && selectedModel.supports_image_input) {
-    return findModel(appType, "seedance-2.0");
-  }
-
-  const alternatives = (MODELS[appType] || []).filter((model) => model.id !== (selectedModel && selectedModel.id));
+  const alternatives = (MODELS[appType] || []).filter(m => m.id !== (selectedModel && selectedModel.id));
   return [...alternatives].sort((a, b) => a.cost - b.cost)[0] || null;
 }
 
-function prependUrgent(reply, extraction) {
-  return extraction && extraction.userTone === "urgent" ? `No worries, quick setup - ${reply}` : reply;
+function shouldWarnForCost(model) {
+  return model && model.cost > COST_WARNING_THRESHOLD;
 }
 
+function buildCostWarningUi(appType, selectedModel) {
+  const alt = findCheapestAlternative(appType, selectedModel);
+  const cost = Number(selectedModel.cost.toFixed(2));
+  return {
+    selectedModel: selectedModel.name,
+    selectedModelId: selectedModel.id,
+    selectedCost: cost,
+    hundredRunCost: Math.round(cost * 100 * 100) / 100,
+    alternativeModel: alt ? alt.name : null,
+    alternativeModelId: alt ? alt.id : null,
+    alternativeCost: alt ? Number(alt.cost.toFixed(2)) : null
+  };
+}
+
+/* ────────────────────────────────────────────
+   TONE-AWARE REPLY PREFIX
+   ──────────────────────────────────────────── */
+function tonePrefix(extraction) {
+  if (!extraction) return "";
+  if (extraction.userTone === "urgent") return "No worries, let's set this up quickly! ";
+  if (extraction.userTone === "unsure") return "Happy to help figure this out together! ";
+  if (extraction.detectedLanguage === "Hindi") return "Samajh gaya — ";
+  return "";
+}
+
+/* ────────────────────────────────────────────
+   BUDGET / COMPLEXITY HELPERS
+   ──────────────────────────────────────────── */
 function computeComplexity(session) {
   const features = session.extraction && Array.isArray(session.extraction.keyFeatures) ? session.extraction.keyFeatures.length : 0;
-
-  if ((session.appType === "video" && (session.extraction && session.extraction.wantsImageInput)) || features >= 4) {
-    return "complex";
-  }
-
-  if (features >= 2 || ["image", "vision", "audio"].includes(session.appType)) {
-    return "medium";
-  }
-
+  if (features >= 4) return "complex";
+  if (features >= 2) return "medium";
   return "simple";
-}
-
-function computeCategory(session) {
-  const purpose = lower(session.extraction && session.extraction.appPurpose);
-
-  if (purpose.includes("mobile app") || purpose.includes("android") || purpose.includes("ios")) {
-    return "mobile";
-  }
-
-  if (["image", "video"].includes(session.appType)) {
-    return "design";
-  }
-
-  return "website";
 }
 
 function getBudgetRow(session) {
   const complexity = computeComplexity(session);
-  const category = computeCategory(session);
-
   return (
-    mockData.market_data.find((row) => row.category === category && row.complexity === complexity) ||
-    mockData.market_data.find((row) => row.category === "website" && row.complexity === "medium")
+    mockData.market_data.find(r => r.category === "ai-app" && r.complexity === complexity) ||
+    mockData.market_data.find(r => r.category === "ai-app" && r.complexity === "medium") ||
+    mockData.market_data.find(r => r.category === "website" && r.complexity === "medium")
   );
 }
 
 function buildBudgetUi(session) {
   const row = getBudgetRow(session);
   const tiers = buildBudgetTiers(row);
-
   return {
     context: {
       category: row.category,
@@ -223,92 +185,58 @@ function buildBudgetUi(session) {
       floorJoules: row.floor_joules,
       marketRange: `${row.floor_joules.toLocaleString()}-${row.market_joules.toLocaleString()}`
     },
-    options: {
-      lean: tiers.lean,
-      recommended: tiers.recommended,
-      full: tiers.full
-    }
+    options: { lean: tiers.lean, recommended: tiers.recommended, full: tiers.full }
   };
 }
 
-function buildCostWarningUi(appType, selectedModel) {
-  const alternative = findCheapestAlternative(appType, selectedModel);
-  const selectedCost = Number(getModelCost(selectedModel.id, appType).toFixed(2));
-  const hundredRunCost = Math.round(selectedCost * 100 * 100) / 100;
-
-  return {
-    selectedModel: selectedModel.name,
-    selectedModelId: selectedModel.id,
-    selectedCost,
-    hundredRunCost,
-    alternativeModel: alternative ? alternative.name : null,
-    alternativeModelId: alternative ? alternative.id : null,
-    alternativeCost: alternative ? Number(alternative.cost.toFixed(2)) : null
-  };
-}
-
+/* ────────────────────────────────────────────
+   MERGE EXTRACTION
+   ──────────────────────────────────────────── */
 function mergeExtraction(existing, latest, message) {
-  if (!existing) {
-    return latest;
-  }
+  if (!existing) return latest;
 
-  const controlMessage = isControlMessage(message);
-  const keepExistingAppType = controlMessage || !latest.appType;
-  const keepExistingPurpose = controlMessage || !latest.appPurpose || latest.appPurpose.length < 8;
-  const keepExistingUsers = controlMessage || !latest.targetUsers || latest.targetUsers === "general users";
-  const keepExistingLanguage = controlMessage && existing.detectedLanguage;
-  const nextMissingFields = new Set([...(existing.missingFields || []), ...((latest && latest.missingFields) || [])]);
-
-  if (existing.appType) {
-    nextMissingFields.delete("appType");
-  }
-
-  if (existing.targetUsers && existing.targetUsers !== "general users") {
-    nextMissingFields.delete("targetUsers");
-  }
+  const isControl = parseSelectedModelId(message) || parseSelectedPlan(message) || parseChipAppType(message) || isYes(message);
+  const keepAppType = isControl || !latest.appType;
+  const keepPurpose = isControl || !latest.appPurpose || latest.appPurpose.length < 8;
 
   return {
     ...existing,
     ...latest,
-    appType: keepExistingAppType ? existing.appType : latest.appType,
-    appPurpose: keepExistingPurpose ? existing.appPurpose : latest.appPurpose,
-    targetUsers: keepExistingUsers ? existing.targetUsers : latest.targetUsers,
+    appType: keepAppType ? existing.appType : latest.appType,
+    appPurpose: keepPurpose ? existing.appPurpose : latest.appPurpose,
+    targetUsers: (isControl || !latest.targetUsers || latest.targetUsers === "general users") ? existing.targetUsers : latest.targetUsers,
     budget: latest && latest.budget ? latest.budget : existing.budget,
-    wantsImageInput: Boolean((existing && existing.wantsImageInput) || (latest && latest.wantsImageInput)),
-    detectedLanguage: keepExistingLanguage ? existing.detectedLanguage : latest.detectedLanguage || existing.detectedLanguage,
-    userTone: controlMessage && existing.userTone ? existing.userTone : latest.userTone || existing.userTone,
-    oneLineUnderstanding: controlMessage ? existing.oneLineUnderstanding || latest.oneLineUnderstanding : latest.oneLineUnderstanding || existing.oneLineUnderstanding,
+    wantsImageInput: Boolean(existing.wantsImageInput || (latest && latest.wantsImageInput)),
+    detectedLanguage: isControl && existing.detectedLanguage ? existing.detectedLanguage : (latest.detectedLanguage || existing.detectedLanguage),
+    userTone: isControl && existing.userTone ? existing.userTone : (latest.userTone || existing.userTone),
+    oneLineUnderstanding: isControl ? (existing.oneLineUnderstanding || latest.oneLineUnderstanding) : (latest.oneLineUnderstanding || existing.oneLineUnderstanding),
+    suggestedReply: isControl ? (existing.suggestedReply || latest.suggestedReply) : (latest.suggestedReply || existing.suggestedReply),
     confidence: {
-      appType: keepExistingAppType ? existing.confidence.appType : latest.confidence.appType,
+      appType: keepAppType ? existing.confidence.appType : latest.confidence.appType,
       budget: latest && latest.budget ? latest.confidence.budget : existing.confidence.budget
     },
-    keyFeatures:
-      !controlMessage && latest && Array.isArray(latest.keyFeatures) && latest.keyFeatures.length
-        ? latest.keyFeatures
-        : existing.keyFeatures,
-    missingFields: Array.from(nextMissingFields)
+    keyFeatures: !isControl && latest && Array.isArray(latest.keyFeatures) && latest.keyFeatures.length ? latest.keyFeatures : existing.keyFeatures,
+    missingFields: Array.from(new Set([...(existing.missingFields || []), ...((latest && latest.missingFields) || [])]))
   };
 }
 
-async function createPromptPreview(session, replyText) {
-  if (!session.promptData) {
-    session.promptData = await generatePromptTemplate(session);
-  }
-
-  return {
-    reply: replyText,
-    uiType: "prompt_preview",
-    uiData: session.promptData,
-    nextStep: 3,
-    coins: session.modelCost
-  };
+/* ────────────────────────────────────────────
+   BUILD FULL HISTORY STRING for ranking
+   ──────────────────────────────────────────── */
+function getFullUserText(session) {
+  if (!session.history) return "";
+  return session.history.filter(h => h.role === "user").map(h => h.content).join(" ");
 }
 
+/* ════════════════════════════════════════════
+   MAIN ROUTER
+   ════════════════════════════════════════════ */
 async function route(session, message) {
-  const text = normalizeText(message);
+  const text = normalize(message);
   const latestExtraction = await extractRequirements(text, session.history || []);
   session.extraction = mergeExtraction(session.extraction, latestExtraction, text);
 
+  // ─── STEP 5A: Plan selected → publish ───
   if (parseSelectedPlan(text) && session.seoData) {
     const planId = parseSelectedPlan(text);
     const payload = {
@@ -321,13 +249,16 @@ async function route(session, message) {
       appName: session.seoData.appName,
       appDescription: session.seoData.appDescription,
       tags: session.seoData.tags,
+      selectedPlan: planId,
       publishedAt: new Date().toISOString()
     };
 
-    console.log("MOCK PUBLISH:", JSON.stringify(payload, null, 2));
+    console.log("\n══════ MOCK PUBLISH ══════");
+    console.log(JSON.stringify(payload, null, 2));
+    console.log("══════════════════════════\n");
 
     return {
-      reply: "App published successfully!",
+      reply: `🎉 Your app "${session.seoData.appName}" has been published successfully!`,
       uiType: "success",
       uiData: {
         appName: session.seoData.appName,
@@ -335,7 +266,8 @@ async function route(session, message) {
         costPerRun: session.modelCost,
         tags: session.seoData.tags,
         selectedPlan: planId,
-        mockUrl: `https://rentprompts.com/app/demo-${Date.now()}`
+        mockUrl: `https://rentprompts.ai/app/demo-${Date.now()}`,
+        isBounty: false
       },
       nextStep: 0,
       coins: session.modelCost,
@@ -343,65 +275,231 @@ async function route(session, message) {
     };
   }
 
-  if (session.step === 0 || (!session.appType && !parseChipAppType(text))) {
-    if (session.extraction && ["HIGH", "MEDIUM"].includes(session.extraction.confidence && session.extraction.confidence.appType) && session.extraction.appType) {
-      session.appType = session.extraction.appType;
-      const selectedModels = pickTopModels(session.appType, session.extraction);
-      return {
-        reply: prependUrgent(`Got it - ${session.extraction.oneLineUnderstanding}. Here are the best models for your app:`, session.extraction),
-        uiType: "models",
-        uiData: {
-          appType: session.appType,
-          models: selectedModels
-        },
-        nextStep: 2,
-        coins: null
-      };
+  // ─── STEP 5B: Bounty publish ───
+  if (lower(text) === "post as bounty" && session.seoData) {
+    const bountyPayload = {
+      title: session.seoData.appName,
+      description: session.seoData.appDescription,
+      appType: session.appType,
+      modelId: session.modelId,
+      promptTemplate: session.promptData && session.promptData.userPrompt,
+      tags: session.seoData.tags,
+      budget_preference: "open_to_bids",
+      postedAt: new Date().toISOString()
+    };
+
+    console.log("\n══════ MOCK BOUNTY PUBLISH ══════");
+    console.log(JSON.stringify(bountyPayload, null, 2));
+    console.log("══════════════════════════════════\n");
+
+    return {
+      reply: "Your bounty has been posted! Creators will bid on your project within 24-48 hours.",
+      uiType: "success",
+      uiData: {
+        appName: session.seoData.appName,
+        modelId: session.modelId,
+        costPerRun: session.modelCost,
+        tags: session.seoData.tags,
+        selectedPlan: "bounty",
+        mockUrl: `https://rentprompts.ai/bounty/demo-${Date.now()}`,
+        isBounty: true
+      },
+      nextStep: 0,
+      coins: null,
+      clearSession: true
+    };
+  }
+
+  // ─── AWAITING CONFIRMATION HANDLING ───
+  if (session.awaitingConfirmation) {
+    const confirmStep = session.confirmStep;
+
+    // User said YES
+    if (isYes(text)) {
+      session.awaitingConfirmation = false;
+
+      // Step 0 confirmed → show models (STEP 1)
+      if (confirmStep === 0 && session.appType) {
+        const fullText = getFullUserText(session);
+        const budget = session.extraction && session.extraction.budget;
+        const models = rankModels(MODELS[session.appType] || [], fullText, budget);
+        session.step = 1;
+        session.awaitingConfirmation = true;
+        session.confirmStep = 1;
+        return {
+          reply: `Great! Here are the top 3 models for your ${session.appType} app:`,
+          uiType: "models",
+          uiData: { appType: session.appType, models },
+          nextStep: 1,
+          coins: null,
+          confirm: {
+            summary: `Here are the top 3 models for your ${session.appType} app. Does one of these fit?`,
+            detail: "Click a model card to select it, or say No to see different options."
+          }
+        };
+      }
+
+      // Step 1 confirmed → user needs to pick a model card
+      if (confirmStep === 1) {
+        return {
+          reply: "Click on one of the model cards above to select it.",
+          uiType: "text",
+          uiData: {},
+          nextStep: 1,
+          coins: null
+        };
+      }
+
+      // Step 2 confirmed (prompt) → generate scope (STEP 3)
+      if (confirmStep === 2 && session.promptData) {
+        if (!session.scopeData) {
+          session.scopeData = await generateScope(session);
+        }
+        session.step = 3;
+        session.awaitingConfirmation = true;
+        session.confirmStep = 3;
+        return {
+          reply: `The scope covers ${session.scopeData.totalItems} key items — ` +
+                 `${session.scopeData.scopeSummary}\n\n` +
+                 `Total estimated effort: ~${session.scopeData.totalHours}h\n\n` +
+                 `Want to adjust anything in the scope, or shall we ` +
+                 `move on to look at pricing options?`,
+          uiType: "scope",
+          uiData: session.scopeData,
+          nextStep: 3,
+          coins: session.modelCost,
+          confirm: {
+            summary: `Scope: ${session.scopeData.totalItems} items (~${session.scopeData.totalHours}h). Looks good?`,
+            detail: "Say Yes to proceed, or let me know what you want to add/remove."
+          }
+        };
+      }
+
+      // Step 3 confirmed (Scope) → generate SEO (STEP 4)
+      if (confirmStep === 3 && session.scopeData) {
+        if (!session.seoData) {
+          session.seoData = await generateSEO(session);
+        }
+        session.step = 4;
+        session.awaitingConfirmation = true;
+        session.confirmStep = 4;
+        return {
+          reply: "Almost done! Here's your app's SEO profile:",
+          uiType: "seo_preview",
+          uiData: session.seoData,
+          nextStep: 4,
+          coins: session.modelCost,
+          confirm: {
+            summary: "Here's your app's name, description and tags. Ready to publish?",
+            detail: "You can edit any field inline before confirming."
+          }
+        };
+      }
+
+      // Step 4 confirmed (SEO) → budget/bounty check (STEP 5)
+      if (confirmStep === 4 && session.seoData) {
+        return buildBudgetStep(session);
+      }
+
+      // Step 5 confirmed (bounty) → post as bounty
+      if (confirmStep === 5 && session.budgetPath === "bounty") {
+        // Re-route to bounty publish
+        return route(session, "Post as bounty");
+      }
     }
 
-    return {
-      reply: prependUrgent("I can help with that. I understood the rough idea, and the one thing I need next is the output type. What type of output does your app produce?", session.extraction),
-      uiType: "chips",
-      uiData: {
-        options: APP_TYPE_OPTIONS
-      },
-      nextStep: 1,
-      coins: null
-    };
+    // User said NO or typed correction
+    if (isNo(text) || isChangeMessage(text)) {
+      session.awaitingConfirmation = false;
+      const correction = isChangeMessage(text) ? getChangeText(text) : "";
+
+      if (confirmStep === 0) {
+        if (correction) {
+          // Re-extract with correction
+          const newExtraction = await extractRequirements(correction, session.history || []);
+          session.extraction = mergeExtraction(session.extraction, newExtraction, correction);
+          if (session.extraction.appType && ["HIGH", "MEDIUM"].includes(session.extraction.confidence.appType)) {
+            session.appType = session.extraction.appType;
+          }
+        }
+        // Show new confirm
+        return buildStep0Response(session);
+      }
+
+      if (confirmStep === 1) {
+        return {
+          reply: "No problem! What are you looking for in a model? (e.g. cheaper, higher quality, faster)",
+          uiType: "text",
+          uiData: {},
+          nextStep: 1,
+          coins: null
+        };
+      }
+
+      if (confirmStep === 2) {
+        return {
+          reply: "Tell me what to change about the prompt, and I'll regenerate it.",
+          uiType: "text",
+          uiData: {},
+          nextStep: 2,
+          coins: session.modelCost
+        };
+      }
+
+      if (confirmStep === 3) {
+        const correction = isChangeMessage(text) ? getChangeText(text) : text;
+        if (correction) {
+          if (!session.extraction.keyFeatures) session.extraction.keyFeatures = [];
+          session.extraction.keyFeatures.push(correction);
+          session.scopeData = await generateScope(session);
+        }
+        return {
+          reply: `Updated scope — ${session.scopeData.totalItems} items, ~${session.scopeData.totalHours}h total. Does this look better?`,
+          uiType: "scope",
+          uiData: session.scopeData,
+          nextStep: 3,
+          coins: session.modelCost,
+          confirm: {
+            summary: `Scope: ${session.scopeData.totalItems} items (~${session.scopeData.totalHours}h). Looks good?`,
+            detail: "Say Yes to proceed, or let me know what you want to add/remove."
+          }
+        };
+      }
+
+      if (confirmStep === 4) {
+        return {
+          reply: "Which part would you like to change? You can also edit inline above.",
+          uiType: "text",
+          uiData: {},
+          nextStep: 4,
+          coins: session.modelCost
+        };
+      }
+    }
   }
 
-  const chipAppType = parseChipAppType(text);
-
-  if (session.step === 1 || chipAppType) {
-    session.appType = chipAppType || session.appType || (session.extraction && session.extraction.appType);
-    const selectedModels = pickTopModels(session.appType, session.extraction);
-
-    return {
-      reply: `Perfect. Here are the top models for ${session.appType} apps:`,
-      uiType: "models",
-      uiData: {
-        appType: session.appType,
-        models: selectedModels
-      },
-      nextStep: 2,
-      coins: null
-    };
+  // ─── CHIP APP TYPE SELECTION ───
+  const chipType = parseChipAppType(text);
+  if (chipType && !session.appType) {
+    session.appType = chipType;
+    session.extraction.appType = chipType;
+    session.extraction.confidence.appType = "HIGH";
+    return buildStep0Response(session);
   }
 
+  // ─── MODEL SELECTION ───
   const selectedModelId = parseSelectedModelId(text);
-
   if (selectedModelId && !["lean", "recommended", "full"].includes(selectedModelId)) {
     const selectedModel = findModel(session.appType, selectedModelId);
-
     if (!selectedModel) {
+      const fullText = getFullUserText(session);
+      const budget = session.extraction && session.extraction.budget;
+      const models = rankModels(MODELS[session.appType] || [], fullText, budget);
       return {
-        reply: "I couldn't match that model. Pick one of the options below and I'll keep moving.",
+        reply: "I couldn't match that model. Pick one of the options below:",
         uiType: "models",
-        uiData: {
-          appType: session.appType,
-          models: pickTopModels(session.appType, session.extraction)
-        },
-        nextStep: 2,
+        uiData: { appType: session.appType, models },
+        nextStep: 1,
         coins: null
       };
     }
@@ -410,12 +508,14 @@ async function route(session, message) {
     session.modelCost = selectedModel.cost;
     session.promptData = null;
     session.seoData = null;
+    session.awaitingConfirmation = false;
 
-    if (shouldWarnForCost(selectedModel, session.appType)) {
+    // Cost warning check
+    if (shouldWarnForCost(selectedModel)) {
       session.costWarning = buildCostWarningUi(session.appType, selectedModel);
-
+      session.step = 2;
       return {
-        reply: "Heads up on cost before we continue:",
+        reply: "Heads up — this model is powerful but can get expensive at scale:",
         uiType: "cost_warning",
         uiData: session.costWarning,
         nextStep: 2,
@@ -423,108 +523,234 @@ async function route(session, message) {
       };
     }
 
+    // Generate prompt and show with confirm
     delete session.costWarning;
-    return createPromptPreview(session, "Great choice! Here's your auto-generated prompt:");
+    session.promptData = await generatePromptTemplate(session);
+    session.step = 2;
+    session.awaitingConfirmation = true;
+    session.confirmStep = 2;
+    return {
+      reply: "Great choice! Here's your auto-generated prompt template:",
+      uiType: "prompt_preview",
+      uiData: session.promptData,
+      nextStep: 2,
+      coins: session.modelCost,
+      confirm: {
+        summary: "Here's the auto-generated prompt for your app. Does this look right?",
+        detail: session.promptData.promptExplanation || null
+      }
+    };
   }
 
+  // ─── COST WARNING RESPONSE ───
   if (session.costWarning && session.step === 2) {
-    const value = lower(text);
+    const v = lower(text);
 
-    if (value.includes("use cheaper model")) {
+    if (v.includes("use cheaper") || v.includes("cheaper option") || v.includes("show me cheaper")) {
       session.modelId = session.costWarning.alternativeModelId;
       session.modelCost = session.costWarning.alternativeCost;
       delete session.costWarning;
       session.promptData = await generatePromptTemplate(session);
-
+      session.awaitingConfirmation = true;
+      session.confirmStep = 2;
       return {
-        reply: "Swapped to the cheaper option. Here's your auto-generated prompt:",
+        reply: "Swapped to the cheaper option. Here's your prompt:",
         uiType: "prompt_preview",
         uiData: session.promptData,
-        nextStep: 3,
-        coins: session.modelCost
+        nextStep: 2,
+        coins: session.modelCost,
+        confirm: {
+          summary: "Here's the auto-generated prompt for your app. Does this look right?",
+          detail: session.promptData.promptExplanation || null
+        }
       };
     }
 
-    if (value.includes("proceed") || value === "yes") {
+    if (v.includes("proceed") || v.includes("understand") || v === "yes") {
       delete session.costWarning;
-      return createPromptPreview(session, "Understood. Here's your prompt before we publish anything:");
+      session.promptData = await generatePromptTemplate(session);
+      session.awaitingConfirmation = true;
+      session.confirmStep = 2;
+      return {
+        reply: "Understood. Here's your prompt template:",
+        uiType: "prompt_preview",
+        uiData: session.promptData,
+        nextStep: 2,
+        coins: session.modelCost,
+        confirm: {
+          summary: "Here's the auto-generated prompt for your app. Does this look right?",
+          detail: session.promptData.promptExplanation || null
+        }
+      };
     }
   }
 
-  const promptEditInstruction = parsePromptEditInstruction(text);
-
-  if (promptEditInstruction && session.modelId) {
+  // ─── PROMPT EDIT ───
+  const promptEdit = parsePromptEditInstruction(text);
+  if (promptEdit && session.modelId) {
     if (!session.promptData) {
       session.promptData = buildPromptTemplateFromSession(session);
     }
-
-    session.promptData = applyPromptInstruction(session.promptData, promptEditInstruction);
-
+    session.promptData = applyPromptInstruction(session.promptData, promptEdit);
+    session.awaitingConfirmation = true;
+    session.confirmStep = 2;
     return {
       reply: "Updated! Does this look better?",
       uiType: "prompt_preview",
       uiData: session.promptData,
-      nextStep: 3,
-      coins: session.modelCost
+      nextStep: 2,
+      coins: session.modelCost,
+      confirm: {
+        summary: "Here's the updated prompt. Does this look right?",
+        detail: null
+      }
     };
   }
 
-  if (session.modelId && session.step <= 3 && shouldConfirmPrompt(text)) {
-    if (!session.promptData) {
-      session.promptData = await generatePromptTemplate(session);
-    }
-
-    if (!session.seoData) {
-      session.seoData = await generateSEO(session);
-    }
-
-    return {
-      reply: "Almost done! Here's your app's SEO profile:",
-      uiType: "seo_preview",
-      uiData: session.seoData,
-      nextStep: 4,
-      coins: session.modelCost
-    };
-  }
-
+  // ─── SEO INLINE EDIT CONFIRM ───
   const seoPayload = parseSeoPayload(text);
-
   if (seoPayload && session.seoData) {
     session.seoData = {
       ...session.seoData,
       ...seoPayload,
       tags: Array.isArray(seoPayload.tags) ? seoPayload.tags : session.seoData.tags
     };
-
-    return {
-      reply: "Your app is ready. Pick a publishing option:",
-      uiType: "budget_cards",
-      uiData: buildBudgetUi(session),
-      nextStep: 5,
-      coins: null
-    };
+    return buildBudgetStep(session);
   }
 
-  if (session.seoData && shouldConfirmSeo(text)) {
-    return {
-      reply: "Your app is ready. Pick a publishing option:",
-      uiType: "budget_cards",
-      uiData: buildBudgetUi(session),
-      nextStep: 5,
-      coins: null
-    };
+  // ─── SEO CONFIRM via text ───
+  if (session.seoData && (lower(text).includes("confirm seo") || lower(text).includes("confirm & continue") || lower(text) === "continue")) {
+    return buildBudgetStep(session);
   }
 
+  // ─── STEP 0: Initial message / no appType yet ───
+  if (session.step === 0 || !session.appType) {
+    return buildStep0Response(session);
+  }
+
+  // ─── FALLBACK: re-generate prompt if model selected but no promptData ───
   if (session.modelId && !session.promptData) {
-    return createPromptPreview(session, "Great choice! Here's your auto-generated prompt:");
+    session.promptData = await generatePromptTemplate(session);
+    session.awaitingConfirmation = true;
+    session.confirmStep = 2;
+    return {
+      reply: "Here's your auto-generated prompt:",
+      uiType: "prompt_preview",
+      uiData: session.promptData,
+      nextStep: 2,
+      coins: session.modelCost,
+      confirm: {
+        summary: "Here's the auto-generated prompt for your app. Does this look right?",
+        detail: null
+      }
+    };
   }
 
+  // ─── CATCH ALL ───
   return {
-    reply: "I kept the current setup intact. Choose the next card action and I'll continue from there.",
+    reply: "I kept the current setup intact. Use the buttons above to continue, or tell me what you'd like to change.",
     uiType: "text",
     uiData: {},
     nextStep: session.step || 0,
     coins: session.modelCost
+  };
+}
+
+/* ────────────────────────────────────────────
+   STEP 0 RESPONSE BUILDER
+   ──────────────────────────────────────────── */
+function buildStep0Response(session) {
+  const ext = session.extraction;
+
+  // HIGH/MEDIUM confidence → show confirm card for what we understood
+  if (ext && ext.appType && ["HIGH", "MEDIUM"].includes(ext.confidence.appType)) {
+    session.appType = ext.appType;
+    session.step = 0;
+    session.awaitingConfirmation = true;
+    session.confirmStep = 0;
+
+    const prefix = tonePrefix(ext);
+    const reply = ext.suggestedReply
+      ? `${prefix}${ext.suggestedReply}`
+      : `${prefix}Got it — ${ext.oneLineUnderstanding}.\n\nI'm planning to build a ${ext.appType} app that ${ext.appPurpose}. Is this the right direction?`;
+
+    return {
+      reply,
+      uiType: "text",
+      uiData: {},
+      nextStep: 0,
+      coins: null,
+      confirm: {
+        summary: ext.oneLineUnderstanding,
+        detail: `App type: ${ext.appType} • Target: ${ext.targetUsers}`
+      }
+    };
+  }
+
+  // LOW confidence → ask for clarification with chips
+  session.step = 0;
+  const prefix = tonePrefix(ext);
+  const options = ext && ext.appPurpose && /clinic|hospital/i.test(ext.appPurpose)
+    ? ["Images", "Video tour", "Written content", "Something else"]
+    : ["Text", "Image", "Audio", "Video", "Vision"];
+
+  return {
+    reply: `${prefix}I'd love to help! What type of output does your app need?`,
+    uiType: "chips",
+    uiData: { options },
+    nextStep: 0,
+    coins: null
+  };
+}
+
+/* ────────────────────────────────────────────
+   BUDGET STEP BUILDER (Step 4)
+   ──────────────────────────────────────────── */
+function buildBudgetStep(session) {
+  const budgetUi = buildBudgetUi(session);
+  const leanCost = budgetUi.options.lean.joules;
+  const userBalance = mockData.userBalance;
+
+  // Check if user has enough joules
+  if (userBalance < leanCost) {
+    session.step = 5;
+    session.budgetPath = "bounty";
+    session.awaitingConfirmation = true;
+    session.confirmStep = 5;
+
+    const selectedModel = findModel(session.appType, session.modelId);
+    return {
+      reply: "Your current balance might not cover this. No worries — I can post this as a bounty instead, where creators will bid on your project.",
+      uiType: "bounty_fallback",
+      uiData: {
+        appName: session.seoData.appName,
+        promptTemplate: session.promptData && session.promptData.userPrompt,
+        modelName: selectedModel ? selectedModel.name : session.modelId,
+        userBalance,
+        leanCost
+      },
+      nextStep: 5,
+      coins: null,
+      confirm: {
+        summary: "Would you like to post this as a bounty instead?",
+        detail: "Creators on RentPrompts will bid on your project within 24-48 hours."
+      }
+    };
+  }
+
+  // Enough joules → show budget cards
+  session.step = 5;
+  session.budgetPath = "publish";
+  return {
+    reply: "Your app is ready! Pick a publishing plan:",
+    uiType: "budget_cards",
+    uiData: budgetUi,
+    nextStep: 5,
+    coins: null,
+    confirm: {
+      summary: "Which plan works best for you?",
+      detail: `Your balance: ${userBalance.toLocaleString()} joules`
+    }
   };
 }
 

@@ -4,7 +4,7 @@ function renderPromptWithHighlights(text) {
   const parts = String(text || "").split(/(\$\$[a-zA-Z_]+)/g);
   return parts.map((part, i) =>
     part.startsWith("$$") ? (
-      <span key={`${part}-${i}`} className="font-bold text-rent-purple">{part}</span>
+      <span key={`${part}-${i}`} className="rounded-md bg-rent-purple/15 px-1.5 py-0.5 font-bold text-rent-purple">{part}</span>
     ) : (
       <span key={`${part}-${i}`}>{part}</span>
     )
@@ -23,7 +23,7 @@ function PromptPreviewCard({ data, onSendMessage }) {
   }
 
   return (
-    <div className="rounded-2xl border border-rent-border bg-rent-card p-4 shadow-soft sm:rounded-[22px] sm:p-5">
+    <div className="glass-panel rounded-2xl border border-rent-border p-4 shadow-soft sm:rounded-[22px] sm:p-5">
       <div className="flex flex-wrap items-center justify-between gap-2 sm:gap-3">
         <div>
           <h3 className="text-base font-extrabold text-white sm:text-lg">Prompt Preview</h3>
@@ -32,17 +32,18 @@ function PromptPreviewCard({ data, onSendMessage }) {
         <div className="flex flex-wrap gap-1.5 text-[10px] text-white/45 sm:gap-2 sm:text-xs">
           {data.advancedSettings?.aspectRatio ? <span className="rounded-full border border-white/8 bg-white/4 px-2.5 py-0.5 sm:px-3 sm:py-1">Aspect {data.advancedSettings.aspectRatio}</span> : null}
           {data.advancedSettings?.quality ? <span className="rounded-full border border-white/8 bg-white/4 px-2.5 py-0.5 sm:px-3 sm:py-1">Quality {data.advancedSettings.quality}</span> : null}
+          {data.advancedSettings?.duration ? <span className="rounded-full border border-white/8 bg-white/4 px-2.5 py-0.5 sm:px-3 sm:py-1">Duration {data.advancedSettings.duration}</span> : null}
         </div>
       </div>
 
-      <div className="mt-4 rounded-xl border border-rent-border bg-rent-surface p-3 font-mono text-xs leading-6 text-white/80 sm:mt-5 sm:rounded-2xl sm:p-4 sm:text-sm sm:leading-7">
+      <div className="mt-4 rounded-xl border border-rent-border bg-rent-surface/80 p-3 font-mono text-xs leading-6 text-white/80 sm:mt-5 sm:rounded-2xl sm:p-4 sm:text-sm sm:leading-7">
         {renderPromptWithHighlights(data.userPrompt)}
       </div>
 
       {data.negativePrompt ? (
-        <div className="mt-3 rounded-xl border border-red-500/15 bg-red-500/5 p-3 sm:mt-4 sm:rounded-2xl sm:p-4">
+        <div className="mt-3 rounded-xl border border-red-500/15 bg-rent-surface/60 p-3 sm:mt-4 sm:rounded-2xl sm:p-4">
           <div className="text-[10px] font-bold uppercase tracking-[0.18em] text-red-200/60 sm:text-xs">Negative prompt</div>
-          <div className="mt-1.5 font-mono text-xs leading-6 text-red-100/75 sm:mt-2 sm:text-sm sm:leading-7">{data.negativePrompt}</div>
+          <div className="mt-1.5 font-mono text-xs leading-6 text-red-100/65 sm:mt-2 sm:text-sm sm:leading-7">{data.negativePrompt}</div>
         </div>
       ) : null}
 
@@ -54,24 +55,31 @@ function PromptPreviewCard({ data, onSendMessage }) {
         ))}
       </div>
 
+      {/* Prompt explanation */}
+      {data.promptExplanation ? (
+        <p className="mt-3 text-xs italic leading-5 text-white/30 sm:mt-4 sm:text-sm sm:leading-6">
+          💡 {data.promptExplanation}
+        </p>
+      ) : null}
+
       {isEditing ? (
-        <div className="mt-4 flex flex-col gap-2.5 rounded-xl border border-rent-border bg-black/15 p-3 sm:mt-5 sm:gap-3 sm:rounded-2xl sm:p-4">
+        <div className="mt-4 flex flex-col gap-2.5 rounded-xl border border-rent-border bg-rent-surface/80 p-3 sm:mt-5 sm:gap-3 sm:rounded-2xl sm:p-4">
           <input
             value={instruction}
             onChange={(e) => setInstruction(e.target.value)}
             placeholder="Example: make it feel more premium and reduce motion."
-            className="h-10 rounded-xl border border-rent-border bg-rent-surface px-3 text-xs text-white outline-none placeholder:text-white/30 sm:h-12 sm:px-4 sm:text-sm"
+            className="h-10 rounded-xl border border-rent-border bg-rent-bg px-3 text-xs text-white outline-none placeholder:text-white/30 transition focus:border-rent-purple/40 sm:h-12 sm:px-4 sm:text-sm"
           />
           <div className="flex flex-wrap gap-2 sm:gap-3">
             <button type="button" onClick={submitEdit} className="btn-cta h-9 rounded-xl px-4 text-xs font-bold text-white sm:h-11 sm:px-5 sm:text-sm">Apply edit</button>
-            <button type="button" onClick={() => { setInstruction(""); setIsEditing(false); }} className="h-9 rounded-xl border border-rent-border bg-rent-elevated px-4 text-xs font-semibold text-white/65 sm:h-11 sm:px-5 sm:text-sm">Cancel</button>
+            <button type="button" onClick={() => { setInstruction(""); setIsEditing(false); }} className="h-9 rounded-xl border border-rent-border bg-rent-elevated px-4 text-xs font-semibold text-white/50 transition hover:text-white/80 sm:h-11 sm:px-5 sm:text-sm">Cancel</button>
           </div>
         </div>
       ) : null}
 
       <div className="mt-4 flex flex-wrap gap-2 sm:mt-5 sm:gap-3">
         <button type="button" onClick={() => onSendMessage("Looks good")} className="btn-cta h-10 rounded-xl px-4 text-xs font-bold text-white sm:h-12 sm:px-5 sm:text-sm">Looks good ✓</button>
-        <button type="button" onClick={() => setIsEditing(true)} className="h-10 rounded-xl border border-rent-border bg-rent-elevated px-4 text-xs font-semibold text-white/65 transition hover:border-rent-border-light sm:h-12 sm:px-5 sm:text-sm">Edit this</button>
+        <button type="button" onClick={() => setIsEditing(true)} className="h-10 rounded-xl border border-rent-border bg-rent-elevated px-4 text-xs font-semibold text-white/50 transition hover:border-rent-border-light hover:text-white/80 sm:h-12 sm:px-5 sm:text-sm">Edit this</button>
       </div>
     </div>
   );

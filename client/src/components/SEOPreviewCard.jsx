@@ -30,7 +30,7 @@ function SEOPreviewCard({ data, onSendMessage }) {
   }
 
   return (
-    <div className="rounded-2xl border border-rent-border bg-rent-card p-4 shadow-soft sm:rounded-[22px] sm:p-5">
+    <div className="glass-panel rounded-2xl border border-rent-border p-4 shadow-soft sm:rounded-[22px] sm:p-5">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0">
           <div className="text-[10px] font-semibold uppercase tracking-[0.2em] text-white/35 sm:text-xs">SEO Preview</div>

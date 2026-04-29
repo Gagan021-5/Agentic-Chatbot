@@ -1,8 +1,8 @@
-import { GoogleGenerativeAI } from "@google/generative-ai";
+import OpenAI from "openai";
 import MODELS from "./models.js";
-const geminiApiKey = process.env.GEMINI_API_KEY;
 
-const EXTRACTION_PROMPT = `You are an AI app creation assistant for RentPrompts.
+// Keep old exports needed by stepRouter and groq
+export const EXTRACTION_PROMPT = `You are an AI app creation assistant for RentPrompts.
 Extract structured data from the user's message.
 Handle any language: English, Hindi, Hinglish, slang, typos.
 Return ONLY valid JSON. No explanation. No markdown.
@@ -25,124 +25,46 @@ Output this exact schema:
   oneLineUnderstanding: string
 }`;
 
-const PROMPT_TEMPLATE_SYSTEM = `You are an expert AI app prompt engineer for RentPrompts.
-Generate a production-ready prompt template using $$variable
-syntax for all user inputs.
-
-Rules:
-- Every input end-user will provide = $$variableName
-- Image apps: include $$subject $$style $$mood
-- Video apps: include $$scene $$duration $$camera_movement
-- Text apps: include $$topic $$tone $$audience $$length
-- Audio apps: include $$text $$voice $$style
-- Make negative prompts for image and video types only
-
-Return ONLY valid JSON:
-{
-  userPrompt: string,
-  negativePrompt: string|null,
-  acceptImageInput: boolean,
-  variablesUsed: string[],
-  advancedSettings: {
-    aspectRatio: string|null,
-    quality: string|null
-  }
-}`;
-
-const SEO_SYSTEM = `Generate SEO metadata for an AI app on RentPrompts marketplace.
-Be specific, creative, keyword-rich.
-
-Return ONLY valid JSON:
-{
-  appName: string (max 55 chars, catchy),
-  appDescription: string (max 155 chars, mentions model + use case),
-  tags: string[] (10 tags, lowercase, hyphens not spaces),
-  category: string,
-  suggestedPrice: number (coins per run, based on model cost)
-}`;
-
-function hasRealValue(value) {
-  return Boolean(value && !/^your_.+_here$/i.test(value));
-}
-
-const genAI = hasRealValue(geminiApiKey) ? new GoogleGenerativeAI(geminiApiKey) : null;
-
-function getGeminiModel(systemInstruction) {
-  if (!genAI) {
-    return null;
-  }
-
-  return genAI.getGenerativeModel({
-    model: "gemini-1.5-flash",
-    systemInstruction
-  });
-}
-
-function safeJsonParse(text) {
-  try {
-    return JSON.parse(text);
-  } catch (error) {
-    return null;
-  }
-}
-
-function getTextPart(result) {
-  const text = result && result.response && typeof result.response.text === "function" ? result.response.text() : "";
-  return text || "";
-}
-
-function detectLanguage(message) {
-  const lower = message.toLowerCase();
-  const hindiSignals = ["mujhe", "banana", "banani", "hai", "likhta", "likh", "jo", "ke liye", "karna", "ek "];
-
-  if (hindiSignals.some((word) => lower.includes(word))) {
-    return "Hindi";
-  }
-
-  return "English";
-}
-
-function detectBudget(message) {
-  const lower = message.toLowerCase();
-
-  if (lower.includes("free")) return { value: "free", confidence: "HIGH" };
-  if (lower.includes("cheap") || lower.includes("low budget") || lower.includes("budget")) return { value: "low", confidence: "MEDIUM" };
-  if (lower.includes("premium") || lower.includes("quality")) return { value: "high", confidence: "MEDIUM" };
-  if (lower.includes("ultra") || lower.includes("best possible")) return { value: "ultra", confidence: "HIGH" };
-
-  return { value: null, confidence: "LOW" };
-}
-
 function extractFeatures(message) {
   const lower = message.toLowerCase();
   const features = [];
-
   if (lower.includes("blog")) features.push("blog generation");
   if (lower.includes("animate")) features.push("animation workflow");
   if (lower.includes("photo") || lower.includes("image")) features.push("image input");
   if (lower.includes("cinematic")) features.push("cinematic styling");
   if (lower.includes("voice")) features.push("voice output");
   if (lower.includes("seo")) features.push("seo metadata");
-
   return features.slice(0, 5);
+}
+
+function detectLanguage(message) {
+  const lower = message.toLowerCase();
+  const hindiSignals = ["mujhe", "banana", "banani", "hai", "likhta", "likh", "jo", "ke liye", "karna", "ek "];
+  if (hindiSignals.some((word) => lower.includes(word))) return "Hindi";
+  return "English";
+}
+
+function detectBudget(message) {
+  const lower = message.toLowerCase();
+  if (lower.includes("free")) return { value: "free", confidence: "HIGH" };
+  if (lower.includes("cheap") || lower.includes("low budget") || lower.includes("budget")) return { value: "low", confidence: "MEDIUM" };
+  if (lower.includes("premium") || lower.includes("quality")) return { value: "high", confidence: "MEDIUM" };
+  if (lower.includes("ultra") || lower.includes("best possible")) return { value: "ultra", confidence: "HIGH" };
+  return { value: null, confidence: "LOW" };
 }
 
 function inferAppType(message) {
   const lower = message.toLowerCase();
-
   if (/(video|animate|reel|cinematic|movie)/.test(lower)) return { value: "video", confidence: "HIGH" };
   if (/(blog|write|writer|copy|text|article|caption)/.test(lower)) return { value: "text", confidence: "HIGH" };
   if (/(image|photo|picture|poster|thumbnail|logo|design)/.test(lower)) return { value: "image", confidence: "HIGH" };
   if (/(voice|audio|music|podcast|song|speech)/.test(lower)) return { value: "audio", confidence: "HIGH" };
   if (/(vision|analy(s|z)e|ocr|scan|detect|inspect)/.test(lower)) return { value: "vision", confidence: "HIGH" };
-  if (/(clinic|hospital|business|website)/.test(lower)) return { value: null, confidence: "LOW" };
-
   return { value: null, confidence: "LOW" };
 }
 
 function inferTone(message) {
   const lower = message.toLowerCase();
-
   if (/(asap|urgent|quick|jaldi|immediately|fast)/.test(lower)) return "urgent";
   if (/(please|kindly)/.test(lower)) return "formal";
   if (/(maybe|something|not sure|idk)/.test(lower)) return "unsure";
@@ -153,19 +75,16 @@ function buildOneLineUnderstanding(extraction) {
   if (extraction.appType === "video" && extraction.wantsImageInput) {
     return "you want a video app that turns photos into cinematic clips";
   }
-
   if (extraction.appType === "text" && /blog/i.test(extraction.appPurpose)) {
     return "you want a text app that writes blogs";
   }
-
   if (extraction.appType) {
     return `you want a ${extraction.appType} app for ${extraction.appPurpose || "your use case"}`;
   }
-
   return extraction.appPurpose || "you want help shaping an app idea";
 }
 
-function normalizeExtraction(raw, fallbackMessage) {
+export function normalizeExtraction(raw, fallbackMessage) {
   const message = fallbackMessage || "";
   const inferred = inferAppType(message);
   const budget = detectBudget(message);
@@ -206,314 +125,265 @@ function normalizeExtraction(raw, fallbackMessage) {
   if (!extraction.oneLineUnderstanding) {
     extraction.oneLineUnderstanding = buildOneLineUnderstanding(extraction);
   }
-
   if (!extraction.appType) {
     extraction.missingFields = Array.from(new Set([...(extraction.missingFields || []), "appType"]));
   }
-
   if (!extraction.targetUsers || extraction.targetUsers === "general users") {
     extraction.missingFields = Array.from(new Set([...(extraction.missingFields || []), "targetUsers"]));
   }
-
   return extraction;
 }
 
-function getSelectedModel(session) {
-  const list = MODELS[session.appType] || [];
-  return list.find((model) => model.id === session.modelId) || null;
+export function applyPromptInstruction(promptData, instruction) {
+  const cleanInstruction = (instruction || "").trim();
+  if (!cleanInstruction) return promptData;
+  const suffix = ` Additional instruction: ${cleanInstruction}.`;
+  const nextPrompt = promptData.userPrompt.includes(cleanInstruction) ? promptData.userPrompt : `${promptData.userPrompt}${suffix}`;
+  return { ...promptData, userPrompt: nextPrompt };
 }
 
-function buildPromptTemplateFromSession(session) {
-  const extraction = session.extraction || {};
-  const selectedModel = getSelectedModel(session);
-  const acceptsImageInput = Boolean((selectedModel && selectedModel.supports_image_input) || extraction.wantsImageInput);
-
-  if (session.appType === "video") {
-    return {
-      userPrompt: acceptsImageInput
-        ? "Transform $$photo into a polished cinematic video for $$audience. Keep the look $$style, the mood $$mood, the scene focus on $$scene, use $$camera_movement, and keep the final runtime at $$duration."
-        : "Create a cinematic video about $$scene for $$audience with a $$style look, $$camera_movement camera movement, $$mood atmosphere, and $$duration runtime.",
-      negativePrompt: "blurry frames, warped motion, flicker, distorted faces, bad anatomy, low detail, noisy lighting",
-      acceptImageInput: acceptsImageInput,
-      variablesUsed: acceptsImageInput
-        ? ["photo", "style", "mood", "scene", "duration", "camera_movement", "audience"]
-        : ["scene", "style", "mood", "duration", "camera_movement", "audience"],
-      advancedSettings: {
-        aspectRatio: "16:9",
-        quality: "high"
-      }
-    };
-  }
-
-  if (session.appType === "image") {
-    return {
-      userPrompt: "Generate an image of $$subject in a $$style style with a $$mood mood for $$audience.",
-      negativePrompt: "blurry, distorted, low quality, bad composition, extra limbs, watermark, text artifacts",
-      acceptImageInput: acceptsImageInput,
-      variablesUsed: ["subject", "style", "mood", "audience"],
-      advancedSettings: {
-        aspectRatio: "1:1",
-        quality: "high"
-      }
-    };
-  }
-
-  if (session.appType === "audio") {
-    return {
-      userPrompt: "Turn $$text into audio using a $$voice voice in a $$style style for $$audience.",
-      negativePrompt: null,
-      acceptImageInput: false,
-      variablesUsed: ["text", "voice", "style", "audience"],
-      advancedSettings: {
-        aspectRatio: null,
-        quality: "studio"
-      }
-    };
-  }
-
-  if (session.appType === "vision") {
-    return {
-      userPrompt: "Analyze $$image for $$goal and return results suited for $$audience with a $$tone tone.",
-      negativePrompt: null,
-      acceptImageInput: true,
-      variablesUsed: ["image", "goal", "audience", "tone"],
-      advancedSettings: {
-        aspectRatio: null,
-        quality: "detailed"
-      }
-    };
-  }
-
+export function buildPromptTemplateFromSession(session) {
+  // Dummy implementation for stepRouter's synchronous fallback needs
   return {
     userPrompt: "Write about $$topic in a $$tone tone for $$audience at $$length length, optimized for $$goal.",
     negativePrompt: null,
     acceptImageInput: false,
     variablesUsed: ["topic", "tone", "audience", "length", "goal"],
-    advancedSettings: {
-      aspectRatio: null,
-      quality: "balanced"
-    }
+    advancedSettings: { aspectRatio: null, quality: "balanced" }
   };
 }
 
-function applyPromptInstruction(promptData, instruction) {
-  const cleanInstruction = (instruction || "").trim();
 
-  if (!cleanInstruction) {
-    return promptData;
+// ==========================================
+// OPENROUTER IMPLEMENTATION
+// ==========================================
+
+const client = new OpenAI({
+  baseURL: 'https://openrouter.ai/api/v1',
+  apiKey: process.env.OPENROUTER_API_KEY,
+  defaultHeaders: {
+    'HTTP-Referer': 'http://localhost:5173',
+    'X-Title': 'RentPrompts Agent Demo',
   }
+});
 
-  const suffix = ` Additional instruction: ${cleanInstruction}.`;
-  const nextPrompt = promptData.userPrompt.includes(cleanInstruction) ? promptData.userPrompt : `${promptData.userPrompt}${suffix}`;
-
-  return {
-    ...promptData,
-    userPrompt: nextPrompt
-  };
-}
-
-function computeSuggestedPrice(modelCost) {
-  if (!modelCost || modelCost <= 0) {
-    return 5;
-  }
-
-  return Math.max(5, Math.round(modelCost * 1.8 + 2));
-}
-
-function buildSeoFromSession(session) {
-  const appType = session.appType || "text";
-  const modelId = session.modelId || "custom-model";
-  const extraction = session.extraction || {};
-
-  let appName = "AI App Builder";
-  let category = appType;
-  let description = `Built with ${modelId} for a flexible ${appType} workflow.`;
-  let tags = [
-    "ai-app",
-    `${appType}-generator`,
-    "rentprompts",
-    "automation",
-    "workflow",
-    "creator-tools",
-    "marketplace-app",
-    "json-ready",
-    "prompt-template",
-    "demo-build"
+async function callOpenRouter(systemPrompt, userContent, retries = 2) {
+  const models = [
+    'google/gemini-1.5-flash',
+    'meta-llama/llama-3.3-70b-instruct'
   ];
 
-  if (appType === "video" && extraction.wantsImageInput) {
-    appName = "Photo to Cinematic Video AI";
-    description = `Turn photos into cinematic videos with ${modelId} using image-guided motion, style controls, and faster prompt-to-publish setup.`;
-    tags = [
-      "photo-to-video",
-      "cinematic-video",
-      "image-to-video",
-      "ai-video-generator",
-      "motion-control",
-      "content-creation",
-      "rentprompts",
-      "video-automation",
-      "creator-tools",
-      "visual-storytelling"
-    ];
-  } else if (appType === "text") {
-    appName = /blog/i.test(extraction.appPurpose || "") ? "AI Blog Writer Pro" : "Smart Text Generator AI";
-    description = `Create polished ${/blog/i.test(extraction.appPurpose || "") ? "blog posts" : "text outputs"} with ${modelId} using prompt variables built for repeatable publishing.`;
-    tags = [
-      "ai-writer",
-      "blog-generator",
-      "content-marketing",
-      "text-automation",
-      "prompt-template",
-      "rentprompts",
-      "seo-writing",
-      "copywriting-ai",
-      "creator-tools",
-      "writing-workflow"
-    ];
-  } else if (appType === "image") {
-    appName = "Creative Image Prompt Studio";
-    description = `Generate consistent image outputs with ${modelId} using variable-driven prompts for style, subject, and mood.`;
-    tags = [
-      "image-generator",
-      "prompt-studio",
-      "creative-ai",
-      "visual-design",
-      "rentprompts",
-      "art-direction",
-      "image-workflow",
-      "style-control",
-      "creative-tools",
-      "marketing-visuals"
-    ];
-  }
+  for (let i = 0; i < models.length; i++) {
+    try {
+      const response = await client.chat.completions.create({
+        model: models[i],
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: userContent }
+        ],
+        response_format: { type: 'json_object' },
+        temperature: 0.7,
+        max_tokens: 1000,
+      });
 
-  return {
-    appName: appName.slice(0, 55),
-    appDescription: description.slice(0, 155),
-    tags: tags.slice(0, 10),
-    category,
-    suggestedPrice: computeSuggestedPrice(session.modelCost)
-  };
-}
+      const raw = response.choices[0].message.content;
+      
+      const cleaned = raw
+        .replace(/```json/gi, '')
+        .replace(/```/g, '')
+        .trim();
 
-async function runGeminiJson(systemInstruction, payload) {
-  const model = getGeminiModel(systemInstruction);
+      return JSON.parse(cleaned);
 
-  if (!model) {
-    return null;
-  }
-
-  const result = await model.generateContent({
-    generationConfig: {
-      responseMimeType: "application/json"
-    },
-    contents: [
-      {
-        role: "user",
-        parts: [{ text: payload }]
+    } catch (err) {
+      const is429 = err?.status === 429 || 
+                    err?.message?.includes('429') ||
+                    err?.message?.includes('quota') ||
+                    err?.message?.includes('rate');
+      
+      if (is429 && i < models.length - 1) {
+        console.log(`[OpenRouter] ${models[i]} rate limited, trying ${models[i+1]}...`);
+        await new Promise(r => setTimeout(r, 1000));
+        continue;
       }
-    ]
-  });
-
-  return safeJsonParse(getTextPart(result));
-}
-
-async function extractRequirementsWithGemini(message, history) {
-  const payload = JSON.stringify({
-    message,
-    history: Array.isArray(history) ? history.slice(-8) : []
-  });
-
-  try {
-    const response = await runGeminiJson(EXTRACTION_PROMPT, payload);
-    return normalizeExtraction(response, message);
-  } catch (error) {
-    return normalizeExtraction(null, message);
-  }
-}
-
-async function generatePromptTemplate(session, editInstruction) {
-  const baseFallback = buildPromptTemplateFromSession(session);
-  const fallback = editInstruction ? applyPromptInstruction(baseFallback, editInstruction) : baseFallback;
-
-  const payload = JSON.stringify({
-    appType: session.appType,
-    modelId: session.modelId,
-    modelCost: session.modelCost,
-    extraction: session.extraction,
-    existingPromptData: session.promptData,
-    editInstruction: editInstruction || null
-  });
-
-  try {
-    const response = await runGeminiJson(PROMPT_TEMPLATE_SYSTEM, payload);
-
-    if (!response) {
-      return fallback;
+      
+      throw err;
     }
-
-    return {
-      userPrompt: typeof response.userPrompt === "string" && response.userPrompt.trim() ? response.userPrompt.trim() : fallback.userPrompt,
-      negativePrompt: typeof response.negativePrompt === "string" && response.negativePrompt.trim() ? response.negativePrompt.trim() : fallback.negativePrompt,
-      acceptImageInput: typeof response.acceptImageInput === "boolean" ? response.acceptImageInput : fallback.acceptImageInput,
-      variablesUsed: Array.isArray(response.variablesUsed) && response.variablesUsed.length ? response.variablesUsed : fallback.variablesUsed,
-      advancedSettings: {
-        aspectRatio:
-          response.advancedSettings && typeof response.advancedSettings.aspectRatio === "string"
-            ? response.advancedSettings.aspectRatio
-            : fallback.advancedSettings.aspectRatio,
-        quality:
-          response.advancedSettings && typeof response.advancedSettings.quality === "string"
-            ? response.advancedSettings.quality
-            : fallback.advancedSettings.quality
-      }
-    };
-  } catch (error) {
-    return fallback;
   }
 }
 
-async function generateSEO(session) {
-  const fallback = buildSeoFromSession(session);
+export async function generatePromptTemplate(session) {
+  const systemPrompt = `You are an expert AI app prompt engineer for RentPrompts marketplace. 
+You have a high level of understanding of human needs.
 
-  const payload = JSON.stringify({
-    appType: session.appType,
-    modelId: session.modelId,
-    modelCost: session.modelCost,
-    extraction: session.extraction,
-    promptData: session.promptData
-  });
+Create production-ready prompt templates using $$variable syntax for every input the end-user will provide.
+
+Variable rules per app type:
+- image: use $$subject $$style $$mood $$lighting $$background
+- video: use $$scene $$duration $$camera_movement $$style $$mood
+- text:  use $$topic $$tone $$audience $$length $$format
+- audio: use $$text $$voice_style $$pace $$emotion
+- vision: use $$image_description $$analysis_type $$output_format
+
+Make prompts detailed, professional, and effective.
+Negative prompts for image and video types only.
+
+Return ONLY valid JSON with this exact schema:
+{
+  "userPrompt": "full prompt string with $$variables",
+  "negativePrompt": "string or null",
+  "acceptImageInput": true or false,
+  "variablesUsed": ["$$var1", "$$var2"],
+  "variableDescriptions": {
+    "$$var1": "what the user should enter here"
+  },
+  "advancedSettings": {
+    "aspectRatio": "16:9 or 1:1 or 9:16 or null",
+    "quality": "standard or high or null",
+    "duration": "5s or 10s or null"
+  },
+  "promptExplanation": "one sentence why this prompt works"
+}`;
+
+  const userContent = `Generate a prompt template for this app:
+App type: ${session.appType}
+Purpose: ${session.extraction?.appPurpose || 'not specified'}
+Key features: ${JSON.stringify(session.extraction?.keyFeatures || [])}
+Target users: ${session.extraction?.targetUsers || 'general users'}
+Selected model: ${session.modelId || 'not selected yet'}
+Wants image input: ${session.extraction?.wantsImageInput || false}`;
 
   try {
-    const response = await runGeminiJson(SEO_SYSTEM, payload);
-
-    if (!response) {
-      return fallback;
-    }
-
+    const result = await callOpenRouter(systemPrompt, userContent);
+    console.log('[Sub-agent 2] Prompt template generated OK');
+    return result;
+  } catch (err) {
+    console.error('[Sub-agent 2] Error:', err.message);
     return {
-      appName: typeof response.appName === "string" && response.appName.trim() ? response.appName.trim().slice(0, 55) : fallback.appName,
-      appDescription:
-        typeof response.appDescription === "string" && response.appDescription.trim()
-          ? response.appDescription.trim().slice(0, 155)
-          : fallback.appDescription,
-      tags: Array.isArray(response.tags) && response.tags.length ? response.tags.slice(0, 10) : fallback.tags,
-      category: typeof response.category === "string" && response.category.trim() ? response.category.trim() : fallback.category,
-      suggestedPrice: computeSuggestedPrice(session.modelCost)
+      userPrompt: `Create content about $$topic in $$style style for $$audience`,
+      negativePrompt: null,
+      acceptImageInput: false,
+      variablesUsed: ['$$topic', '$$style', '$$audience'],
+      variableDescriptions: {
+        '$$topic': 'Main subject or theme',
+        '$$style': 'Desired style or tone',
+        '$$audience': 'Target audience'
+      },
+      advancedSettings: { aspectRatio: null, quality: null, duration: null },
+      promptExplanation: 'Generic template — please refine'
     };
-  } catch (error) {
-    return fallback;
   }
 }
 
-export {
-  EXTRACTION_PROMPT,
-  extractRequirementsWithGemini,
-  generatePromptTemplate,
-  generateSEO,
-  normalizeExtraction,
-  applyPromptInstruction,
-  buildPromptTemplateFromSession,
-  buildSeoFromSession
-};
+export async function generateSEO(session) {
+  const systemPrompt = `You are an SEO expert for AI app marketplaces with deep understanding of what users search for.
+
+Generate metadata that maximizes discoverability on RentPrompts marketplace.
+
+Rules:
+- App name: catchy, specific, under 55 characters
+- Description: mentions model + main benefit + target user,
+  under 155 characters, no filler words
+- Tags: exactly 10 tags, all lowercase, 
+  use hyphens not spaces (e.g. image-generation not image generation)
+- Category must be one of: creative, business, education,
+  healthcare, entertainment, productivity, social, other
+- suggestedPrice: slightly above model cost so creator profits
+  (minimum model cost + 20% margin, rounded to nearest 0.5)
+
+Return ONLY valid JSON with this exact schema:
+{
+  "appName": "string max 55 chars",
+  "appDescription": "string max 155 chars",
+  "tags": ["tag1", "tag2", "tag3", "tag4", "tag5", 
+           "tag6", "tag7", "tag8", "tag9", "tag10"],
+  "category": "one of the categories listed above",
+  "suggestedPrice": 12.5
+}`;
+
+  const userContent = `Generate SEO metadata for this AI app:
+App type: ${session.appType}
+Purpose: ${session.extraction?.appPurpose || 'AI powered app'}
+Target users: ${session.extraction?.targetUsers || 'general users'}
+Key features: ${JSON.stringify(session.extraction?.keyFeatures || [])}
+Selected model: ${session.modelId || 'unknown'}
+Cost per run: ${session.modelCost || 0} coins
+Prompt template: ${session.promptData?.userPrompt || 'not generated yet'}`;
+
+  try {
+    const result = await callOpenRouter(systemPrompt, userContent);
+    console.log('[Sub-agent 3] SEO generated OK');
+    return result;
+  } catch (err) {
+    console.error('[Sub-agent 3] Error:', err.message);
+    return {
+      appName: `AI ${session.appType || 'Content'} Generator`,
+      appDescription: `Generate ${session.appType} content with AI. Fast, easy, professional results.`,
+      tags: ['ai-generated', 'content-creation', 'automation',
+             'ai-tool', 'no-code', 'productivity',
+             session.appType || 'creative', 'rentprompts',
+             'generative-ai', 'easy-to-use'],
+      category: 'creative',
+      suggestedPrice: (session.modelCost || 5) * 1.2
+    };
+  }
+}
+
+export async function generateScope(session) {
+  const systemPrompt = `You are ARIA, an expert project scope analyst for RentPrompts bounty platform.
+
+Given an app description, generate a detailed scope breakdown exactly like this format:
+
+{
+  "scopeSummary": "one sentence describing total scope",
+  "totalItems": 7,
+  "totalHours": 57,
+  "items": [
+    {
+      "title": "Homepage with Interactive Hospital Image",
+      "complexity": "complex",
+      "priority": "Must Have",
+      "aiAssisted": false,
+      "estimatedHours": 14,
+      "description": "Design and implement a visually appealing homepage featuring an interactive image of the hospital."
+    }
+  ]
+}
+
+Rules:
+- Generate 5 to 8 scope items always
+- complexity: "simple" | "medium" | "complex"
+- priority: "Must Have" | "Should Have" | "Nice to Have"
+- aiAssisted: true if AI can help generate this content
+- estimatedHours: 3-20 based on complexity
+  simple=3-6h, medium=7-12h, complex=13-20h
+- Always start with the most critical Must Have items
+- Last 1-2 items should be Should Have or Nice to Have
+- Return ONLY valid JSON, no explanation`;
+
+  const userContent = `Generate scope for:
+App type: ${session.appType}
+Purpose: ${session.extraction?.appPurpose}
+Features requested: ${JSON.stringify(session.extraction?.keyFeatures || [])}
+Target users: ${session.extraction?.targetUsers}
+Prompt template: ${session.promptData?.userPrompt}`;
+
+  try {
+    const result = await callOpenRouter(systemPrompt, userContent);
+    console.log('[Scope] Scope generated OK —', result.totalItems, 'items');
+    return result;
+  } catch (err) {
+    console.error('[Scope] Error:', err.message);
+    return {
+      scopeSummary: 'Core app features and essential components',
+      totalItems: 5,
+      totalHours: 32,
+      items: [
+        { title: 'Core App Interface', complexity: 'complex', priority: 'Must Have', aiAssisted: false, estimatedHours: 12, description: 'Main user interface and primary functionality.' },
+        { title: 'AI Model Integration', complexity: 'complex', priority: 'Must Have', aiAssisted: false, estimatedHours: 10, description: 'Connect and configure the selected AI model.' },
+        { title: 'Input/Output Handler', complexity: 'medium', priority: 'Must Have', aiAssisted: true, estimatedHours: 6, description: 'Handle user inputs and display AI outputs.' },
+        { title: 'Basic Styling', complexity: 'simple', priority: 'Should Have', aiAssisted: true, estimatedHours: 4, description: 'Clean, responsive visual design.' }
+      ]
+    };
+  }
+}

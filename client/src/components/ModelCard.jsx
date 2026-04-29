@@ -31,16 +31,24 @@ function formatCost(cost) {
 
 function ModelCard({ model, onSendMessage }) {
   const isUltra = model.tier === "ultra";
+  const isFree = model.cost === 0;
 
   return (
-    <div className="card-hover glass-panel flex h-full flex-col rounded-2xl border border-rent-border bg-rent-card/90 p-4 shadow-soft sm:rounded-[22px] sm:p-5">
+    <div className="card-hover group relative flex h-full flex-col overflow-hidden rounded-2xl border border-rent-border glass-panel p-4 shadow-soft sm:rounded-[22px] sm:p-5">
+      {/* Top accent glow on hover */}
+      <div className="pointer-events-none absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-rent-purple/0 to-transparent transition-all duration-300 group-hover:via-rent-purple/40" />
+
       <div className="flex items-start justify-between gap-2 sm:gap-3">
         <div className="min-w-0">
           <h3 className="text-base font-extrabold text-white sm:text-lg">{model.name}</h3>
           <p className="mt-1.5 text-xs leading-5 text-white/50 sm:mt-2 sm:text-sm sm:leading-6">{model.desc}</p>
         </div>
-        <div className="flex shrink-0 items-center gap-1 rounded-full border border-yellow-500/20 bg-yellow-500/8 px-2.5 py-1 text-[10px] font-bold text-yellow-300 sm:px-3 sm:py-1.5 sm:text-xs">
-          <CoinIcon />
+        <div className={`flex shrink-0 items-center gap-1.5 rounded-full border px-2.5 py-1 text-[10px] font-bold sm:px-3 sm:py-1.5 sm:text-xs ${
+          isFree
+            ? "border-green-500/20 bg-green-500/8 text-green-300"
+            : "border-yellow-500/20 bg-yellow-500/8 text-yellow-300"
+        }`}>
+          {isFree ? "🎉" : <CoinIcon />}
           {formatCost(model.cost)}
         </div>
       </div>
@@ -51,21 +59,32 @@ function ModelCard({ model, onSendMessage }) {
           {model.tier}
         </span>
         {model.supports_image_input ? (
-          <span className="rounded-full border border-white/8 bg-white/4 px-2.5 py-0.5 text-[10px] font-medium text-white/55 sm:px-3 sm:py-1 sm:text-xs">image input</span>
+          <span className="rounded-full border border-sky-500/15 bg-sky-500/8 px-2.5 py-0.5 text-[10px] font-medium text-sky-300/70 sm:px-3 sm:py-1 sm:text-xs">
+            🖼️ image input
+          </span>
         ) : null}
       </div>
 
-      <div className="mt-4 flex-1 rounded-xl border border-white/5 bg-black/15 p-3 text-xs leading-6 text-white/45 sm:mt-5 sm:rounded-2xl sm:p-4 sm:text-sm sm:leading-7">
-        Ideal for repeatable prompt workflows, clear pricing, and demo-ready marketplace positioning.
-      </div>
+      {/* Tags */}
+      {model.tags && model.tags.length > 0 ? (
+        <div className="mt-3 flex flex-wrap gap-1 sm:mt-4 sm:gap-1.5">
+          {model.tags.slice(0, 4).map((tag) => (
+            <span key={tag} className="rounded-md border border-white/5 bg-white/[0.03] px-2 py-0.5 text-[9px] font-medium text-white/30 sm:text-[10px]">
+              {tag}
+            </span>
+          ))}
+        </div>
+      ) : null}
 
-      <button
-        type="button"
-        onClick={() => onSendMessage(`Select ${model.id}`)}
-        className="btn-cta mt-4 h-10 w-full rounded-xl text-xs font-bold text-white sm:mt-5 sm:h-12 sm:text-sm"
-      >
-        Select
-      </button>
+      <div className="mt-auto pt-4 sm:pt-5">
+        <button
+          type="button"
+          onClick={() => onSendMessage(`Select ${model.id}`)}
+          className="btn-cta h-10 w-full rounded-xl text-xs font-bold text-white sm:h-12 sm:text-sm"
+        >
+          Select Model
+        </button>
+      </div>
     </div>
   );
 }

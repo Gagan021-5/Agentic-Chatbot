@@ -1,4 +1,7 @@
 import BudgetCards from "./BudgetCards";
+import ScopeCard from "./ScopeCard";
+import BountyFallbackCard from "./BountyFallbackCard";
+import ConfirmCard from "./ConfirmCard";
 import CostWarningCard from "./CostWarningCard";
 import ModelCard from "./ModelCard";
 import OptionChips from "./OptionChips";
@@ -56,7 +59,9 @@ function AgentUI({ message, onSendMessage, onResetSession }) {
   if (uiType === "prompt_preview") return <PromptPreviewCard data={uiData} onSendMessage={onSendMessage} />;
   if (uiType === "seo_preview") return <SEOPreviewCard data={uiData} onSendMessage={onSendMessage} />;
   if (uiType === "budget_cards") return <BudgetCards data={uiData} onSendMessage={onSendMessage} />;
+  if (uiType === "bounty_fallback") return <BountyFallbackCard data={uiData} onSendMessage={onSendMessage} />;
   if (uiType === "success") return <PublishSuccessCard data={uiData} onResetSession={onResetSession} />;
+  if (uiType === "scope") return <ScopeCard data={uiData} onSendMessage={onSendMessage} />;
   return null;
 }
 
@@ -82,6 +87,15 @@ function MessageBubble({ message, onSendMessage, onResetSession }) {
             <div className={message.text ? "mt-4 sm:mt-5" : ""}>
               <AgentUI message={message} onSendMessage={onSendMessage} onResetSession={onResetSession} />
             </div>
+          ) : null}
+          {/* ConfirmCard — shown after every agent step that needs confirmation */}
+          {!isUser && message.confirm ? (
+            <ConfirmCard
+              summary={message.confirm.summary}
+              detail={message.confirm.detail}
+              onYes={() => onSendMessage("Yes, proceed")}
+              onNo={(correction) => onSendMessage(`Change: ${correction}`)}
+            />
           ) : null}
         </div>
 
