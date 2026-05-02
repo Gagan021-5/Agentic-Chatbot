@@ -27,6 +27,9 @@ function createSession(sessionId) {
     step: 0,
     awaitingConfirmation: false,
     confirmStep: null,
+    awaitingDeepAnswer: false,
+    currentDeepField: null,
+    deepAnswers: {},
     appType: null,
     modelId: null,
     modelCost: null,
@@ -35,7 +38,12 @@ function createSession(sessionId) {
     scopeData: null,
     seoData: null,
     budgetPath: null,
-    history: []
+    history: [],
+    // Requirement gathering state machine
+    requirements: {},
+    currentField: null,
+    userType: "unknown",
+    enterpriseSignals: false
   };
 }
 

@@ -3,10 +3,12 @@ import ScopeCard from "./ScopeCard";
 import BountyFallbackCard from "./BountyFallbackCard";
 import ConfirmCard from "./ConfirmCard";
 import CostWarningCard from "./CostWarningCard";
+import InlineTextInput from "./InlineTextInput";
 import ModelCard from "./ModelCard";
 import OptionChips from "./OptionChips";
 import PromptPreviewCard from "./PromptPreviewCard";
 import PublishSuccessCard from "./PublishSuccessCard";
+import RequirementSummaryCard from "./RequirementSummaryCard";
 import SEOPreviewCard from "./SEOPreviewCard";
 
 function IconCopy() {
@@ -50,6 +52,7 @@ function renderText(text) {
 function AgentUI({ message, onSendMessage, onResetSession }) {
   const { uiType, uiData } = message;
   if (uiType === "chips") return <OptionChips options={uiData.options || []} onSendMessage={onSendMessage} />;
+  if (uiType === "text_input") return <InlineTextInput uiData={uiData} onSendMessage={onSendMessage} />;
   if (uiType === "models") return (
     <div className="grid gap-3 sm:gap-4 lg:grid-cols-3">
       {(uiData.models || []).map((m) => <ModelCard key={m.id} model={m} onSendMessage={onSendMessage} />)}
@@ -62,6 +65,7 @@ function AgentUI({ message, onSendMessage, onResetSession }) {
   if (uiType === "bounty_fallback") return <BountyFallbackCard data={uiData} onSendMessage={onSendMessage} />;
   if (uiType === "success") return <PublishSuccessCard data={uiData} onResetSession={onResetSession} />;
   if (uiType === "scope") return <ScopeCard data={uiData} onSendMessage={onSendMessage} />;
+  if (uiType === "confirm") return <RequirementSummaryCard data={uiData} />;
   return null;
 }
 

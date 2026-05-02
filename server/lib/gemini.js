@@ -2,27 +2,51 @@ import OpenAI from "openai";
 import MODELS from "./models.js";
 
 // Keep old exports needed by stepRouter and groq
-export const EXTRACTION_PROMPT = `You are an AI app creation assistant for RentPrompts.
-Extract structured data from the user's message.
-Handle any language: English, Hindi, Hinglish, slang, typos.
-Return ONLY valid JSON. No explanation. No markdown.
+export const EXTRACTION_PROMPT = `You are a strict data extraction engine for RentPrompts — a platform where users CREATE and PUBLISH AI-powered apps.
 
-Output this exact schema:
+Users describe an app they want to build.
+Your ONLY job: extract what they said. Never invent.
+
+APP TYPE RULES — read every word carefully:
+- "image" app: generates images, photos, portraits, transforms photos, superhero filter, avatar maker, logo maker, any visual output
+- "video" app: creates videos, animations, reels, cinematic clips, animates photos, talking avatars
+- "text" app: generates written content — blogs, emails, captions, scripts, stories, reports, product descriptions, workout PLANS, meal PLANS, diet plans, study guides, itineraries, any document or written plan output
+- "audio" app: voice, music, speech, podcast, sound effects, text to speech, transcription
+- "vision" app: analyzes images, reads text from images, detects objects, medical image analysis
+
+CRITICAL: A "planner" app (workout planner, meal planner, travel planner) = appType "text" BUT appPurpose must describe WHAT it plans, not just say "text generation"
+
+ANTI-HALLUCINATION:
+1. If user said nothing about target users → null
+2. If user said nothing about budget → null
+3. oneLineUnderstanding = rephrase ONLY what user said
+4. suggestedReply = one warm question about the MOST important unknown detail. Always a question.
+5. Never say "building my app" or repeat vague phrases
+6. Never invent features not mentioned by user
+
+ENTERPRISE SIGNALS — set enterpriseSignals:true if message contains any of:
+company, team, employees, scale, API, integrate, bulk, enterprise, SaaS, B2B, workflow, automate our, our company, our team, organization, department, staff
+
+Return ONLY valid JSON. No explanation. No markdown. No invented details.
+
 {
-  appType: 'text'|'image'|'audio'|'video'|'vision'|null,
-  appPurpose: string,
-  targetUsers: string,
-  keyFeatures: string[],
-  budget: 'free'|'low'|'medium'|'high'|'ultra'|null,
-  wantsImageInput: boolean,
-  detectedLanguage: string,
-  userTone: 'urgent'|'casual'|'formal'|'unsure',
-  confidence: {
-    appType: 'HIGH'|'MEDIUM'|'LOW',
-    budget: 'HIGH'|'MEDIUM'|'LOW'
+  "appType": "text|image|audio|video|vision|null",
+  "appPurpose": "describe what this app generates/does",
+  "targetUsers": "string or null",
+  "keyFeatures": [],
+  "budget": "free|low|medium|high|ultra|null",
+  "wantsImageInput": false,
+  "detectedLanguage": "english",
+  "userType": "enterprise|business|developer|normal|unknown",
+  "enterpriseSignals": false,
+  "userTone": "urgent|casual|formal|unsure",
+  "confidence": {
+    "appType": "HIGH|MEDIUM|LOW",
+    "budget": "HIGH|MEDIUM|LOW"
   },
-  missingFields: string[],
-  oneLineUnderstanding: string
+  "missingFields": [],
+  "oneLineUnderstanding": "only rephrase what user said",
+  "suggestedReply": "one warm follow-up question"
 }`;
 
 function extractFeatures(message) {
@@ -56,7 +80,7 @@ function detectBudget(message) {
 function inferAppType(message) {
   const lower = message.toLowerCase();
   if (/(video|animate|reel|cinematic|movie)/.test(lower)) return { value: "video", confidence: "HIGH" };
-  if (/(blog|write|writer|copy|text|article|caption)/.test(lower)) return { value: "text", confidence: "HIGH" };
+  if (/(blog|write|writer|copy|text|article|caption|planner|workout|meal|diet|itinerary|guide|report)/.test(lower)) return { value: "text", confidence: "HIGH" };
   if (/(image|photo|picture|poster|thumbnail|logo|design)/.test(lower)) return { value: "image", confidence: "HIGH" };
   if (/(voice|audio|music|podcast|song|speech)/.test(lower)) return { value: "audio", confidence: "HIGH" };
   if (/(vision|analy(s|z)e|ocr|scan|detect|inspect)/.test(lower)) return { value: "vision", confidence: "HIGH" };
@@ -104,13 +128,17 @@ export function normalizeExtraction(raw, fallbackMessage) {
 
   const extraction = {
     appType: raw && ["text", "image", "audio", "video", "vision"].includes(raw.appType) ? raw.appType : inferred.value,
-    appPurpose: raw && typeof raw.appPurpose === "string" && raw.appPurpose.trim() ? raw.appPurpose.trim() : message.trim() || "AI app creation",
-    targetUsers: raw && typeof raw.targetUsers === "string" && raw.targetUsers.trim() ? raw.targetUsers.trim() : "general users",
-    keyFeatures: raw && Array.isArray(raw.keyFeatures) ? raw.keyFeatures.filter(Boolean).slice(0, 6) : extractFeatures(message),
+    // ANTI-HALLUCINATION: null if user didn't describe it
+    appPurpose: raw && typeof raw.appPurpose === "string" && raw.appPurpose.trim() ? raw.appPurpose.trim() : null,
+    // ANTI-HALLUCINATION: null if user didn't mention them (never default to 'general users')
+    targetUsers: raw && typeof raw.targetUsers === "string" && raw.targetUsers.trim() && raw.targetUsers.trim() !== 'general users' ? raw.targetUsers.trim() : null,
+    keyFeatures: raw && Array.isArray(raw.keyFeatures) ? raw.keyFeatures.filter(Boolean).slice(0, 6) : [],
     budget: normalizedBudget,
     wantsImageInput: Boolean(raw && raw.wantsImageInput) || /(photo|image|picture)/.test(message.toLowerCase()),
     detectedLanguage: raw && typeof raw.detectedLanguage === "string" && raw.detectedLanguage.trim() ? raw.detectedLanguage.trim() : detectLanguage(message),
     userTone: raw && ["urgent", "casual", "formal", "unsure"].includes(raw.userTone) ? raw.userTone : inferTone(message),
+    userType: raw && ["enterprise", "business", "developer", "normal", "unknown"].includes(raw.userType) ? raw.userType : "unknown",
+    enterpriseSignals: Boolean(raw && raw.enterpriseSignals),
     confidence: {
       appType:
         raw && raw.confidence && ["HIGH", "MEDIUM", "LOW"].includes(raw.confidence.appType)
@@ -119,16 +147,19 @@ export function normalizeExtraction(raw, fallbackMessage) {
       budget: normalizedBudgetConfidence
     },
     missingFields: raw && Array.isArray(raw.missingFields) ? raw.missingFields.filter(Boolean) : [],
-    oneLineUnderstanding: raw && typeof raw.oneLineUnderstanding === "string" && raw.oneLineUnderstanding.trim() ? raw.oneLineUnderstanding.trim() : ""
+    oneLineUnderstanding: raw && typeof raw.oneLineUnderstanding === "string" && raw.oneLineUnderstanding.trim() ? raw.oneLineUnderstanding.trim() : "",
+    suggestedReply: raw && typeof raw.suggestedReply === "string" && raw.suggestedReply.trim() ? raw.suggestedReply.trim() : null
   };
 
-  if (!extraction.oneLineUnderstanding) {
+  if (!extraction.oneLineUnderstanding && extraction.appType) {
+    extraction.oneLineUnderstanding = `you want a ${extraction.appType} app`;
+  } else if (!extraction.oneLineUnderstanding) {
     extraction.oneLineUnderstanding = buildOneLineUnderstanding(extraction);
   }
   if (!extraction.appType) {
     extraction.missingFields = Array.from(new Set([...(extraction.missingFields || []), "appType"]));
   }
-  if (!extraction.targetUsers || extraction.targetUsers === "general users") {
+  if (!extraction.targetUsers) {
     extraction.missingFields = Array.from(new Set([...(extraction.missingFields || []), "targetUsers"]));
   }
   return extraction;
@@ -169,7 +200,7 @@ const client = new OpenAI({
 
 async function callOpenRouter(systemPrompt, userContent, retries = 2) {
   const models = [
-    'google/gemini-1.5-flash',
+    'google/gemini-1.5-pro',
     'meta-llama/llama-3.3-70b-instruct'
   ];
 
@@ -330,35 +361,54 @@ Prompt template: ${session.promptData?.userPrompt || 'not generated yet'}`;
 }
 
 export async function generateScope(session) {
-  const systemPrompt = `You are ARIA, an expert project scope analyst for RentPrompts bounty platform.
+  const systemPrompt = `You are ARIA, expert project scope analyst for RentPrompts bounty platform.
 
-Given an app description, generate a detailed scope breakdown exactly like this format:
+Generate a detailed scope like a senior project manager.
+Include realistic hour estimates and AI/human breakdown.
 
+Return ONLY valid JSON:
 {
-  "scopeSummary": "one sentence describing total scope",
-  "totalItems": 7,
-  "totalHours": 57,
+  "scopeSummary": "one sentence total scope description",
+  "totalItems": 5,
+  "totalHours": 43,
+  "aiAcceleratedPercent": 65,
+  "humanDirectedPercent": 35,
+  "freelancerCostMix": {
+    "frontend": { "items": 3, "percent": 60 },
+    "backend": { "items": 2, "percent": 40 }
+  },
   "items": [
     {
-      "title": "Homepage with Interactive Hospital Image",
-      "complexity": "complex",
+      "title": "Image Upload Functionality",
+      "complexity": "simple",
       "priority": "Must Have",
-      "aiAssisted": false,
-      "estimatedHours": 14,
-      "description": "Design and implement a visually appealing homepage featuring an interactive image of the hospital."
+      "aiAssisted": true,
+      "estimatedHours": 6,
+      "codeGenPercent": 70,
+      "aiRole": "AI generates React component code for file input and validation",
+      "humanRole": "Human decides UX flow, error handling, and security requirements",
+      "description": "Frontend component for image upload with preview"
     }
-  ]
+  ],
+  "constraints": {
+    "applicantLimit": 3,
+    "timeline": "1 week",
+    "pricingLane": "Web Application"
+  }
 }
 
 Rules:
-- Generate 5 to 8 scope items always
-- complexity: "simple" | "medium" | "complex"
-- priority: "Must Have" | "Should Have" | "Nice to Have"
-- aiAssisted: true if AI can help generate this content
-- estimatedHours: 3-20 based on complexity
-  simple=3-6h, medium=7-12h, complex=13-20h
-- Always start with the most critical Must Have items
-- Last 1-2 items should be Should Have or Nice to Have
+- 4-6 scope items always
+- complexity: simple|medium|complex
+- priority: Must Have|Should Have|Nice to Have
+- simple=4-6h, medium=7-12h, complex=13-20h
+- Last item should be Nice to Have
+- aiAcceleratedPercent = 60-80 for AI apps
+- humanDirectedPercent = 100 - aiAcceleratedPercent
+- codeGenPercent per task: simple=70-80, medium=60-70, complex=50-65
+- aiRole: what AI tools like Cursor/Copilot will do
+- humanRole: what requires human judgment
+- pricingLane: Web Application|Mobile App|AI Integration
 - Return ONLY valid JSON, no explanation`;
 
   const userContent = `Generate scope for:
@@ -366,6 +416,7 @@ App type: ${session.appType}
 Purpose: ${session.extraction?.appPurpose}
 Features requested: ${JSON.stringify(session.extraction?.keyFeatures || [])}
 Target users: ${session.extraction?.targetUsers}
+Deep answers: ${JSON.stringify(session.deepAnswers || {})}
 Prompt template: ${session.promptData?.userPrompt}`;
 
   try {
