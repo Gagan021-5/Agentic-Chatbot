@@ -1,5 +1,5 @@
-import { startTransition, useState } from "react";
-import { postAgentMessage } from "../utils/api";
+import { useEffect, startTransition, useState } from "react";
+import { postAgentMessage, fetchAgentHistory } from "../utils/api";
 
 const STORAGE_KEY = "rentprompts-agent-session-id";
 
@@ -37,6 +37,28 @@ function useChat() {
   const [messages, setMessages] = useState([buildWelcomeMessage()]);
   const [isLoading, setIsLoading] = useState(false);
   const [sessionId, setSessionId] = useState(getInitialSessionId);
+
+  useEffect(() => {
+    async function loadHistory() {
+      try {
+        const data = await fetchAgentHistory(sessionId);
+        if (data.history && data.history.length > 0) {
+          const loadedMessages = data.history.map((msg, index) => ({
+            id: `history-${index}`,
+            role: msg.role,
+            text: msg.content
+          }));
+          
+          startTransition(() => {
+            setMessages([buildWelcomeMessage(), ...loadedMessages]);
+          });
+        }
+      } catch (err) {
+        console.error("Failed to load history:", err);
+      }
+    }
+    loadHistory();
+  }, [sessionId]);
 
   async function sendMessage(text) {
     const cleanText = String(text || "").trim();

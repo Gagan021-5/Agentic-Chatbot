@@ -10,7 +10,7 @@ import PromptPreviewCard from "./PromptPreviewCard";
 import PublishSuccessCard from "./PublishSuccessCard";
 import RequirementSummaryCard from "./RequirementSummaryCard";
 import SEOPreviewCard from "./SEOPreviewCard";
-
+import AppPreviewCard from "./AppPreviewCard";
 function IconCopy() {
   return (
     <svg viewBox="0 0 20 20" fill="none" className="h-3.5 w-3.5">
@@ -49,13 +49,13 @@ function renderText(text) {
   ));
 }
 
-function AgentUI({ message, onSendMessage, onResetSession }) {
+function AgentUI({ message, onSendMessage, onResetSession, isLoading }) {
   const { uiType, uiData } = message;
-  if (uiType === "chips") return <OptionChips options={uiData.options || []} onSendMessage={onSendMessage} />;
+  if (uiType === "chips") return <OptionChips options={uiData.options || []} onSendMessage={onSendMessage} isLoading={isLoading} />;
   if (uiType === "text_input") return <InlineTextInput uiData={uiData} onSendMessage={onSendMessage} />;
   if (uiType === "models") return (
     <div className="grid gap-3 sm:gap-4 lg:grid-cols-3">
-      {(uiData.models || []).map((m) => <ModelCard key={m.id} model={m} onSendMessage={onSendMessage} />)}
+      {(uiData.models || []).map((m) => <ModelCard key={m.id} model={m} onSendMessage={onSendMessage} isLoading={isLoading} />)}
     </div>
   );
   if (uiType === "cost_warning") return <CostWarningCard data={uiData} onSendMessage={onSendMessage} />;
@@ -66,10 +66,11 @@ function AgentUI({ message, onSendMessage, onResetSession }) {
   if (uiType === "success") return <PublishSuccessCard data={uiData} onResetSession={onResetSession} />;
   if (uiType === "scope") return <ScopeCard data={uiData} onSendMessage={onSendMessage} />;
   if (uiType === "confirm") return <RequirementSummaryCard data={uiData} />;
+  if (uiType === "app_preview") return <AppPreviewCard data={uiData} onSendMessage={onSendMessage} />;
   return null;
 }
 
-function MessageBubble({ message, onSendMessage, onResetSession }) {
+function MessageBubble({ message, onSendMessage, onResetSession, isLoading }) {
   const isUser = message.role === "user";
 
   return (
@@ -89,7 +90,7 @@ function MessageBubble({ message, onSendMessage, onResetSession }) {
           ) : null}
           {!isUser && message.uiType && message.uiType !== "text" ? (
             <div className={message.text ? "mt-4 sm:mt-5" : ""}>
-              <AgentUI message={message} onSendMessage={onSendMessage} onResetSession={onResetSession} />
+              <AgentUI message={message} onSendMessage={onSendMessage} onResetSession={onResetSession} isLoading={isLoading} />
             </div>
           ) : null}
           {/* ConfirmCard — shown after every agent step that needs confirmation */}

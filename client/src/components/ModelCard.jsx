@@ -45,13 +45,13 @@ function formatCost(cost) {
 }
 
 // Added an optional 'isTop3' prop so you can conditionally apply the premium effect
-function ModelCard({ model, onSendMessage, isTop3 = true }) {
+function ModelCard({ model, onSendMessage, isTop3 = true, isLoading }) {
   const isUltra = model.tier === "ultra";
   const isFree = model.cost === 0;
 
   return (
     <div
-      className={`card-hover group relative flex h-full flex-col overflow-hidden rounded-2xl sm:rounded-[22px] shadow-soft p-[1.5px] bg-rent-border`}
+      className={`card-hover group relative flex h-full flex-col overflow-hidden rounded-2xl sm:rounded-[22px] shadow-soft p-[1.5px] rent-border: '#d1d1d1'`}
     >
       {/* 1. Outer Wrapper: Replaced standard border with a padding trick (p-[1.5px]) */}
 
@@ -117,8 +117,9 @@ function ModelCard({ model, onSendMessage, isTop3 = true }) {
         <div className="mt-auto pt-4 sm:pt-5">
           <button
             type="button"
+            disabled={isLoading}
             onClick={() => onSendMessage(`Select ${model.id}`)}
-            className="btn-cta h-10 w-full rounded-xl text-xs font-bold text-white sm:h-12 sm:text-sm transition-transform hover:scale-[1.02] active:scale-95"
+            className="btn-cta h-10 w-full rounded-xl text-xs font-bold text-white sm:h-12 sm:text-sm transition-transform hover:scale-[1.02] active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed"
           >
             Select Model
           </button>

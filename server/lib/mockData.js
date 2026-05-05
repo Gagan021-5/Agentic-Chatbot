@@ -1,5 +1,5 @@
 const mockData = {
-  userBalance: 100000, // mock joules balance for demo
+  userBalance: 200000, // mock joules balance for demo
   market_data: [
     { category: "website", complexity: "simple", avg_hours: 4, floor_joules: 6000, market_joules: 10000 },
     { category: "website", complexity: "medium", avg_hours: 8, floor_joules: 12000, market_joules: 18000 },

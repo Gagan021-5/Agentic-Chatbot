@@ -116,7 +116,7 @@ function ChatWindow({ messages, isLoading, sendMessage, resetSession }) {
       <main ref={viewportRef} className="relative z-10 flex-1 overflow-y-auto px-3 py-5 sm:px-5 sm:py-8 md:px-8">
         <div className="mx-auto flex max-w-[960px] flex-col gap-5 sm:gap-7 md:gap-8">
           {messages.map((msg) => (
-            <MessageBubble key={msg.id} message={msg} onSendMessage={sendMessage} onResetSession={resetSession} />
+            <MessageBubble key={msg.id} message={msg} onSendMessage={sendMessage} onResetSession={resetSession} isLoading={isLoading} />
           ))}
           {isLoading ? <TypingIndicator /> : null}
         </div>
@@ -128,7 +128,7 @@ function ChatWindow({ messages, isLoading, sendMessage, resetSession }) {
           <button type="button" className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-xl text-white/40 transition hover:bg-white/5 hover:text-white/70 sm:h-10 sm:w-10">
             <IconPaperclip />
           </button>
-          <input value={input} onChange={(e) => setInput(e.target.value)} onKeyDown={handleKeyDown} placeholder="Describe your project, or attach a file." className="h-10 min-w-0 flex-1 bg-transparent text-sm text-white outline-none placeholder:text-white/30 sm:h-11 sm:text-[15px]" />
+          <input disabled={isLoading} value={input} onChange={(e) => setInput(e.target.value)} onKeyDown={handleKeyDown} placeholder="Describe your project, or attach a file." className="h-10 min-w-0 flex-1 bg-transparent text-sm text-white outline-none placeholder:text-white/30 sm:h-11 sm:text-[15px]" />
           <button type="button" className="hidden h-9 w-9 shrink-0 items-center justify-center rounded-xl text-white/40 transition hover:bg-white/5 hover:text-white/70 sm:inline-flex sm:h-10 sm:w-10">
             <IconMic />
           </button>

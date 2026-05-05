@@ -1,7 +1,7 @@
 import MODELS from "./models.js";
 import mockData from "./mockData.js";
 import { extractRequirements } from "./groq.js";
-import { generatePromptTemplate, generateSEO, generateScope, applyPromptInstruction, buildPromptTemplateFromSession } from "./gemini.js";
+import { generatePromptTemplate, generateSEO, applyPromptInstruction, buildPromptTemplateFromSession } from "./gemini.js";
 import { buildBudgetTiers, getModelCost } from "./costCalculator.js";
 import { isOffTopic, OFF_TOPIC_RESPONSE } from "./requirementRouter.js";
 import { saveSession, deleteSession } from "./redis.js";
@@ -19,42 +19,61 @@ function normalize(msg) {
 /* ────────────────────────────────────────────
    SMART MODEL RANKING (spec-exact)
    ──────────────────────────────────────────── */
-function rankModels(models, userMessage, budget) {
+function rankModels(models, userMessage, budgetStr) {
   const msg = (userMessage || "").toLowerCase();
+  
+  let filteredModels = models;
 
-  return models
+  // STRICT BUDGET FILTERING
+  if (budgetStr) {
+    const b = budgetStr.toLowerCase();
+    
+    // 1. Check for explicit numbers first (e.g., "I have 6 coins", "max 10")
+    const numberMatch = b.match(/\d+(\.\d+)?/);
+    
+    if (numberMatch) {
+      const maxCost = parseFloat(numberMatch[0]);
+      filteredModels = models.filter(m => m.cost <= maxCost);
+    } 
+    // 2. Fall back to keyword matching if no number is found
+    else if (b.includes("free")) {
+      filteredModels = models.filter(m => m.cost === 0);
+    } else if (b.includes("low")) {
+      filteredModels = models.filter(m => m.cost <= 5);
+    } else if (b.includes("medium")) {
+      filteredModels = models.filter(m => m.cost <= 20);
+    }
+    // If premium/high, don't filter out anything, just let the scoring boost the expensive ones
+  }
+
+  // Fallback: If filtering leaves us with 0 options (e.g., no free video models exist), show the cheapest available
+  if (filteredModels.length === 0) {
+    filteredModels = [...models].sort((a, b) => a.cost - b.cost).slice(0, 3);
+  }
+
+  return filteredModels
     .map(m => {
       let score = 0;
-
-      // budget signals
-      if (budget === "free") score += m.cost === 0 ? 100 : 0;
-      if (budget === "low") score += m.tier === "fast" ? 50 : 0;
-      if (budget === "high" || budget === "ultra") score += m.tier === "premium" ? 50 : 0;
 
       // keyword matching against model tags
       (m.tags || []).forEach(tag => {
         if (msg.includes(tag.replace("-", " "))) score += 30;
       });
 
-      // prefer balanced by default
+      // Scoring logic based on tier
       if (m.tier === "balanced") score += 10;
-
-      // always boost free models
       if (m.cost === 0) score += 20;
 
-      // user said cinematic/motion
       if (msg.includes("cinematic") || msg.includes("motion")) {
         if ((m.tags || []).includes("motion-control")) score += 60;
       }
 
-      // user said cheap/affordable/budget
-      if (msg.includes("cheap") || msg.includes("budget") || msg.includes("affordable")) {
-        score += (100 - Math.min(m.cost, 100));
-      }
-
-      // user said best/professional/high quality
-      if (msg.includes("best") || msg.includes("professional") || msg.includes("high quality")) {
-        if (m.tier === "premium" || m.tier === "ultra") score += 40;
+      // Boost specific tiers based on requested budget
+      if (budgetStr) {
+        const b = budgetStr.toLowerCase();
+        if (b.includes("premium") || b.includes("high") || b.includes("best")) {
+          if (m.tier === "premium" || m.tier === "ultra") score += 50;
+        }
       }
 
       return { ...m, score };
@@ -64,11 +83,14 @@ function rankModels(models, userMessage, budget) {
 }
 
 /* ────────────────────────────────────────────
-   PARSERS
+   PARSERS (FIXED BULLETPROOF PARSING)
    ──────────────────────────────────────────── */
 function parseSelectedModelId(msg) {
-  const match = normalize(msg).match(/^select\s+([a-z0-9.-]+)$/i);
-  return match ? match[1].toLowerCase() : null;
+  const text = normalize(msg).toLowerCase();
+  if (text.startsWith("select")) {
+    return text.replace("select", "").trim();
+  }
+  return null;
 }
 
 function parseSelectedPlan(msg) {
@@ -79,7 +101,6 @@ function parseSelectedPlan(msg) {
 function parseChipAppType(msg) {
   const v = lower(msg);
   if (["text", "image", "audio", "video", "vision"].includes(v)) return v;
-  // Handle chip selections like "Images", "Video tour", "Written content"
   if (v === "images") return "image";
   if (v.includes("image generator") || v.includes("image app") || v.includes("generate images or photos")) return "image";
   if (v.includes("video creator") || v.includes("video app") || v.includes("create videos or animations")) return "video";
@@ -176,7 +197,7 @@ function getBudgetRow(session) {
   return (
     mockData.market_data.find(r => r.category === "ai-app" && r.complexity === complexity) ||
     mockData.market_data.find(r => r.category === "ai-app" && r.complexity === "medium") ||
-    mockData.market_data.find(r => r.category === "website" && r.complexity === "medium")
+    mockData.website.find(r => r.category === "website" && r.complexity === "medium")
   );
 }
 
@@ -266,36 +287,59 @@ const DEEP_QUESTIONS = {
 };
 
 function getNextDeepQuestion(session) {
-  const questions = DEEP_QUESTIONS[session.appType] || [];
   if (!session.deepAnswers) session.deepAnswers = {};
+
+  const purpose = session.extraction?.appPurpose || session.deepAnswers?.appPurpose || "";
+
+  // 1. Force the user to provide actual details if the purpose is empty or just a generic short phrase (under 12 chars)
+  if (!purpose || purpose.trim().length < 12) {
+    return {
+      field: 'appPurpose',
+      question: `Got it. Before we configure the settings, what exactly do you want this ${session.appType || 'AI'} app to generate or do? Describe your specific idea.`,
+      options: null // Forces a free-text input box
+    };
+  }
+
+  // 2. If we have a detailed purpose, proceed with the type-specific questions
+  const questions = DEEP_QUESTIONS[session.appType] || [];
   for (const q of questions) {
     if (!session.deepAnswers[q.field]) return q;
   }
-  return null;
+  
+  // NEW BUDGET CHECK: Ask for budget if it wasn't extracted initially and hasn't been answered yet
+  if (!session.extraction?.budget && !session.deepAnswers.budgetPreference) {
+    return {
+      field: 'budgetPreference',
+      question: 'One last thing — what is your target budget per generation for this app?',
+      options: ['Free models only', 'Low (Under 5 coins)', 'Medium (5-20 coins)', 'Premium / Best Quality']
+    };
+  }
+  
+  return null; // All done, ready for models
 }
 
+// FIXED: Removed ConfirmCard, set step=1
 async function showModels(session) {
   const fullText = [
     session.extraction?.appPurpose || '',
     session.extraction?.oneLineUnderstanding || '',
     JSON.stringify(session.deepAnswers || {})
   ].join(' ');
-  const budget = session.extraction?.budget;
+  // UPDATE: Pull budget from deep answers first, fallback to extraction
+  const budget = session.deepAnswers?.budgetPreference || session.extraction?.budget;
+  
   const models = rankModels(MODELS[session.appType] || [], fullText, budget);
-  session.step = 2;
-  session.awaitingConfirmation = true;
-  session.confirmStep = 2;
+  
+  session.step = 1; 
+  session.awaitingConfirmation = false;
   await saveSession(session);
+  
   return {
-    reply: `Here are the top 3 models for your ${session.appType} app:`,
+    reply: `Here are the top 3 models for your ${session.appType} app. Click a model card below to select it:`,
     uiType: 'models',
     uiData: { appType: session.appType, models },
     nextStep: 1,
-    coins: null,
-    confirm: {
-      summary: `Top 3 models for your ${session.appType} app. Does one fit?`,
-      detail: 'Click a model card to select it.'
-    }
+    coins: null
   };
 }
 
@@ -306,7 +350,7 @@ async function buildStep0Response(session) {
   if (ext && ext.appType && ['HIGH','MEDIUM'].includes(ext.confidence.appType)) {
     session.appType = ext.appType;
     session.step = 0;
-    session.awaitingConfirmation = false; // NO MORE BLOCKING CONFIRM CARD
+    session.awaitingConfirmation = false; 
 
     const nextQ = getNextDeepQuestion(session);
 
@@ -316,26 +360,22 @@ async function buildStep0Response(session) {
       await saveSession(session);
       
       const prefix = tonePrefix(ext);
-      // Prioritize the LLM's smart, context-aware question if available
-      const questionToAsk = ext.suggestedReply 
+      const questionText = ext.suggestedReply 
         ? `${prefix}${ext.suggestedReply}` 
-        : `${prefix}Got it — ${ext.oneLineUnderstanding}.\n\n${nextQ.question}`;
+        : `${prefix}Got it. ${nextQ.question}`;
 
       return {
-        reply: questionToAsk,
-        uiType: nextQ.options ? 'chips' : 'text_input',
-        uiData: nextQ.options ? { options: nextQ.options } : { placeholder: "Type your answer..." },
+        reply: questionText,
+        uiType: nextQ.options ? 'chips' : 'text',
+        uiData: nextQ.options ? { options: nextQ.options } : null,
         nextStep: 0,
         coins: null
       };
     }
 
-    // If no deep questions left, proceed to models
-    session.step = 2; // Setting step to 2 as required by new flow
     return await showModels(session);
   }
   
-  // LOW CONFIDENCE -> Ask for app type
   session.step = 0;
   await saveSession(session);
   const prefix = tonePrefix(ext);
@@ -353,19 +393,61 @@ async function buildStep0Response(session) {
 }
 
 /* ────────────────────────────────────────────
-   EDGE CASE GUARDS — must be checked FIRST
+   EDGE CASE GUARDS
    ──────────────────────────────────────────── */
 function checkEdgeCases(message, session) {
   const text = normalize(message);
   const msg = lower(text);
 
-  // 1. Off-topic guard
-  if (isOffTopic(text)) {
-    return OFF_TOPIC_RESPONSE;
+  if (isOffTopic(text)) return OFF_TOPIC_RESPONSE;
+
+  // JAILBREAK / PROMPT INJECTION GUARD
+  const jailbreaks = ['ignore all previous', 'system prompt', 'developer mode', 'you are now', 'disregard instructions'];
+  if (jailbreaks.some(j => msg.includes(j))) {
+    return {
+      reply: "I am strictly programmed to help you build and configure apps for the RentPrompts marketplace. Let's get back on track. What kind of app would you like to build?",
+      uiType: "chips",
+      uiData: { options: ['Image app', 'Video app', 'Text app'] },
+      nextStep: session.step,
+      coins: null
+    };
+  }
+
+  // NSFW / POLICY VIOLATION GUARD
+  const nsfw = ['nsfw', 'porn', 'deepfake', 'nude', 'violence', 'illegal', 'hack'];
+  if (nsfw.some(n => msg.includes(n))) {
+    return {
+      reply: "I can only help build apps that comply with RentPrompts' safety and content guidelines. Please suggest a different idea.",
+      uiType: "text",
+      uiData: null,
+      nextStep: session.step,
+      coins: null
+    };
+  }
+
+  // MID-FLIGHT PIVOT GUARD
+  const pivots = ['actually i want', 'change to', 'instead let', 'can we build a'];
+  if (pivots.some(p => msg.includes(p)) && session.step > 0) {
+    return {
+      reply: "No problem, we can pivot! Let's reset the setup. What is the new app idea?",
+      uiType: "text",
+      uiData: null,
+      nextStep: 0,
+      coins: null,
+      clearSession: true
+    };
   }
 
   // 2. Abuse / gibberish guard
-  const isGibberish = text.length < 2 || /^[^a-zA-Z0-9ऀ-ॿ\s]{3,}$/.test(text);
+  const trimmedText = text.trim();
+  const symbolCount = (trimmedText.match(/[^a-zA-Z0-9\s]/g) || []).length;
+  
+  const isGibberish = 
+    trimmedText.length < 2 || // Too short
+    /(asdf|qwer|zxcv|hjkl)/i.test(trimmedText) || // Classic keyboard smash
+    /[a-zA-Z0-9]{20,}/.test(trimmedText) || // Huge 20+ char block with no spaces
+    (symbolCount > trimmedText.length / 2 && trimmedText.length > 5); // Over 50% symbols
+
   if (isGibberish) {
     return {
       reply: `I didn't quite catch that. Could you describe what kind of AI app you'd like to build?`,
@@ -376,7 +458,6 @@ function checkEdgeCases(message, session) {
     };
   }
 
-  // 3. Empty message guard
   if (!text || text === '') {
     return {
       reply: `Go ahead — describe what you'd like to build!`,
@@ -387,18 +468,9 @@ function checkEdgeCases(message, session) {
     };
   }
 
-  // 4. Help request guard
   if (msg.includes('help') && text.trim().split(' ').length <= 3) {
     return {
-      reply: `Sure! Here's what I can help you build:
-
-🖼️ Image apps — generate photos, art, portraits
-🎥 Video apps — create cinematic clips, animations
-📝 Text apps — write blogs, emails, scripts
-🔊 Audio apps — voiceovers, music, speech
-👁️ Vision apps — analyze and understand images
-
-Which type interests you?`,
+      reply: `Sure! Here's what I can help you build:\n\n🖼️ Image apps\n🎥 Video apps\n📝 Text apps\n🔊 Audio apps\n👁️ Vision apps\n\nWhich type interests you?`,
       uiType: 'chips',
       uiData: { options: ['Image app', 'Video app', 'Text app', 'Audio app', 'Vision app', 'Help me choose'] },
       nextStep: 0,
@@ -406,7 +478,6 @@ Which type interests you?`,
     };
   }
 
-  // 5. "Start over" / "restart" guard
   if (msg.includes('start over') || msg.includes('restart') || msg.includes('reset') || msg.includes('new app') || msg.includes('different app')) {
     return {
       reply: `No problem! Let's start fresh. What kind of AI app would you like to build?`,
@@ -418,14 +489,9 @@ Which type interests you?`,
     };
   }
 
-  // 6. Pricing question without context guard
   if ((msg.includes('how much') || msg.includes('price') || msg.includes('cost') || msg.includes('joules')) && session.step < 4) {
     return {
-      reply: `Great question! The cost depends on which AI model we choose for your app. Prices range from FREE all the way to 318 coins per run depending on the model's capability.
-
-Let me first understand what you need, then I'll show you the best options with their exact costs.
-
-What kind of app are you building?`,
+      reply: `Great question! The cost depends on which AI model we choose. Prices range from FREE to 318 coins per run.\n\nLet me first understand what you need. What kind of app are you building?`,
       uiType: session.appType ? 'text' : 'chips',
       uiData: session.appType ? null : { options: ['Image app', 'Video app', 'Text app', 'Audio app', 'Vision app'] },
       nextStep: session.step,
@@ -433,15 +499,10 @@ What kind of app are you building?`,
     };
   }
 
-  // 7. Competitor mention guard
   const competitors = ['openai', 'chatgpt', 'midjourney', 'dalle', 'stable diffusion', 'runway', 'sora', 'adobe', 'canva', 'figma'];
   if (competitors.some(c => msg.includes(c))) {
     return {
-      reply: `I work specifically with the AI models available on RentPrompts marketplace.
-
-I can help you build apps powered by our top models like Flux, Kling, Veo, ElevenLabs and more — all publishable directly to our marketplace.
-
-Want me to show you what's available?`,
+      reply: `I work specifically with the AI models available on RentPrompts marketplace.\n\nWant me to show you what's available?`,
       uiType: 'chips',
       uiData: { options: ['Yes show me models', 'Tell me more about RentPrompts', 'Start building my app'] },
       nextStep: session.step,
@@ -449,35 +510,30 @@ Want me to show you what's available?`,
     };
   }
 
-  return null; // No edge case matched
-}
-
-/* ────────────────────────────────────────────
-   COMBINED APP PREVIEW BUILDER
-   ──────────────────────────────────────────── */
-function buildCombinedAppPreview(session, introLine) {
-  const pd = session.promptData || {};
-  const sd = session.seoData || {};
-  const varsStr = (pd.variablesUsed || []).join(', ');
-  const imageNote = pd.acceptImageInput ? '\nIt is also configured to accept image uploads.' : '';
-  const intro = introLine || "Awesome! I've engineered the entire backend for your app.";
-
-  return {
-    reply: `${intro}\n\n**App Name:** ${sd.appName || 'Untitled'}\n**Description:** ${sd.appDescription || ''}\n**Suggested Cost:** ${sd.suggestedPrice || 'TBD'} coins per run\n\n**Under the Hood (Prompts):**\n*System Logic:* ${pd.systemPrompt || 'N/A'}\n*User Input Format:* ${pd.userPrompt || 'N/A'}\n\nIt will ask your users for these variables: ${varsStr}.${imageNote}\n\nDoes this complete setup look good to publish, or would you like to save it as a draft?`,
-    uiType: "chips",
-    uiData: { options: ['Publish App', 'Save Draft', 'Tweak Prompts', 'Tweak SEO'] },
-    nextStep: 3,
-    coins: session.modelCost
-  };
+  return null; 
 }
 
 /* ════════════════════════════════════════════
    MAIN ROUTER
    ════════════════════════════════════════════ */
-async function route(session, message) {
-  const text = normalize(message);
+export async function route(session, message) {
+  // 1. WALL OF TEXT GUARD: Truncate to 1000 characters
+  const rawText = String(message || "").substring(0, 1000);
+  const text = normalize(rawText);
+  const msg = lower(text);
 
-  // ─── SAVE DRAFT GUARD (Global) ───
+  // 2. GHOST TOWN GUARD: If session step is > 0 but appType is missing, Redis wiped the session
+  if (session.step > 0 && !session.appType && !parseChipAppType(text)) {
+    return {
+      reply: "It looks like you've been away for a while and your session expired! Let's start fresh. What kind of AI app are you building today?",
+      uiType: 'chips',
+      uiData: { options: ['Image app', 'Video app', 'Text app', 'Audio app', 'Vision app'] },
+      nextStep: 0,
+      coins: null,
+      clearSession: true
+    };
+  }
+
   if (lower(text) === 'save draft' || lower(text).includes('save as draft') || lower(text).includes('save to draft')) {
     return {
       reply: `Done! Your progress has been securely saved as a draft. You can access it anytime from your RentPrompts dashboard.`,
@@ -494,7 +550,6 @@ async function route(session, message) {
     };
   }
 
-  // Check edge cases FIRST
   const edgeCaseResponse = checkEdgeCases(message, session);
   if (edgeCaseResponse) {
     if (edgeCaseResponse.clearSession) {
@@ -503,14 +558,11 @@ async function route(session, message) {
     return edgeCaseResponse;
   }
 
-  // History is managed by server.js — do NOT push again here
   if (!session.history) session.history = [];
 
-  // Run extraction
   const latestExtraction = await extractRequirements(text, session.history || []);
   session.extraction = mergeExtraction(session.extraction, latestExtraction, text);
 
-  // Update enterprise signals from extraction
   if (session.extraction.enterpriseSignals !== undefined) {
     session.enterpriseSignals = session.extraction.enterpriseSignals;
   }
@@ -520,56 +572,72 @@ async function route(session, message) {
 
   // ─── STEP 0: First message — detect app type ────────
   if (session.step === 0) {
-    // Handle greetings
     const greetings = ['hi', 'hello', 'hey', 'hii', 'helo', 'good morning', 'good evening', 'yo', 'sup', 'namaste', 'hola'];
     const isGreeting = greetings.some(g => lower(text) === g || lower(text).startsWith(g + ' '));
 
     if (isGreeting) {
       await saveSession(session);
       return {
-        reply: `Hey! 👋 I'm RentPrompts Agent.
-
-I help you create and publish AI-powered apps on the RentPrompts marketplace — no coding needed.
-
-What kind of AI app are you thinking of building?`,
+        reply: `Hey! 👋 I'm RentPrompts Agent.\n\nI help you create and publish AI-powered apps on the RentPrompts marketplace — no coding needed.\n\nWhat kind of AI app are you thinking of building?`,
         uiType: 'chips',
-        uiData: {
-          options: ['Image generator', 'Video creator', 'Text / writing tool', 'Audio generator', 'Vision / image analyzer', 'Not sure yet — help me decide']
-        },
+        uiData: { options: ['Image generator', 'Video creator', 'Text / writing tool', 'Audio generator', 'Vision / image analyzer', 'Not sure yet'] },
         nextStep: 0,
         coins: null
       };
     }
 
-    // "Not sure" handler
-    const isNotSure = lower(text).includes('not sure') || lower(text).includes('help me') || lower(text).includes('dont know') || lower(text).includes("don't know") || lower(text).includes('suggest');
+    const isNotSure = lower(text).includes('not sure') || lower(text).includes('help me') || lower(text).includes('dont know');
     if (isNotSure) {
       session.step = 0;
       await saveSession(session);
       return {
-        reply: `No problem! Let me help you figure out the right type of app.
-
-Answer a few quick questions and I'll recommend the best fit. First — what is the main thing you want your app to CREATE or DO?`,
+        reply: `No problem! Answer a few quick questions and I'll recommend the best fit. First — what is the main thing you want your app to CREATE or DO?`,
         uiType: 'chips',
-        uiData: {
-          options: [
-            'Generate images or photos',
-            'Create videos or animations',
-            'Write text, blogs, or emails',
-            'Generate voice or music',
-            'Analyze or understand images',
-            'I have something different in mind'
-          ]
-        },
+        uiData: { options: ['Generate images', 'Create videos', 'Write text', 'Generate audio', 'Analyze images'] },
         nextStep: 0,
         coins: null
       };
     }
 
-    // Handle deep question answers (if in deep Q&A mode)
     if (session.awaitingDeepAnswer && session.currentDeepField) {
+      
+      // NEW: Intercept "User chooses" to ask for the specific dropdown options
+      const isUserChoice = ['user chooses', 'user sets', 'user picks', 'user controls'];
+      if (isUserChoice.some(u => lower(text).includes(u))) {
+        return {
+          reply: "Got it! Since the end-user will decide, what specific options should we give them to choose from? (e.g., 'Realistic, Anime, or 3D')",
+          uiType: 'text',
+          uiData: null,
+          nextStep: 0,
+          coins: null
+        };
+      }
+
+      // NEW: INTERCEPT "Something else"
+      const isSomethingElse = ['something else', 'other', 'none of these'];
+      if (isSomethingElse.some(s => lower(text) === s || lower(text) === 'other')) {
+        return {
+          reply: "No problem. Please type out exactly what you have in mind so I can configure the prompt correctly.",
+          uiType: 'text',
+          uiData: null,
+          nextStep: 0,
+          coins: null
+        };
+      }
+
+      let finalAnswer = text;
+      
+      // I DON'T KNOW GUARD: If user is unsure, grab the most generic option
+      const unsureSignals = ['idk', 'i dont know', 'not sure', 'you decide', 'whatever', 'doesnt matter'];
+      if (unsureSignals.some(s => lower(text).includes(s))) {
+        const currentQ = getNextDeepQuestion(session);
+        // Default to "User chooses" or the last option in the list
+        finalAnswer = currentQ?.options?.find(opt => lower(opt).includes('user')) || 
+                      currentQ?.options?.[currentQ.options.length - 1] || 'Not specified';
+      }
+
       if (!session.deepAnswers) session.deepAnswers = {};
-      session.deepAnswers[session.currentDeepField] = text;
+      session.deepAnswers[session.currentDeepField] = finalAnswer;
       if (!session.extraction) session.extraction = {};
       Object.assign(session.extraction, session.deepAnswers);
       session.awaitingDeepAnswer = false;
@@ -582,8 +650,12 @@ Answer a few quick questions and I'll recommend the best fit. First — what is 
         session.awaitingDeepAnswer = true;
         await saveSession(session);
 
-        const lastAnswer = text;
         const acks = {
+          'appPurpose': 'Great idea.',
+          'Free models only': 'Got it. Keeping it free.',
+          'Low (Under 5 coins)': 'Got it. Budget-friendly models coming right up.',
+          'Medium (5-20 coins)': 'Understood. Finding the best mid-range models.',
+          'Premium / Best Quality': 'Perfect. Giving you the top-tier flagship models.',
           'Workout / fitness plans': 'Perfect.',
           'Meal / diet plans': 'Got it.',
           'Blog posts and articles': 'Got it.',
@@ -592,25 +664,21 @@ Answer a few quick questions and I'll recommend the best fit. First — what is 
           'Animate a still photo into video': 'Got it.',
           'Text description to video': 'Understood.',
         };
-        const ack = acks[lastAnswer] || 'Got it.';
+        const lastAnswer = text;
+        const ack = session.currentDeepField === 'appPurpose' ? acks['appPurpose'] : (acks[lastAnswer] || 'Got it.');
 
         return {
           reply: `${ack} ${nextQ.question}`,
-          uiType: 'chips',
-          uiData: { options: nextQ.options },
+          uiType: nextQ.options ? 'chips' : 'text',
+          uiData: nextQ.options ? { options: nextQ.options } : null,
           nextStep: 0,
           coins: null
         };
       }
 
-      // All deep questions answered — show models
-      session.step = 2;
       return await showModels(session);
     }
 
-    // Confirmation step 0 removed as per Fix 2
-
-    // Detect app type from extraction or chip selection
     const chipType = parseChipAppType(text);
     if (chipType && !session.appType) {
       session.appType = chipType;
@@ -620,334 +688,171 @@ Answer a few quick questions and I'll recommend the best fit. First — what is 
       session.appType = session.extraction.appType;
     }
 
-    // If app type still unknown — use buildStep0Response
-    if (!session.appType) {
-      return await buildStep0Response(session);
-    }
-
-    // App type known — show confirm card via buildStep0Response
     return await buildStep0Response(session);
   }
 
-  // ─── STEP 4: Prompt confirmation ────────────────────
-  if (session.step === 4 && session.awaitingConfirmation && session.confirmStep === 4) {
-    if (isYes(text)) {
-      // Prompt confirmed → generate scope
-      if (!session.scopeData) {
-        session.scopeData = await generateScope(session);
+  // ─── STEP 1: Model selection → generate config ───────────────────────
+  if (session.step === 1) {
+    const selectedModelId = parseSelectedModelId(text);
+
+    if (selectedModelId) {
+      const selectedModel = findModel(session.appType, selectedModelId);
+      if (!selectedModel) {
+        return {
+          reply: "I couldn't match that model. Please click one of the options above.",
+          uiType: "text",
+          uiData: null,
+          nextStep: 1,
+          coins: null
+        };
       }
-      session.step = 5;
-      session.awaitingConfirmation = true;
-      session.confirmStep = 5;
+
+      session.modelId = selectedModel.id;
+      session.modelCost = selectedModel.cost;
+      session.awaitingConfirmation = false;
+      await saveSession(session);
+
+      try {
+        const promptData = await generatePromptTemplate(session);
+        session.promptData = promptData;
+
+        const seoData = await generateSEO(session);
+        session.seoData = seoData;
+
+        session.step = 2;
+        await saveSession(session);
+
+        return {
+          reply: `I understand your requirement perfectly. You want an app that ${session.extraction?.appPurpose || 'does exactly that'}. Let me confirm the setup so we can proceed.`,
+          uiType: 'app_preview',
+          uiData: { 
+            appName: seoData.appName,
+            appDescription: seoData.appDescription,
+            cost: seoData.suggestedPrice || session.modelCost,
+            systemPrompt: promptData.systemPrompt,
+            userPrompt: promptData.userPrompt,
+            variablesUsed: promptData.variablesUsed,
+            acceptImageInput: promptData.acceptImageInput
+          },
+          nextStep: 2,
+          coins: session.modelCost
+        };
+      } catch (error) {
+        console.error("Error generating app config:", error);
+        return {
+          reply: "I hit a snag generating the config. Please try selecting the model again.",
+          uiType: 'text',
+          uiData: null,
+          nextStep: 1,
+          coins: null
+        };
+      }
+    }
+
+    return {
+      reply: "Please click one of the model cards above to select the engine for your app.",
+      uiType: "text",
+      uiData: null,
+      nextStep: 1,
+      coins: null
+    };
+  }
+
+  // ─── STEP 2: Final Review (Publish, Save Draft, Tweak) ───────────────────
+  if (session.step === 2) {
+    const msg2 = lower(message);
+
+    if (session.awaitingPromptTweak) {
+      session.awaitingPromptTweak = false;
+      session.promptData = applyPromptInstruction(session.promptData, message);
       await saveSession(session);
       return {
-        reply: `The scope covers ${session.scopeData.totalItems} key items — ` +
-               `${session.scopeData.scopeSummary}\n\n` +
-               `Total estimated effort: ~${session.scopeData.totalHours}h\n\n` +
-               `Want to adjust anything in the scope, or shall we ` +
-               `move on to look at pricing options?`,
-        uiType: "scope",
-        uiData: session.scopeData,
-        nextStep: 5,
-        coins: session.modelCost,
-        confirm: {
-          summary: `Scope: ${session.scopeData.totalItems} items (~${session.scopeData.totalHours}h). Looks good?`,
-          detail: "Say Yes to proceed, or let me know what you want to add/remove."
-        }
+        reply: `Updated! Here's the revised setup:\n\n**User Prompt:** ${session.promptData.userPrompt}\n\nReady to publish?`,
+        uiType: 'chips',
+        uiData: { options: ['Publish App', 'Save Draft', 'Tweak Prompts'] },
+        nextStep: 2,
+        coins: session.modelCost
       };
     }
 
-    if (isNo(text) || isChangeMessage(text)) {
-      const correction = isChangeMessage(text) ? getChangeText(text) : "";
+    if (msg2.includes('publish') || isYes(text)) {
+      const payload = {
+        appType: session.appType,
+        modelId: session.modelId,
+        costPerRun: session.seoData?.suggestedPrice || session.modelCost,
+        systemPrompt: session.promptData?.systemPrompt,
+        userPrompt: session.promptData?.userPrompt,
+        negativePrompt: session.promptData?.negativePrompt,
+        acceptImageInput: session.promptData?.acceptImageInput,
+        appName: session.seoData?.appName,
+        appDescription: session.seoData?.appDescription,
+        tags: session.seoData?.tags,
+        publishedAt: new Date().toISOString()
+      };
+
+      console.log("\n══════ MOCK PUBLISH ══════");
+      console.log(JSON.stringify(payload, null, 2));
+      console.log("══════════════════════════\n");
+
+      return {
+        reply: `🎉 Your app "${session.seoData?.appName}" is now live! Users will be charged ${payload.costPerRun} coins per generation.`,
+        uiType: "success",
+        uiData: {
+          appName: session.seoData?.appName,
+          modelId: session.modelId,
+          costPerRun: payload.costPerRun,
+          tags: session.seoData?.tags,
+          mockUrl: `https://rentprompts.ai/app/demo-${Date.now()}`
+        },
+        nextStep: 0,
+        coins: session.modelCost,
+        clearSession: true
+      };
+    }
+
+    if (msg2.includes('draft') || msg2.includes('save')) {
+      session.status = 'draft';
+      await saveSession(session);
+      return {
+        reply: `Done! "${session.seoData?.appName}" saved as a draft. Publish anytime from your dashboard.`,
+        uiType: 'success',
+        uiData: { appName: session.seoData?.appName, status: 'Draft' },
+        nextStep: 0,
+        coins: null
+      };
+    }
+
+    if (msg2.includes('tweak') || isChangeMessage(text)) {
+      const correction = isChangeMessage(text) ? getChangeText(text) : null;
       if (correction) {
         session.promptData = applyPromptInstruction(session.promptData, correction);
         await saveSession(session);
         return {
-          reply: "Updated! Does this look better?",
-          uiType: "prompt_preview",
-          uiData: session.promptData,
-          nextStep: 4,
-          coins: session.modelCost,
-          confirm: {
-            summary: "Here's the updated backend configuration. Does this look right?",
-            detail: null
-          }
+          reply: `Updated!\n\n**User Prompt:** ${session.promptData.userPrompt}\n\nReady to publish?`,
+          uiType: 'chips',
+          uiData: { options: ['Publish App', 'Save Draft', 'Tweak Prompts'] },
+          nextStep: 2,
+          coins: session.modelCost
         };
       }
-
-      return {
-        reply: "Tell me what to change about the logic or instructions, and I'll regenerate it.",
-        uiType: "text",
-        uiData: {},
-        nextStep: 4,
-        coins: session.modelCost
-      };
-    }
-  }
-
-  // ─── PROMPT EDIT ───
-  const promptEdit = parsePromptEditInstruction(text);
-  if (promptEdit && session.modelId) {
-    if (!session.promptData) {
-      session.promptData = buildPromptTemplateFromSession(session);
-    }
-    session.promptData = applyPromptInstruction(session.promptData, promptEdit);
-    session.awaitingConfirmation = true;
-    session.confirmStep = 4;
-    await saveSession(session);
-    return {
-      reply: "Updated! Does this look better?",
-      uiType: "prompt_preview",
-      uiData: session.promptData,
-      nextStep: 4,
-      coins: session.modelCost,
-      confirm: {
-        summary: "Here's the updated backend configuration. Does this look right?",
-        detail: null
-      }
-    };
-  }
-
-  // ─── STEP 5: Scope confirmation ────────────────────
-  if (session.step === 5 && session.awaitingConfirmation && session.confirmStep === 5) {
-    if (isYes(text)) {
-      // Scope confirmed → generate SEO
-      if (!session.seoData) {
-        session.seoData = await generateSEO(session);
-      }
-      session.step = 6;
-      session.awaitingConfirmation = true;
-      session.confirmStep = 6;
+      session.awaitingPromptTweak = true;
       await saveSession(session);
       return {
-        reply: "Almost done! Here's your app's SEO profile:",
-        uiType: "seo_preview",
-        uiData: session.seoData,
-        nextStep: 6,
-        coins: session.modelCost,
-        confirm: {
-          summary: "Here's your app's name, description and tags. Ready to publish?",
-          detail: "You can edit any field inline before confirming."
-        }
-      };
-    }
-
-    if (isNo(text) || isChangeMessage(text)) {
-      const correction = isChangeMessage(text) ? getChangeText(text) : text;
-      if (correction) {
-        if (!session.extraction.keyFeatures) session.extraction.keyFeatures = [];
-        session.extraction.keyFeatures.push(correction);
-        session.scopeData = await generateScope(session);
-        await saveSession(session);
-      }
-      return {
-        reply: `Updated scope — ${session.scopeData.totalItems} items, ~${session.scopeData.totalHours}h total. Does this look better?`,
-        uiType: "scope",
-        uiData: session.scopeData,
-        nextStep: 5,
-        coins: session.modelCost,
-        confirm: {
-          summary: `Scope: ${session.scopeData.totalItems} items (~${session.scopeData.totalHours}h). Looks good?`,
-          detail: "Say Yes to proceed, or let me know what you want to add/remove."
-        }
-      };
-    }
-  }
-
-  // ─── STEP 6: SEO confirmation ──────────────────────
-  if (session.step === 6 && session.awaitingConfirmation && session.confirmStep === 6) {
-    if (isYes(text)) {
-      // SEO confirmed → budget/bounty check
-      return await buildBudgetStep(session);
-    }
-
-    if (isNo(text) || isChangeMessage(text)) {
-      return {
-        reply: "Which part would you like to change? You can also edit inline above.",
+        reply: "What would you like to change about the instructions or description?",
         uiType: "text",
         uiData: {},
-        nextStep: 6,
+        nextStep: 2,
         coins: session.modelCost
       };
     }
-  }
-
-  // ─── SEO INLINE EDIT CONFIRM ───
-  const seoPayload = parseSeoPayload(text);
-  if (seoPayload && session.seoData) {
-    session.seoData = {
-      ...session.seoData,
-      ...seoPayload,
-      tags: Array.isArray(seoPayload.tags) ? seoPayload.tags : session.seoData.tags
-    };
-    await saveSession(session);
-    return await buildBudgetStep(session);
-  }
-
-  // ─── SEO CONFIRM via text ───
-  if (session.seoData && (lower(text).includes("confirm seo") || lower(text).includes("confirm & continue") || lower(text) === "continue")) {
-    return await buildBudgetStep(session);
-  }
-
-  // ─── STEP 7: Plan selected → publish ───
-  if (parseSelectedPlan(text) && session.seoData) {
-    const planId = parseSelectedPlan(text);
-    const payload = {
-      appType: session.appType,
-      modelId: session.modelId,
-      costPerRun: session.modelCost,
-      systemPrompt: session.promptData && session.promptData.systemPrompt, // Added from new logic
-      userPrompt: session.promptData && session.promptData.userPrompt,
-      negativePrompt: session.promptData && session.promptData.negativePrompt,
-      acceptImageInput: session.promptData && session.promptData.acceptImageInput,
-      appName: session.seoData.appName,
-      appDescription: session.seoData.appDescription,
-      tags: session.seoData.tags,
-      selectedPlan: planId,
-      publishedAt: new Date().toISOString()
-    };
-
-    console.log("\n══════ MOCK PUBLISH ══════");
-    console.log(JSON.stringify(payload, null, 2));
-    console.log("══════════════════════════\n");
-
-    return {
-      reply: `🎉 Your app "${session.seoData.appName}" has been published successfully!`,
-      uiType: "success",
-      uiData: {
-        appName: session.seoData.appName,
-        modelId: session.modelId,
-        costPerRun: session.modelCost,
-        tags: session.seoData.tags,
-        selectedPlan: planId,
-        mockUrl: `https://rentprompts.ai/app/demo-${Date.now()}`,
-        isBounty: false
-      },
-      nextStep: 0,
-      coins: session.modelCost,
-      clearSession: true
-    };
-  }
-
-  // ─── STEP 7: Bounty publish ───
-  if (lower(text) === "post as bounty" && session.seoData) {
-    const bountyPayload = {
-      title: session.seoData.appName,
-      description: session.seoData.appDescription,
-      appType: session.appType,
-      modelId: session.modelId,
-      systemPrompt: session.promptData && session.promptData.systemPrompt, // Added from new logic
-      promptTemplate: session.promptData && session.promptData.userPrompt,
-      tags: session.seoData.tags,
-      budget_preference: "open_to_bids",
-      postedAt: new Date().toISOString()
-    };
-
-    console.log("\n══════ MOCK BOUNTY PUBLISH ══════");
-    console.log(JSON.stringify(bountyPayload, null, 2));
-    console.log("══════════════════════════════════\n");
-
-    return {
-      reply: "Your bounty has been posted! Creators will bid on your project within 24-48 hours.",
-      uiType: "success",
-      uiData: {
-        appName: session.seoData.appName,
-        modelId: session.modelId,
-        costPerRun: session.modelCost,
-        tags: session.seoData.tags,
-        selectedPlan: "bounty",
-        mockUrl: `https://rentprompts.ai/bounty/demo-${Date.now()}`,
-        isBounty: true
-      },
-      nextStep: 0,
-      coins: null,
-      clearSession: true
-    };
-  }
-
-  // ─── FALLBACK: re-generate prompt if model selected but no promptData ───
-  if (session.modelId && !session.promptData) {
-    session.promptData = await generatePromptTemplate(session);
-    session.awaitingConfirmation = true;
-    session.confirmStep = 4;
-    await saveSession(session);
-    
-    const reasoningText = session.promptData.reasoning ? `\n\n*My Reasoning:* ${session.promptData.reasoning}` : "";
-    
-    return {
-      reply: `Here's your auto-generated backend configuration:${reasoningText}`,
-      uiType: "prompt_preview",
-      uiData: session.promptData,
-      nextStep: 4,
-      coins: session.modelCost,
-      confirm: {
-        summary: "Here is the engineered backend configuration. Does this look right?",
-        detail: null
-      }
-    };
   }
 
   // ─── CATCH ALL ───
   return {
-    reply: "I kept the current setup intact. Use the buttons above to continue, or tell me what you'd like to change. You can also type 'Save Draft' if you want to pause here.",
-    uiType: "text",
-    uiData: {},
+    reply: "I'm ready to proceed. Let me know if you want to 'Publish' this app, 'Save Draft', or change something.",
+    uiType: "chips",
+    uiData: { options: ['Publish App', 'Save Draft'] },
     nextStep: session.step || 0,
     coins: session.modelCost
   };
 }
-
-/* ────────────────────────────────────────────
-   BUDGET STEP BUILDER (Step 7)
-   ──────────────────────────────────────────── */
-async function buildBudgetStep(session) {
-  const budgetUi = buildBudgetUi(session);
-  const leanCost = budgetUi.options.lean.joules;
-  const userBalance = mockData.userBalance;
-
-  // Check if user has enough joules
-  if (userBalance < leanCost) {
-    session.step = 7;
-    session.budgetPath = "bounty";
-    session.awaitingConfirmation = true;
-    session.confirmStep = 7;
-    await saveSession(session);
-
-    const selectedModel = findModel(session.appType, session.modelId);
-    return {
-      reply: "Your current balance might not cover this. No worries — I can post this as a bounty instead, where creators will bid on your project.",
-      uiType: "bounty_fallback",
-      uiData: {
-        appName: session.seoData.appName,
-        promptTemplate: session.promptData && session.promptData.userPrompt,
-        modelName: selectedModel ? selectedModel.name : session.modelId,
-        userBalance,
-        leanCost
-      },
-      nextStep: 7,
-      coins: null,
-      confirm: {
-        summary: "Would you like to post this as a bounty instead?",
-        detail: "Creators on RentPrompts will bid on your project within 24-48 hours."
-      }
-    };
-  }
-
-  // Enough joules → show budget cards
-  session.step = 7;
-  session.budgetPath = "publish";
-  await saveSession(session);
-  return {
-    reply: "Your app is ready! Pick a publishing plan, or say 'Save Draft' to pause here:",
-    uiType: "budget_cards",
-    uiData: budgetUi,
-    nextStep: 7,
-    coins: null,
-    confirm: {
-      summary: "Which plan works best for you?",
-      detail: `Your balance: ${userBalance.toLocaleString()} joules`
-    }
-  };
-}
-
-export { route };

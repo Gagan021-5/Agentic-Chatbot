@@ -64,6 +64,23 @@ app.post("/api/agent/chat", async (req, res) => {
   }
 });
 
+app.get("/api/agent/history", async (req, res) => {
+  const sessionId = req.query.sessionId;
+  if (!sessionId) {
+    return res.status(400).json({ error: "sessionId is required" });
+  }
+  try {
+    const session = await getSession(sessionId);
+    if (!session || !session.history) {
+      return res.json({ history: [] });
+    }
+    return res.json({ history: session.history });
+  } catch (error) {
+    console.error("Agent history error:", error);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+});
+
 const server = app.listen(PORT, () => {
   console.log(`RentPrompts agent server listening on http://localhost:${PORT}`);
 });

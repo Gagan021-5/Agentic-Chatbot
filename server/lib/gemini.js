@@ -198,7 +198,7 @@ const client = new OpenAI({
 
 async function callOpenRouter(systemPrompt, userContent, retries = 2) {
   const models = [
-    'google/gemini-1.5-flash', // <--- EXACT OPENROUTER ID FIXED HERE
+    'google/gemini-1.5-flash',
     'meta-llama/llama-3.3-70b-instruct'
   ];
 
@@ -210,19 +210,20 @@ async function callOpenRouter(systemPrompt, userContent, retries = 2) {
           { role: 'system', content: systemPrompt },
           { role: 'user', content: userContent }
         ],
-        response_format: { type: 'json_object' },
+        // REMOVED response_format to prevent 400 errors on fallback models
         temperature: 0.7,
         max_tokens: 1000,
       });
 
       const raw = response.choices[0].message.content;
       
-      const cleaned = raw
-        .replace(/```json/gi, '')
-        .replace(/```/g, '')
-        .trim();
-
-      return JSON.parse(cleaned);
+      // Robust JSON Extraction using Regex
+      const jsonMatch = raw.match(/\{[\s\S]*\}/);
+      if (!jsonMatch) {
+        throw new Error("No JSON object found in response");
+      }
+      
+      return JSON.parse(jsonMatch[0]);
 
     } catch (err) {
       const is429 = err?.status === 429 || 
@@ -236,7 +237,8 @@ async function callOpenRouter(systemPrompt, userContent, retries = 2) {
         continue;
       }
       
-      throw err;
+      // If it's the last model or not a rate limit, throw to trigger the function's fallback
+      if (i === models.length - 1) throw err;
     }
   }
 }
@@ -278,7 +280,19 @@ Analyze these requirements and generate the prompt template:
     return result;
   } catch (err) {
     console.error('[Sub-agent 2] Error:', err.message);
-    throw new Error('Failed to generate prompt template');
+    // SAFE FALLBACK: Never throw an error. Return a generic prompt so the UI doesn't crash.
+    return {
+      reasoning: "Fallback triggered due to API timeout or parsing error. Using a standard baseline template.",
+      systemPrompt: `You are an expert AI for ${session.appType || 'content'} generation. Follow the user's instructions carefully.`,
+      userPrompt: `Execute the task based on this input: $$main_input`,
+      negativePrompt: session.appType === 'image' || session.appType === 'video' ? "low quality, blurry, distorted" : null,
+      acceptImageInput: session.appType === 'image' || session.appType === 'vision',
+      variablesUsed: ["$$main_input"],
+      variableDescriptions: {
+        "$$main_input": "The main instructions or topic for generation"
+      },
+      advancedSettings: {}
+    };
   }
 }
 
@@ -292,7 +306,9 @@ Rules:
 - Tags: exactly 10 tags, lowercase, hyphens not spaces.
 - Category must be one of: creative, business, education,
   healthcare, entertainment, productivity, social, other
-- Suggested Price: calculate based on the base model cost + a 20% margin for the creator.
+- Suggested Price: Set this to the exact base model cost + a small 10% to 20% creator markup.
+  This is a PER-GENERATION cost. Apps on this platform typically cost between 1 to 50 coins.
+  DO NOT suggest thousands of coins. Keep it realistic and competitive.
 
 Return ONLY valid JSON with this exact schema:
 {
@@ -328,85 +344,6 @@ Generate SEO metadata for this app:
              'generative-ai', 'easy-to-use'],
       category: 'creative',
       suggestedPrice: (session.modelCost || 5) * 1.2
-    };
-  }
-}
-
-export async function generateScope(session) {
-  const systemPrompt = `You are ARIA, expert project scope analyst for RentPrompts bounty platform.
-
-Generate a detailed scope like a senior project manager.
-Include realistic hour estimates and AI/human breakdown.
-
-Return ONLY valid JSON:
-{
-  "scopeSummary": "one sentence total scope description",
-  "totalItems": 5,
-  "totalHours": 43,
-  "aiAcceleratedPercent": 65,
-  "humanDirectedPercent": 35,
-  "freelancerCostMix": {
-    "frontend": { "items": 3, "percent": 60 },
-    "backend": { "items": 2, "percent": 40 }
-  },
-  "items": [
-    {
-      "title": "Image Upload Functionality",
-      "complexity": "simple",
-      "priority": "Must Have",
-      "aiAssisted": true,
-      "estimatedHours": 6,
-      "codeGenPercent": 70,
-      "aiRole": "AI generates React component code for file input and validation",
-      "humanRole": "Human decides UX flow, error handling, and security requirements",
-      "description": "Frontend component for image upload with preview"
-    }
-  ],
-  "constraints": {
-    "applicantLimit": 3,
-    "timeline": "1 week",
-    "pricingLane": "Web Application"
-  }
-}
-
-Rules:
-- 4-6 scope items always
-- complexity: simple|medium|complex
-- priority: Must Have|Should Have|Nice to Have
-- simple=4-6h, medium=7-12h, complex=13-20h
-- Last item should be Nice to Have
-- aiAcceleratedPercent = 60-80 for AI apps
-- humanDirectedPercent = 100 - aiAcceleratedPercent
-- codeGenPercent per task: simple=70-80, medium=60-70, complex=50-65
-- aiRole: what AI tools like Cursor/Copilot will do
-- humanRole: what requires human judgment
-- pricingLane: Web Application|Mobile App|AI Integration
-- Return ONLY valid JSON, no explanation`;
-
-  const userContent = `Generate scope for:
-App type: ${session.appType}
-Purpose: ${session.extraction?.appPurpose}
-Features requested: ${JSON.stringify(session.extraction?.keyFeatures || [])}
-Target users: ${session.extraction?.targetUsers}
-Deep answers: ${JSON.stringify(session.deepAnswers || {})}
-Prompt template: ${session.promptData?.userPrompt}`;
-
-  try {
-    const result = await callOpenRouter(systemPrompt, userContent);
-    console.log('[Scope] Scope generated OK —', result.totalItems, 'items');
-    return result;
-  } catch (err) {
-    console.error('[Scope] Error:', err.message);
-    return {
-      scopeSummary: 'Core app features and essential components',
-      totalItems: 5,
-      totalHours: 32,
-      items: [
-        { title: 'Core App Interface', complexity: 'complex', priority: 'Must Have', aiAssisted: false, estimatedHours: 12, description: 'Main user interface and primary functionality.' },
-        { title: 'AI Model Integration', complexity: 'complex', priority: 'Must Have', aiAssisted: false, estimatedHours: 10, description: 'Connect and configure the selected AI model.' },
-        { title: 'Input/Output Handler', complexity: 'medium', priority: 'Must Have', aiAssisted: true, estimatedHours: 6, description: 'Handle user inputs and display AI outputs.' },
-        { title: 'Basic Styling', complexity: 'simple', priority: 'Should Have', aiAssisted: true, estimatedHours: 4, description: 'Clean, responsive visual design.' }
-      ]
     };
   }
 }
