@@ -128,9 +128,7 @@ export function normalizeExtraction(raw, fallbackMessage) {
 
   const extraction = {
     appType: raw && ["text", "image", "audio", "video", "vision"].includes(raw.appType) ? raw.appType : inferred.value,
-    // ANTI-HALLUCINATION: null if user didn't describe it
     appPurpose: raw && typeof raw.appPurpose === "string" && raw.appPurpose.trim() ? raw.appPurpose.trim() : null,
-    // ANTI-HALLUCINATION: null if user didn't mention them (never default to 'general users')
     targetUsers: raw && typeof raw.targetUsers === "string" && raw.targetUsers.trim() && raw.targetUsers.trim() !== 'general users' ? raw.targetUsers.trim() : null,
     keyFeatures: raw && Array.isArray(raw.keyFeatures) ? raw.keyFeatures.filter(Boolean).slice(0, 6) : [],
     budget: normalizedBudget,
@@ -200,7 +198,7 @@ const client = new OpenAI({
 
 async function callOpenRouter(systemPrompt, userContent, retries = 2) {
   const models = [
-    'google/gemini-1.5-pro',
+    'google/gemini-1.5-flash', // <--- EXACT OPENROUTER ID FIXED HERE
     'meta-llama/llama-3.3-70b-instruct'
   ];
 
@@ -244,102 +242,76 @@ async function callOpenRouter(systemPrompt, userContent, retries = 2) {
 }
 
 export async function generatePromptTemplate(session) {
-  const systemPrompt = `You are an expert AI app prompt engineer for RentPrompts marketplace. 
-You have a high level of understanding of human needs.
+  const systemPrompt = `You are a Senior AI Prompt Engineer for RentPrompts.
+Your job is to take specific user requirements and build a production-ready AI app configuration.
 
-Create production-ready prompt templates using $$variable syntax for every input the end-user will provide.
-
-Variable rules per app type:
-- image: use $$subject $$style $$mood $$lighting $$background
-- video: use $$scene $$duration $$camera_movement $$style $$mood
-- text:  use $$topic $$tone $$audience $$length $$format
-- audio: use $$text $$voice_style $$pace $$emotion
-- vision: use $$image_description $$analysis_type $$output_format
-
-Make prompts detailed, professional, and effective.
-Negative prompts for image and video types only.
+CRITICAL RULES:
+1. NO GENERIC PLACEHOLDERS. Do not use words like "cat" or "example".
+2. Use $$variableName syntax for any input the final end-user will provide.
+3. Your output must map exactly to the RentPrompts manual form fields.
 
 Return ONLY valid JSON with this exact schema:
 {
-  "userPrompt": "full prompt string with $$variables",
-  "negativePrompt": "string or null",
+  "reasoning": "Step-by-step logic explaining how you are configuring this based on the user's deep answers.",
+  "systemPrompt": "The backend instruction for the model (persona, behavior, formatting).",
+  "userPrompt": "The highly detailed prompt string containing the $$variables.",
+  "negativePrompt": "Detailed negative prompt (for image/video only) or null",
   "acceptImageInput": true or false,
   "variablesUsed": ["$$var1", "$$var2"],
   "variableDescriptions": {
-    "$$var1": "what the user should enter here"
-  },
-  "advancedSettings": {
-    "aspectRatio": "16:9 or 1:1 or 9:16 or null",
-    "quality": "standard or high or null",
-    "duration": "5s or 10s or null"
-  },
-  "promptExplanation": "one sentence why this prompt works"
+    "$$var1": "What the user should enter here"
+  }
 }`;
 
-  const userContent = `Generate a prompt template for this app:
-App type: ${session.appType}
-Purpose: ${session.extraction?.appPurpose || 'not specified'}
-Key features: ${JSON.stringify(session.extraction?.keyFeatures || [])}
-Target users: ${session.extraction?.targetUsers || 'general users'}
-Selected model: ${session.modelId || 'not selected yet'}
-Wants image input: ${session.extraction?.wantsImageInput || false}`;
+  const userContent = `
+Analyze these requirements and generate the prompt template:
+- App Type: ${session.appType}
+- App Purpose: ${session.requirements?.appPurpose || session.extraction?.appPurpose || 'Not specified'}
+- Target Users: ${session.requirements?.targetUsers || session.extraction?.targetUsers || 'General Public'}
+- Model Selected: ${session.modelId || 'Unknown'}
+- Deep Answers Gathered: ${JSON.stringify(session.deepAnswers || {})}
+  `;
 
   try {
     const result = await callOpenRouter(systemPrompt, userContent);
-    console.log('[Sub-agent 2] Prompt template generated OK');
+    console.log('[Sub-agent 2] Prompt template generated with reasoning:', result.reasoning?.substring(0, 120));
     return result;
   } catch (err) {
     console.error('[Sub-agent 2] Error:', err.message);
-    return {
-      userPrompt: `Create content about $$topic in $$style style for $$audience`,
-      negativePrompt: null,
-      acceptImageInput: false,
-      variablesUsed: ['$$topic', '$$style', '$$audience'],
-      variableDescriptions: {
-        '$$topic': 'Main subject or theme',
-        '$$style': 'Desired style or tone',
-        '$$audience': 'Target audience'
-      },
-      advancedSettings: { aspectRatio: null, quality: null, duration: null },
-      promptExplanation: 'Generic template — please refine'
-    };
+    throw new Error('Failed to generate prompt template');
   }
 }
 
 export async function generateSEO(session) {
-  const systemPrompt = `You are an SEO expert for AI app marketplaces with deep understanding of what users search for.
-
-Generate metadata that maximizes discoverability on RentPrompts marketplace.
+  const systemPrompt = `You are an SEO & Monetization Expert for AI app marketplaces.
+Generate metadata that maximizes discoverability.
 
 Rules:
-- App name: catchy, specific, under 55 characters
-- Description: mentions model + main benefit + target user,
-  under 155 characters, no filler words
-- Tags: exactly 10 tags, all lowercase, 
-  use hyphens not spaces (e.g. image-generation not image generation)
+- App name: catchy, specific, under 55 characters.
+- Description: mentions model + main benefit, under 155 characters.
+- Tags: exactly 10 tags, lowercase, hyphens not spaces.
 - Category must be one of: creative, business, education,
   healthcare, entertainment, productivity, social, other
-- suggestedPrice: slightly above model cost so creator profits
-  (minimum model cost + 20% margin, rounded to nearest 0.5)
+- Suggested Price: calculate based on the base model cost + a 20% margin for the creator.
 
 Return ONLY valid JSON with this exact schema:
 {
   "appName": "string max 55 chars",
   "appDescription": "string max 155 chars",
-  "tags": ["tag1", "tag2", "tag3", "tag4", "tag5", 
+  "tags": ["tag1", "tag2", "tag3", "tag4", "tag5",
            "tag6", "tag7", "tag8", "tag9", "tag10"],
-  "category": "one of the categories listed above",
+  "category": "creative | business | education | productivity | other",
   "suggestedPrice": 12.5
 }`;
 
-  const userContent = `Generate SEO metadata for this AI app:
-App type: ${session.appType}
-Purpose: ${session.extraction?.appPurpose || 'AI powered app'}
-Target users: ${session.extraction?.targetUsers || 'general users'}
-Key features: ${JSON.stringify(session.extraction?.keyFeatures || [])}
-Selected model: ${session.modelId || 'unknown'}
-Cost per run: ${session.modelCost || 0} coins
-Prompt template: ${session.promptData?.userPrompt || 'not generated yet'}`;
+  const userContent = `
+Generate SEO metadata for this app:
+- App Type: ${session.appType}
+- Deep Answers: ${JSON.stringify(session.deepAnswers || {})}
+- Model Selected: ${session.modelId || 'unknown'}
+- Base Model Cost: ${session.modelCost || 0} coins
+- Generated System Prompt: ${session.promptData?.systemPrompt || 'N/A'}
+  `;
 
   try {
     const result = await callOpenRouter(systemPrompt, userContent);

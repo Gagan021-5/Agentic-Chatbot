@@ -282,9 +282,9 @@ async function showModels(session) {
   ].join(' ');
   const budget = session.extraction?.budget;
   const models = rankModels(MODELS[session.appType] || [], fullText, budget);
-  session.step = 1;
+  session.step = 2;
   session.awaitingConfirmation = true;
-  session.confirmStep = 1;
+  session.confirmStep = 2;
   await saveSession(session);
   return {
     reply: `Here are the top 3 models for your ${session.appType} app:`,
@@ -301,34 +301,48 @@ async function showModels(session) {
 
 async function buildStep0Response(session) {
   const ext = session.extraction;
+  
+  // HIGH/MEDIUM CONFIDENCE -> Skip confirmation, jump straight into deep questions
   if (ext && ext.appType && ['HIGH','MEDIUM'].includes(ext.confidence.appType)) {
     session.appType = ext.appType;
     session.step = 0;
-    session.awaitingConfirmation = true;
-    session.confirmStep = 0;
-    await saveSession(session);
-    const prefix = tonePrefix(ext);
-    const reply = ext.suggestedReply
-      ? `${prefix}${ext.suggestedReply}`
-      : `${prefix}Got it — ${ext.oneLineUnderstanding}.\n\nI'm planning to build a ${ext.appType} app that ${ext.appPurpose || 'does what you described'}. Is this the right direction?`;
-    return {
-      reply,
-      uiType: 'confirm',
-      uiData: {},
-      nextStep: 0,
-      coins: null,
-      confirm: {
-        summary: ext.oneLineUnderstanding,
-        detail: `App type: ${ext.appType} • Target: ${ext.targetUsers || 'not specified yet'}`
-      }
-    };
+    session.awaitingConfirmation = false; // NO MORE BLOCKING CONFIRM CARD
+
+    const nextQ = getNextDeepQuestion(session);
+
+    if (nextQ) {
+      session.currentDeepField = nextQ.field;
+      session.awaitingDeepAnswer = true;
+      await saveSession(session);
+      
+      const prefix = tonePrefix(ext);
+      // Prioritize the LLM's smart, context-aware question if available
+      const questionToAsk = ext.suggestedReply 
+        ? `${prefix}${ext.suggestedReply}` 
+        : `${prefix}Got it — ${ext.oneLineUnderstanding}.\n\n${nextQ.question}`;
+
+      return {
+        reply: questionToAsk,
+        uiType: nextQ.options ? 'chips' : 'text_input',
+        uiData: nextQ.options ? { options: nextQ.options } : { placeholder: "Type your answer..." },
+        nextStep: 0,
+        coins: null
+      };
+    }
+
+    // If no deep questions left, proceed to models
+    session.step = 2; // Setting step to 2 as required by new flow
+    return await showModels(session);
   }
+  
+  // LOW CONFIDENCE -> Ask for app type
   session.step = 0;
   await saveSession(session);
   const prefix = tonePrefix(ext);
   const options = ext && ext.appPurpose && /clinic|hospital/i.test(ext.appPurpose)
     ? ['Images','Video tour','Written content','Something else']
     : ['Text','Image','Audio','Video','Vision'];
+    
   return {
     reply: `${prefix}I'd love to help! What type of output does your app need?`,
     uiType: 'chips',
@@ -438,11 +452,47 @@ Want me to show you what's available?`,
   return null; // No edge case matched
 }
 
+/* ────────────────────────────────────────────
+   COMBINED APP PREVIEW BUILDER
+   ──────────────────────────────────────────── */
+function buildCombinedAppPreview(session, introLine) {
+  const pd = session.promptData || {};
+  const sd = session.seoData || {};
+  const varsStr = (pd.variablesUsed || []).join(', ');
+  const imageNote = pd.acceptImageInput ? '\nIt is also configured to accept image uploads.' : '';
+  const intro = introLine || "Awesome! I've engineered the entire backend for your app.";
+
+  return {
+    reply: `${intro}\n\n**App Name:** ${sd.appName || 'Untitled'}\n**Description:** ${sd.appDescription || ''}\n**Suggested Cost:** ${sd.suggestedPrice || 'TBD'} coins per run\n\n**Under the Hood (Prompts):**\n*System Logic:* ${pd.systemPrompt || 'N/A'}\n*User Input Format:* ${pd.userPrompt || 'N/A'}\n\nIt will ask your users for these variables: ${varsStr}.${imageNote}\n\nDoes this complete setup look good to publish, or would you like to save it as a draft?`,
+    uiType: "chips",
+    uiData: { options: ['Publish App', 'Save Draft', 'Tweak Prompts', 'Tweak SEO'] },
+    nextStep: 3,
+    coins: session.modelCost
+  };
+}
+
 /* ════════════════════════════════════════════
    MAIN ROUTER
    ════════════════════════════════════════════ */
 async function route(session, message) {
   const text = normalize(message);
+
+  // ─── SAVE DRAFT GUARD (Global) ───
+  if (lower(text) === 'save draft' || lower(text).includes('save as draft') || lower(text).includes('save to draft')) {
+    return {
+      reply: `Done! Your progress has been securely saved as a draft. You can access it anytime from your RentPrompts dashboard.`,
+      uiType: 'success',
+      uiData: {
+        appName: session.seoData?.appName || session.extraction?.appPurpose || 'Untitled Draft',
+        modelId: session.modelId || 'Draft Mode',
+        costPerRun: session.modelCost || 0,
+        status: 'Draft'
+      },
+      nextStep: 0,
+      coins: null,
+      clearSession: true
+    };
+  }
 
   // Check edge cases FIRST
   const edgeCaseResponse = checkEdgeCases(message, session);
@@ -554,48 +604,11 @@ Answer a few quick questions and I'll recommend the best fit. First — what is 
       }
 
       // All deep questions answered — show models
+      session.step = 2;
       return await showModels(session);
     }
 
-    // Handle confirmation of app type understanding (confirmStep === 0)
-    if (session.awaitingConfirmation && session.confirmStep === 0) {
-      if (isYes(text)) {
-        session.awaitingConfirmation = false;
-        session.deepAnswers = session.deepAnswers || {};
-
-        const nextQ = getNextDeepQuestion(session);
-
-        if (nextQ) {
-          session.currentDeepField = nextQ.field;
-          session.awaitingDeepAnswer = true;
-          await saveSession(session);
-          return {
-            reply: nextQ.question,
-            uiType: 'chips',
-            uiData: { options: nextQ.options },
-            nextStep: 0,
-            coins: null
-          };
-        }
-
-        // No deep questions needed — go straight to models
-        return await showModels(session);
-      }
-
-      if (isNo(text)) {
-        session.awaitingConfirmation = false;
-        session.appType = null;
-        session.step = 0;
-        await saveSession(session);
-        return {
-          reply: `No problem! What type of AI app would you like to build?`,
-          uiType: 'chips',
-          uiData: { options: ['Image app', 'Video app', 'Text app', 'Audio app', 'Vision app'] },
-          nextStep: 0,
-          coins: null
-        };
-      }
-    }
+    // Confirmation step 0 removed as per Fix 2
 
     // Detect app type from extraction or chip selection
     const chipType = parseChipAppType(text);
@@ -614,126 +627,6 @@ Answer a few quick questions and I'll recommend the best fit. First — what is 
 
     // App type known — show confirm card via buildStep0Response
     return await buildStep0Response(session);
-  }
-
-  // ─── STEP 1/3: Model selection ───────────────────────
-  if (session.step === 1 || session.step === 3) {
-
-    const selectedModelId = parseSelectedModelId(text);
-
-    if (selectedModelId && !["lean", "recommended", "full"].includes(selectedModelId)) {
-      const selectedModel = findModel(session.appType, selectedModelId);
-      if (!selectedModel) {
-        const fullText = getFullUserText(session);
-        const budget = session.extraction && session.extraction.budget;
-        const models = rankModels(MODELS[session.appType] || [], fullText, budget);
-        return {
-          reply: "I couldn't match that model. Pick one of the options below:",
-          uiType: "models",
-          uiData: { appType: session.appType, models },
-          nextStep: 3,
-          coins: null
-        };
-      }
-
-      session.modelId = selectedModel.id;
-      session.modelCost = selectedModel.cost;
-      session.promptData = null;
-      session.seoData = null;
-      session.awaitingConfirmation = false;
-
-      // Cost warning check
-      if (shouldWarnForCost(selectedModel)) {
-        session.costWarning = buildCostWarningUi(session.appType, selectedModel);
-        session.step = 4;
-        await saveSession(session);
-        return {
-          reply: "Heads up — this model is powerful but can get expensive at scale:",
-          uiType: "cost_warning",
-          uiData: session.costWarning,
-          nextStep: 4,
-          coins: selectedModel.cost
-        };
-      }
-
-      // Generate prompt and show with confirm
-      delete session.costWarning;
-      session.promptData = await generatePromptTemplate(session);
-      session.step = 4;
-      session.awaitingConfirmation = true;
-      session.confirmStep = 4;
-      await saveSession(session);
-      return {
-        reply: "Great choice! Here's your auto-generated prompt template:",
-        uiType: "prompt_preview",
-        uiData: session.promptData,
-        nextStep: 4,
-        coins: session.modelCost,
-        confirm: {
-          summary: "Here's the auto-generated prompt for your app. Does this look right?",
-          detail: session.promptData.promptExplanation || null
-        }
-      };
-    }
-
-    // Handle "No" response to model selection
-    if (isNo(text)) {
-      const fullText = getFullUserText(session);
-      const budget = session.extraction && session.extraction.budget;
-      const models = rankModels(MODELS[session.appType] || [], fullText, budget);
-      return {
-        reply: "No problem! What are you looking for in a model? (e.g. cheaper, higher quality, faster)",
-        uiType: "models",
-        uiData: { appType: session.appType, models },
-        nextStep: 3,
-        coins: null
-      };
-    }
-  }
-
-  // ─── STEP 4: Cost warning handling ─────────────────
-  if (session.step === 4 && session.costWarning) {
-    const v = lower(text);
-
-    if (v.includes("use cheaper") || v.includes("cheaper option") || v.includes("show me cheaper")) {
-      session.modelId = session.costWarning.alternativeModelId;
-      session.modelCost = session.costWarning.alternativeCost;
-      delete session.costWarning;
-      session.promptData = await generatePromptTemplate(session);
-      session.awaitingConfirmation = true;
-      session.confirmStep = 4;
-      await saveSession(session);
-      return {
-        reply: "Swapped to the cheaper option. Here's your prompt:",
-        uiType: "prompt_preview",
-        uiData: session.promptData,
-        nextStep: 4,
-        coins: session.modelCost,
-        confirm: {
-          summary: "Here's the auto-generated prompt for your app. Does this look right?",
-          detail: session.promptData.promptExplanation || null
-        }
-      };
-    }
-
-    if (v.includes("proceed") || v.includes("understand") || v === "yes") {
-      delete session.costWarning;
-      session.promptData = await generatePromptTemplate(session);
-      session.awaitingConfirmation = true;
-      session.confirmStep = 4;
-      await saveSession(session);
-      return {
-        reply: "Understood. Here's your prompt template:",
-        uiType: "prompt_preview",
-        uiData: session.promptData,
-        nextStep: 4,
-        coins: session.modelCost,
-        confirm: {
-          summary: "Here's the auto-generated prompt for your app. Does this look right?",
-          detail: session.promptData.promptExplanation || null
-        }
-      };
-    }
   }
 
   // ─── STEP 4: Prompt confirmation ────────────────────
@@ -776,14 +669,14 @@ Answer a few quick questions and I'll recommend the best fit. First — what is 
           nextStep: 4,
           coins: session.modelCost,
           confirm: {
-            summary: "Here's the updated prompt. Does this look right?",
+            summary: "Here's the updated backend configuration. Does this look right?",
             detail: null
           }
         };
       }
 
       return {
-        reply: "Tell me what to change about the prompt, and I'll regenerate it.",
+        reply: "Tell me what to change about the logic or instructions, and I'll regenerate it.",
         uiType: "text",
         uiData: {},
         nextStep: 4,
@@ -809,7 +702,7 @@ Answer a few quick questions and I'll recommend the best fit. First — what is 
       nextStep: 4,
       coins: session.modelCost,
       confirm: {
-        summary: "Here's the updated prompt. Does this look right?",
+        summary: "Here's the updated backend configuration. Does this look right?",
         detail: null
       }
     };
@@ -903,6 +796,7 @@ Answer a few quick questions and I'll recommend the best fit. First — what is 
       appType: session.appType,
       modelId: session.modelId,
       costPerRun: session.modelCost,
+      systemPrompt: session.promptData && session.promptData.systemPrompt, // Added from new logic
       userPrompt: session.promptData && session.promptData.userPrompt,
       negativePrompt: session.promptData && session.promptData.negativePrompt,
       acceptImageInput: session.promptData && session.promptData.acceptImageInput,
@@ -942,6 +836,7 @@ Answer a few quick questions and I'll recommend the best fit. First — what is 
       description: session.seoData.appDescription,
       appType: session.appType,
       modelId: session.modelId,
+      systemPrompt: session.promptData && session.promptData.systemPrompt, // Added from new logic
       promptTemplate: session.promptData && session.promptData.userPrompt,
       tags: session.seoData.tags,
       budget_preference: "open_to_bids",
@@ -976,14 +871,17 @@ Answer a few quick questions and I'll recommend the best fit. First — what is 
     session.awaitingConfirmation = true;
     session.confirmStep = 4;
     await saveSession(session);
+    
+    const reasoningText = session.promptData.reasoning ? `\n\n*My Reasoning:* ${session.promptData.reasoning}` : "";
+    
     return {
-      reply: "Here's your auto-generated prompt:",
+      reply: `Here's your auto-generated backend configuration:${reasoningText}`,
       uiType: "prompt_preview",
       uiData: session.promptData,
       nextStep: 4,
       coins: session.modelCost,
       confirm: {
-        summary: "Here's the auto-generated prompt for your app. Does this look right?",
+        summary: "Here is the engineered backend configuration. Does this look right?",
         detail: null
       }
     };
@@ -991,7 +889,7 @@ Answer a few quick questions and I'll recommend the best fit. First — what is 
 
   // ─── CATCH ALL ───
   return {
-    reply: "I kept the current setup intact. Use the buttons above to continue, or tell me what you'd like to change.",
+    reply: "I kept the current setup intact. Use the buttons above to continue, or tell me what you'd like to change. You can also type 'Save Draft' if you want to pause here.",
     uiType: "text",
     uiData: {},
     nextStep: session.step || 0,
@@ -1040,7 +938,7 @@ async function buildBudgetStep(session) {
   session.budgetPath = "publish";
   await saveSession(session);
   return {
-    reply: "Your app is ready! Pick a publishing plan:",
+    reply: "Your app is ready! Pick a publishing plan, or say 'Save Draft' to pause here:",
     uiType: "budget_cards",
     uiData: budgetUi,
     nextStep: 7,
