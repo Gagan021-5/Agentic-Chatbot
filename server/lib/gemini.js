@@ -6,6 +6,7 @@ export const EXTRACTION_PROMPT = `You are a strict data extraction engine for Re
 
 Users describe an app they want to build.
 Your ONLY job: extract what they said. Never invent.
+CRITICAL INSTRUCTION: You are a multilingual agent. You MUST detect the language of the user's input. If the user types in Hindi (Devanagari script) or Hinglish (Hindi written in English alphabet), you MUST respond natively in that exact language and tone. All UI options and questions generated must also be translated into the user's detected language.
 
 APP TYPE RULES — read every word carefully:
 - "image" app: generates images, photos, portraits, transforms photos, superhero filter, avatar maker, logo maker, any visual output
@@ -62,9 +63,12 @@ function extractFeatures(message) {
 }
 
 function detectLanguage(message) {
-  const lower = message.toLowerCase();
-  const hindiSignals = ["mujhe", "banana", "banani", "hai", "likhta", "likh", "jo", "ke liye", "karna", "ek "];
-  if (hindiSignals.some((word) => lower.includes(word))) return "Hindi";
+  const text = String(message || "");
+  const lower = text.toLowerCase();
+  const hasDevanagari = /[\u0900-\u097F]/.test(text);
+  if (hasDevanagari) return "Hindi";
+  const hinglishSignals = ["mujhe", "banana", "banani", "hai", "likhta", "likh", "ke liye", "karna", "mera", "meri", "krdo", "chahiye", "jaldi"];
+  if (hinglishSignals.some((word) => lower.includes(word))) return "Hinglish";
   return "English";
 }
 
@@ -243,9 +247,40 @@ async function callOpenRouter(systemPrompt, userContent, retries = 2) {
   }
 }
 
+export async function runPromptTest({ systemPrompt, userPrompt, testInputs, modelHint }) {
+  const startedAt = Date.now();
+  const model = modelHint || "google/gemini-1.5-flash";
+  const inputs = testInputs && typeof testInputs === "object" ? testInputs : {};
+  let resolvedPrompt = String(userPrompt || "");
+  Object.entries(inputs).forEach(([key, value]) => {
+    const token = `$$${key}`;
+    const safeValue = String(value ?? "");
+    resolvedPrompt = resolvedPrompt.split(token).join(safeValue);
+  });
+
+  const response = await client.chat.completions.create({
+    model,
+    temperature: 0.4,
+    max_tokens: 700,
+    messages: [
+      { role: "system", content: String(systemPrompt || "You are a helpful AI assistant.") },
+      { role: "user", content: resolvedPrompt }
+    ]
+  });
+
+  const output = response.choices?.[0]?.message?.content || "";
+  return {
+    output: String(output).slice(0, 3000),
+    modelUsed: model,
+    latencyMs: Date.now() - startedAt,
+    tokens: response.usage?.total_tokens || null
+  };
+}
+
 export async function generatePromptTemplate(session) {
   const systemPrompt = `You are a Senior AI Prompt Engineer for RentPrompts.
 Your job is to take specific user requirements and build a production-ready AI app configuration.
+CRITICAL INSTRUCTION: You are a multilingual agent. You MUST detect the language of the user's input. If the user types in Hindi (Devanagari script) or Hinglish (Hindi written in English alphabet), you MUST respond natively in that exact language and tone. All UI options and questions generated must also be translated into the user's detected language.
 
 CRITICAL RULES:
 1. NO GENERIC PLACEHOLDERS. Do not use words like "cat" or "example".
@@ -299,6 +334,7 @@ Analyze these requirements and generate the prompt template:
 export async function generateSEO(session) {
   const systemPrompt = `You are an SEO & Monetization Expert for AI app marketplaces.
 Generate metadata that maximizes discoverability.
+CRITICAL INSTRUCTION: You are a multilingual agent. You MUST detect the language of the user's input. If the user types in Hindi (Devanagari script) or Hinglish (Hindi written in English alphabet), you MUST respond natively in that exact language and tone. All UI options and questions generated must also be translated into the user's detected language.
 
 Rules:
 - App name: catchy, specific, under 55 characters.

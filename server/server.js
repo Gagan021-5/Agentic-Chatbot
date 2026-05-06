@@ -4,6 +4,7 @@ import cors from "cors";
 import express from "express";
 import { createSession, getSession, saveSession, deleteSession } from "./lib/redis.js";
 import { route } from "./lib/stepRouter.js";
+import { runPromptTest } from "./lib/gemini.js";
 
 const app = express();
 const PORT = Number(process.env.PORT) || 3001;
@@ -78,6 +79,26 @@ app.get("/api/agent/history", async (req, res) => {
   } catch (error) {
     console.error("Agent history error:", error);
     return res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+app.post("/api/test-prompt", async (req, res) => {
+  const { systemPrompt, userPrompt, testInputs, modelHint } = req.body || {};
+  if (!systemPrompt || !userPrompt) {
+    return res.status(400).json({ error: "systemPrompt and userPrompt are required" });
+  }
+
+  try {
+    const result = await runPromptTest({
+      systemPrompt: String(systemPrompt),
+      userPrompt: String(userPrompt),
+      testInputs: testInputs && typeof testInputs === "object" ? testInputs : {},
+      modelHint: typeof modelHint === "string" ? modelHint : undefined
+    });
+    return res.json(result);
+  } catch (error) {
+    console.error("Prompt test error:", error);
+    return res.status(500).json({ error: "Unable to run test prompt" });
   }
 });
 

@@ -8,6 +8,7 @@ const GROQ_SYSTEM_PROMPT = `You are a strict data extraction engine for RentProm
 
 Users describe an app they want to build.
 Your ONLY job: extract what they said. Never invent.
+CRITICAL INSTRUCTION: You are a multilingual agent. You MUST detect the language of the user's input. If the user types in Hindi (Devanagari script) or Hinglish (Hindi written in English alphabet), you MUST respond natively in that exact language and tone. All UI options and questions generated must also be translated into the user's detected language.
 
 APP TYPE RULES — read every word carefully:
 - "image" app: generates images, photos, portraits, transforms photos, superhero filter, avatar maker, logo maker, any visual output
@@ -74,6 +75,97 @@ function isRateLimitError(error) {
   return error && (error.status === 429 || error.statusCode === 429 || error.code === 429 || (error.message && error.message.includes('429')));
 }
 
+function normalizeLanguageHint(languageHint) {
+  const normalized = String(languageHint || "").toLowerCase();
+  if (normalized.includes("hinglish")) return "Hinglish";
+  if (normalized.includes("hindi")) return "Hindi";
+  return "English";
+}
+
+function sanitizeStringList(list, minLen, maxLen, fallback) {
+  const cleaned = Array.isArray(list)
+    ? list
+      .map((item) => String(item || "").trim())
+      .filter(Boolean)
+      .filter((item, idx, arr) => arr.findIndex((x) => x.toLowerCase() === item.toLowerCase()) === idx)
+      .slice(0, maxLen)
+    : [];
+
+  if (cleaned.length >= minLen) return cleaned;
+  return fallback.slice(0, maxLen);
+}
+
+function sanitizeVariableObjects(list, minLen, maxLen, fallback) {
+  const normalized = Array.isArray(list)
+    ? list
+      .map((item) => {
+        if (typeof item === "string") {
+          return { name: item.trim(), placeholder: "Enter details..." };
+        }
+        if (!item || typeof item !== "object") return null;
+        return {
+          name: String(item.name || "").trim(),
+          placeholder: String(item.placeholder || "Enter details...").trim()
+        };
+      })
+      .filter((item) => item && item.name)
+      .filter((item, idx, arr) => arr.findIndex((x) => x.name.toLowerCase() === item.name.toLowerCase()) === idx)
+      .slice(0, maxLen)
+    : [];
+
+  if (normalized.length >= minLen) return normalized;
+  return fallback.slice(0, maxLen);
+}
+
+function buildDynamicContextFallback(appType, languageHint) {
+  const lang = normalizeLanguageHint(languageHint);
+  const isHindi = lang === "Hindi";
+  const isHinglish = lang === "Hinglish";
+
+  if (isHindi) {
+    return {
+      options: ["उपयोगकर्ता के लिए पर्सनल परिणाम", "स्पष्ट और संरचित आउटपुट", "तेज और विश्वसनीय प्रतिक्रिया", "कस्टम इनपुट आधारित जनरेशन"],
+      variables: [
+        { name: "मुख्य इनपुट", placeholder: "अपनी आवश्यकता लिखें..." },
+        { name: "संदर्भ", placeholder: "कॉन्टेक्स्ट या पृष्ठभूमि जोड़ें..." },
+        { name: "पसंदीदा स्टाइल", placeholder: "जैसे: प्रोफेशनल, फ्रेंडली..." }
+      ]
+    };
+  }
+  if (isHinglish) {
+    return {
+      options: ["Personalized output for user", "Structured and clear result", "Fast and reliable response", "Custom input based generation"],
+      variables: [
+        { name: "Main input", placeholder: "Aap kya generate karna chahte ho?" },
+        { name: "Context", placeholder: "Background ya extra details" },
+        { name: "Preferred style", placeholder: "Jaise: Formal, Friendly" }
+      ]
+    };
+  }
+
+  const typeSpecific = {
+    text: { options: ["Personalized response style", "Structured output format", "Tone control", "Goal-focused generation"], variables: [{ name: "Main topic", placeholder: "What is the main topic?" }, { name: "Audience", placeholder: "Who is this for?" }, { name: "Tone", placeholder: "Professional, friendly, motivational..." }] },
+    image: { options: ["Style consistency", "Composition control", "High-detail output", "Prompt safety guardrails"], variables: [{ name: "Subject", placeholder: "What should appear in the image?" }, { name: "Style", placeholder: "Anime, realistic, cinematic..." }, { name: "Reference details", placeholder: "Colors, mood, composition" }] },
+    video: { options: ["Scene pacing control", "Shot/style consistency", "Duration control", "Platform-ready output"], variables: [{ name: "Concept", placeholder: "What story or scene?" }, { name: "Visual style", placeholder: "Cinematic, vlog, ad..." }, { name: "Video duration", placeholder: "e.g., 10 seconds" }] },
+    audio: { options: ["Voice style selection", "Language support", "Pacing control", "Clean output format"], variables: [{ name: "Script", placeholder: "Paste narration text" }, { name: "Voice style", placeholder: "Male/Female, energetic/calm..." }, { name: "Language", placeholder: "e.g., English, Hindi" }] },
+    vision: { options: ["Accurate object/text extraction", "Structured response mode", "Confidence-aware output", "Use-case specific analysis"], variables: [{ name: "Image input", placeholder: "Image URL or description" }, { name: "Task type", placeholder: "OCR, object detection, QA..." }, { name: "Output format", placeholder: "JSON, summary, plain text" }] }
+  };
+  return typeSpecific[appType] || { options: ["Personalized output", "Structured result", "Fast response", "Custom input support"], variables: [{ name: "Main input", placeholder: "Enter primary input" }, { name: "Context", placeholder: "Add context details" }, { name: "Style", placeholder: "Choose preferred style" }] };
+}
+
+function parseDynamicContextPayload(rawContent, appType, languageHint) {
+  const fallback = buildDynamicContextFallback(appType, languageHint);
+  try {
+    const parsed = JSON.parse(String(rawContent || "{}").replace(/```json/gi, "").replace(/```/g, "").trim());
+    return {
+      options: sanitizeStringList(parsed.options, 4, 4, fallback.options),
+      variables: sanitizeVariableObjects(parsed.variables, 3, 4, fallback.variables)
+    };
+  } catch {
+    return fallback;
+  }
+}
+
 async function extractRequirements(message, history) {
   // If Groq is not configured, go straight to OpenRouter fallback
   if (!groq) {
@@ -112,6 +204,63 @@ async function extractRequirements(message, history) {
   }
 }
 
+async function generateDynamicContext({ appType, appPurpose, languageHint }) {
+  const safeType = ["text", "image", "video", "audio", "vision"].includes(appType) ? appType : "text";
+  const safePurpose = String(appPurpose || "").trim() || "general assistant app";
+  const safeLang = normalizeLanguageHint(languageHint);
+  const systemPrompt = `You are a strict JSON generator.
+Generate compact, practical setup suggestions for an AI app idea.
+CRITICAL INSTRUCTION: You are a multilingual agent. You MUST detect the language of the user's input. If the user types in Hindi (Devanagari script) or Hinglish (Hindi written in English alphabet), you MUST respond natively in that exact language and tone. All UI options and questions generated must also be translated into the user's detected language.
+When generating 'variables', you MUST include a 'placeholder' key.
+- If the variable name contains 'Date', placeholder MUST be 'DD/MM/YYYY'.
+- If the variable name contains 'Time', placeholder MUST be 'HH:MM AM/PM'.
+- If the variable name contains 'Place' or 'Location', placeholder MUST be 'City, Country'.
+- For everything else, use a relevant example.
+NEVER use 'Enter details...' as a placeholder for date, time, or location fields.
+Output must be strict JSON with this exact shape:
+{"options":["4 concise feature options"],"variables":[{"name":"Date of Birth","placeholder":"DD/MM/YYYY"},{"name":"Location","placeholder":"City, Country"}]}
+No markdown. No prose.`;
+  const userPrompt = `The user wants to build a ${safeType} app for: ${safePurpose}.
+Language mode: ${safeLang}.
+Generate 4 highly relevant specific features and 3-4 input variables needed for the app.
+For each variable include name and helpful placeholder.`;
+
+  try {
+    if (groq) {
+      const completion = await groq.chat.completions.create({
+        model: "llama-3.3-70b-versatile",
+        response_format: { type: "json_object" },
+        messages: [
+          { role: "system", content: systemPrompt },
+          { role: "user", content: userPrompt }
+        ]
+      });
+      const content = completion.choices?.[0]?.message?.content || "{}";
+      return parseDynamicContextPayload(content, safeType, safeLang);
+    }
+  } catch (error) {
+    if (!isRateLimitError(error)) {
+      console.error("Groq dynamic context error, falling back:", error.message);
+    }
+  }
+
+  try {
+    const fallback = await openRouterClient.chat.completions.create({
+      model: "meta-llama/llama-3.3-70b-instruct",
+      response_format: { type: "json_object" },
+      messages: [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: userPrompt }
+      ]
+    });
+    const content = fallback.choices?.[0]?.message?.content || "{}";
+    return parseDynamicContextPayload(content, safeType, safeLang);
+  } catch (error) {
+    console.error("OpenRouter dynamic context fallback failed:", error.message);
+    return buildDynamicContextFallback(safeType, safeLang);
+  }
+}
+
 async function extractWithOpenRouterFallback(message, history) {
   try {
     const fallback = await openRouterClient.chat.completions.create({
@@ -132,4 +281,4 @@ async function extractWithOpenRouterFallback(message, history) {
   }
 }
 
-export { extractRequirements };
+export { extractRequirements, generateDynamicContext };

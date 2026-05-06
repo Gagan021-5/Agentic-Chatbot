@@ -11,6 +11,7 @@ import PublishSuccessCard from "./PublishSuccessCard";
 import RequirementSummaryCard from "./RequirementSummaryCard";
 import SEOPreviewCard from "./SEOPreviewCard";
 import AppPreviewCard from "./AppPreviewCard";
+import MultiSelectFormCard from "./MultiSelectFormCard";
 function IconCopy() {
   return (
     <svg viewBox="0 0 20 20" fill="none" className="h-3.5 w-3.5">
@@ -67,6 +68,7 @@ function AgentUI({ message, onSendMessage, onResetSession, isLoading }) {
   if (uiType === "scope") return <ScopeCard data={uiData} onSendMessage={onSendMessage} />;
   if (uiType === "confirm") return <RequirementSummaryCard data={uiData} />;
   if (uiType === "app_preview") return <AppPreviewCard data={uiData} onSendMessage={onSendMessage} />;
+  if (uiType === "multi_select_form") return <MultiSelectFormCard data={uiData} onSendMessage={onSendMessage} isLoading={isLoading} />;
   return null;
 }
 

@@ -1,6 +1,6 @@
-import MODELS from "./models.js";
+﻿import MODELS from "./models.js";
 import mockData from "./mockData.js";
-import { extractRequirements, generateDynamicContext } from "./groq.js";
+import { extractRequirements } from "./groq.js";
 import { generatePromptTemplate, generateSEO, applyPromptInstruction, buildPromptTemplateFromSession } from "./gemini.js";
 import { buildBudgetTiers, getModelCost } from "./costCalculator.js";
 import { isOffTopic, OFF_TOPIC_RESPONSE } from "./requirementRouter.js";
@@ -16,120 +16,75 @@ function normalize(msg) {
   return String(msg || "").trim();
 }
 
-function parseMultiSelectPayload(msg) {
-  const text = normalize(msg);
-  if (!text.toLowerCase().startsWith("multi_select_form::")) return null;
-  try {
-    const payload = JSON.parse(text.slice("multi_select_form::".length));
-    if (!payload || typeof payload !== "object") return null;
-    return payload;
-  } catch {
-    return null;
-  }
-}
-
-function normalizeSubmittedVariables(variables) {
-  if (!Array.isArray(variables)) return [];
-  return variables
-    .map((variable) => {
-      if (typeof variable === "string") {
-        return { name: variable.trim(), placeholder: "Enter details...", value: "" };
-      }
-      if (!variable || typeof variable !== "object") return null;
-      return {
-        name: String(variable.name || "").trim(),
-        placeholder: String(variable.placeholder || "Enter details...").trim(),
-        value: String(variable.value || "").trim()
-      };
-    })
-    .filter((variable) => variable && variable.name);
-}
-
-function detectLanguageMode(session) {
-  const lang = String(session?.extraction?.detectedLanguage || session?.languageMode || "English").toLowerCase();
-  if (lang.includes("hinglish")) return "Hinglish";
-  if (lang.includes("hindi")) return "Hindi";
-  return "English";
-}
-
-function localizedText(session, english, hindi, hinglish) {
-  const mode = detectLanguageMode(session);
-  if (mode === "Hindi") return hindi || english;
-  if (mode === "Hinglish") return hinglish || english;
-  return english;
-}
-
-/* ────────────────────────────────────────────
+/* ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
    SMART MODEL RANKING (spec-exact)
-   ──────────────────────────────────────────── */
-function rankModels(availableModels, userInput, budgetStr) {
-  if (!availableModels || availableModels.length === 0) return [];
+   ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ */
+function rankModels(models, userMessage, budgetStr) {
+  const msg = (userMessage || "").toLowerCase();
   
-  let filtered = [...availableModels];
+  let filteredModels = models;
 
-  // 1. STRICT BUDGET FILTERING (Using our established ranges)
-  const b = (budgetStr || "").toLowerCase();
-  if (b) {
-    if (b.includes("medium") || b.includes("5-20") || b.includes("5 - 20")) {
-      filtered = filtered.filter(m => m.cost >= 5 && m.cost <= 20);
-    } else if (b.includes("low") || b.includes("under 5") || b.includes("< 5")) {
-      filtered = filtered.filter(m => m.cost > 0 && m.cost < 5);
-    } else if (b.includes("premium") || b.includes("best") || b.includes("> 20")) {
-      filtered = filtered.filter(m => m.cost >= 20);
-    } else if (b.includes("free") || b.includes("0 coins")) {
-      filtered = filtered.filter(m => m.cost === 0);
-    } else {
-      const numberMatch = b.match(/\d+(\.\d+)?/);
-      if (numberMatch) {
-        filtered = filtered.filter(m => m.cost <= parseFloat(numberMatch[0]));
-      }
-    }
-  }
-
-  // UNMATCHABLE BUDGET GUARD (If budget is too strict, return absolute cheapest)
-  if (filtered.length === 0) {
-    return [...availableModels].sort((a, b) => a.cost - b.cost).slice(0, 3);
-  }
-
-  // 2. SCORING ENGINE
-  const input = (userInput || "").toLowerCase();
-  
-  const scoredModels = filtered.map(model => {
-    let score = 0;
+  // STRICT BUDGET FILTERING
+  if (budgetStr) {
+    const b = budgetStr.toLowerCase();
     
-    // Boost score if the user's prompt contains the model's tags
-    if (model.tags) {
-      model.tags.forEach(tag => {
-        if (input.includes(tag.toLowerCase())) score += 5;
+    // 1. Check for explicit numbers first (e.g., "I have 6 coins", "max 10")
+    const numberMatch = b.match(/\d+(\.\d+)?/);
+    
+    if (numberMatch) {
+      const maxCost = parseFloat(numberMatch[0]);
+      filteredModels = models.filter(m => m.cost <= maxCost);
+    } 
+    // 2. Fall back to keyword matching if no number is found
+    else if (b.includes("free")) {
+      filteredModels = models.filter(m => m.cost === 0);
+    } else if (b.includes("low")) {
+      filteredModels = models.filter(m => m.cost <= 5);
+    } else if (b.includes("medium")) {
+      filteredModels = models.filter(m => m.cost <= 20);
+    }
+    // If premium/high, don't filter out anything, just let the scoring boost the expensive ones
+  }
+
+  // Fallback: If filtering leaves us with 0 options (e.g., no free video models exist), show the cheapest available
+  if (filteredModels.length === 0) {
+    filteredModels = [...models].sort((a, b) => a.cost - b.cost).slice(0, 3);
+  }
+
+  return filteredModels
+    .map(m => {
+      let score = 0;
+
+      // keyword matching against model tags
+      (m.tags || []).forEach(tag => {
+        if (msg.includes(tag.replace("-", " "))) score += 30;
       });
-    }
 
-    // Boost score based on Tiers matching user intent
-    if (input.includes("fast") || input.includes("quick") || input.includes("speed")) {
-      if (model.tier === "fast") score += 5;
-    }
-    if (input.includes("quality") || input.includes("best") || input.includes("advanced")) {
-      if (model.tier === "premium" || model.tier === "ultra") score += 5;
-    }
-    if (input.includes("cheap") || input.includes("affordable")) {
-      // Reward lower cost models
-      score += (20 - model.cost); 
-    }
+      // Scoring logic based on tier
+      if (m.tier === "balanced") score += 10;
+      if (m.cost === 0) score += 20;
 
-    return { ...model, score };
-  });
+      if (msg.includes("cinematic") || msg.includes("motion")) {
+        if ((m.tags || []).includes("motion-control")) score += 60;
+      }
 
-  // 3. SORT & SELECT
-  // Sort primarily by score (highest first). If scores tie, sort by cost (cheapest first).
-  scoredModels.sort((a, b) => b.score - a.score || a.cost - b.cost);
+      // Boost specific tiers based on requested budget
+      if (budgetStr) {
+        const b = budgetStr.toLowerCase();
+        if (b.includes("premium") || b.includes("high") || b.includes("best")) {
+          if (m.tier === "premium" || m.tier === "ultra") score += 50;
+        }
+      }
 
-  // Return exactly the top 3 (removing the temporary score property to keep data clean)
-  return scoredModels.slice(0, 3).map(({ score, ...rest }) => rest);
+      return { ...m, score };
+    })
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 3);
 }
 
-/* ────────────────────────────────────────────
+/* ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
    PARSERS (FIXED BULLETPROOF PARSING)
-   ──────────────────────────────────────────── */
+   ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ */
 function parseSelectedModelId(msg) {
   const text = normalize(msg).toLowerCase();
   if (text.startsWith("select")) {
@@ -186,9 +141,9 @@ function getChangeText(msg) {
   return normalize(msg).slice("change:".length).trim();
 }
 
-/* ────────────────────────────────────────────
+/* ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
    MODEL / COST HELPERS
-   ──────────────────────────────────────────── */
+   ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ */
 function findModel(appType, modelId) {
   return (MODELS[appType] || []).find(m => m.id === modelId) || null;
 }
@@ -216,20 +171,20 @@ function buildCostWarningUi(appType, selectedModel) {
   };
 }
 
-/* ────────────────────────────────────────────
+/* ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
    TONE-AWARE REPLY PREFIX
-   ──────────────────────────────────────────── */
+   ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ */
 function tonePrefix(extraction) {
   if (!extraction) return "";
   if (extraction.userTone === "urgent") return "No worries, let's set this up quickly! ";
   if (extraction.userTone === "unsure") return "Happy to help figure this out together! ";
-  if (extraction.detectedLanguage === "Hindi") return "Samajh gaya — ";
+  if (extraction.detectedLanguage === "Hindi") return "Samajh gaya ΓÇö ";
   return "";
 }
 
-/* ────────────────────────────────────────────
+/* ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
    BUDGET / COMPLEXITY HELPERS
-   ──────────────────────────────────────────── */
+   ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ */
 function computeComplexity(session) {
   const features = session.extraction && Array.isArray(session.extraction.keyFeatures) ? session.extraction.keyFeatures.length : 0;
   if (features >= 4) return "complex";
@@ -261,9 +216,9 @@ function buildBudgetUi(session) {
   };
 }
 
-/* ────────────────────────────────────────────
+/* ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
    MERGE EXTRACTION
-   ──────────────────────────────────────────── */
+   ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ */
 function mergeExtraction(existing, latest, message) {
   if (!existing) return latest;
 
@@ -294,64 +249,73 @@ function mergeExtraction(existing, latest, message) {
   };
 }
 
-/* ────────────────────────────────────────────
+/* ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
    BUILD FULL HISTORY STRING for ranking
-   ──────────────────────────────────────────── */
+   ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ */
 function getFullUserText(session) {
   if (!session.history) return "";
   return session.history.filter(h => h.role === "user").map(h => h.content).join(" ");
 }
 
-/* ────────────────────────────────────────────
-   DEEP QUESTIONS — app-specific
-   ──────────────────────────────────────────── */
-async function buildDynamicBundleCard(session) {
-  const purpose = session.extraction?.appPurpose || "";
-  if (!purpose || purpose.trim().length < 12) return null;
-  if (!session.dynamicContext) {
-    session.dynamicContext = await generateDynamicContext({
-      appType: session.appType || session.extraction?.appType || "text",
-      appPurpose: purpose,
-      languageHint: detectLanguageMode(session)
-    });
-  }
-  return {
-    reply: localizedText(
-      session,
-      "Perfect. I generated relevant features and inputs for your app in one step. Select what you want to keep.",
-      "बहुत बढ़िया। मैंने आपके ऐप के लिए ज़रूरी फीचर्स और इनपुट एक साथ तैयार किए हैं। जो चाहिए चुनें।",
-      "Perfect. Maine aapke app ke liye relevant features aur inputs ek saath banaye hain. Jo chahiye select karo."
-    ),
-    uiType: "multi_select_form",
-    uiData: {
-      appType: session.appType || "text",
-      appPurpose: purpose,
-      options: session.dynamicContext.options || [],
-      variables: session.dynamicContext.variables || []
-    },
-    nextStep: 0,
-    coins: null
-  };
-}
+/* ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+   DEEP QUESTIONS ΓÇö app-specific
+   ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ */
+const DEEP_QUESTIONS = {
+  image: [
+    { field: 'imageStyle', question: 'What visual style should the output have?', options: ['Photorealistic / photography','Comic book / superhero style','Anime / manga','Oil painting / artistic','Cinematic / dramatic','Cartoon / illustrated','User chooses the style'] },
+    { field: 'imageInputType', question: 'What does the user provide to generate the image?', options: ['Just a text description','Upload a photo of themselves','Upload any reference image','Both text and photo upload'] },
+    { field: 'imageUseCase', question: 'What will people mainly use this for?', options: ['Social media profile pictures','Fun personal use','Marketing and branding','Gaming avatars','Gifts and merchandise','Professional headshots','Something else'] }
+  ],
+  video: [
+    { field: 'videoType', question: 'What kind of video should this app create?', options: ['Animate a still photo into video','Text description to video','Cinematic scenes','Short social media reels','Product showcase videos','Talking avatar / presenter'] },
+    { field: 'videoEffects', question: 'What motion or visual effect does it need?', options: ['Smooth cinematic camera movement','Dynamic action sequences','Slow motion dramatic effect','Natural realistic motion','User chooses the effect'] },
+    { field: 'videoDuration', question: 'How long should each generated video be?', options: ['3-5 seconds','5-10 seconds','10-30 seconds','User sets the duration'] }
+  ],
+  text: [
+    { field: 'textPurpose', question: 'What exactly should this app generate or plan?', options: ['Workout / fitness plans','Meal / diet plans','Blog posts and articles','Social media captions','Email and newsletters','Product descriptions','Study / learning plans','Travel itineraries','Scripts and screenplays','Something else'] },
+    { field: 'textTone', question: 'What tone should the generated content have?', options: ['Professional and formal','Casual and friendly','Motivational and energetic','Educational and clear','Creative and expressive','User controls the tone'] },
+    { field: 'textPersonalization', question: 'Should the app personalize content per user?', options: ['Yes ΓÇö based on user goals and preferences','Yes ΓÇö based on user input each time','No ΓÇö fixed template with variables','Not sure yet'] }
+  ],
+  audio: [
+    { field: 'audioType', question: 'What kind of audio should this app generate?', options: ['Voice narration / text to speech','AI music generation','Sound effects','Podcast production','Voice cloning','Speech to text transcription'] },
+    { field: 'audioStyle', question: 'What voice or audio style is needed?', options: ['Professional narrator voice','Warm conversational tone','Energetic / motivational voice','Multiple language support','User picks from voice options'] }
+  ],
+  vision: [
+    { field: 'visionTask', question: 'What should this app do when it sees an image?', options: ['Describe what is in the image','Detect and label objects','Read text from image (OCR)','Analyze medical images','Inspect product quality','Answer questions about an image'] },
+    { field: 'visionOutput', question: 'What format should the analysis result be in?', options: ['Plain text description','Structured report','JSON for developers','Simple yes/no answer','User-friendly summary'] }
+  ]
+};
 
 function getNextDeepQuestion(session) {
   if (!session.deepAnswers) session.deepAnswers = {};
 
-  // Budget is always required last before model selection.
-  if (!session.extraction?.budget && !session.deepAnswers?.budgetPreference) {
+  const purpose = session.extraction?.appPurpose || session.deepAnswers?.appPurpose || "";
+
+  // 1. Force the user to provide actual details if the purpose is empty or just a generic short phrase (under 12 chars)
+  if (!purpose || purpose.trim().length < 12) {
     return {
-      field: "budgetPreference",
-      question: "One last thing — what is your target budget per generation for this app?",
-      options: [
-        "Free models only (0 coins)",
-        "Low (< 5 coins)",
-        "Medium (5 - 20 coins)",
-        "Premium (> 20 coins)"
-      ]
+      field: 'appPurpose',
+      question: `Got it. Before we configure the settings, what exactly do you want this ${session.appType || 'AI'} app to generate or do? Describe your specific idea.`,
+      options: null // Forces a free-text input box
     };
   }
 
-  return null;
+  // 2. If we have a detailed purpose, proceed with the type-specific questions
+  const questions = DEEP_QUESTIONS[session.appType] || [];
+  for (const q of questions) {
+    if (!session.deepAnswers[q.field]) return q;
+  }
+  
+  // NEW BUDGET CHECK: Ask for budget if it wasn't extracted initially and hasn't been answered yet
+  if (!session.extraction?.budget && !session.deepAnswers.budgetPreference) {
+    return {
+      field: 'budgetPreference',
+      question: 'One last thing ΓÇö what is your target budget per generation for this app?',
+      options: ['Free models only', 'Low (Under 5 coins)', 'Medium (5-20 coins)', 'Premium / Best Quality']
+    };
+  }
+  
+  return null; // All done, ready for models
 }
 
 // FIXED: Removed ConfirmCard, set step=1
@@ -388,37 +352,22 @@ async function buildStep0Response(session) {
     session.step = 0;
     session.awaitingConfirmation = false; 
 
-    const bundleCard = await buildDynamicBundleCard(session);
-    if (bundleCard) {
-      await saveSession(session);
-      return bundleCard;
-    }
-
-    if (!ext?.appPurpose || ext.appPurpose.trim().length < 12) {
-      await saveSession(session);
-      return {
-        reply: localizedText(
-          session,
-          `Alright. What kind of ${session.appType || 'AI'} app are you looking to create?`,
-          `ठीक है। आप किस तरह का ${session.appType || 'AI'} ऐप बनाना चाहते हैं?`,
-          `Alright. Aap kis type ka ${session.appType || 'AI'} app banana chahte ho?`
-        ),
-        uiType: "text",
-        uiData: null,
-        nextStep: 0,
-        coins: null
-      };
-    }
-
     const nextQ = getNextDeepQuestion(session);
+
     if (nextQ) {
       session.currentDeepField = nextQ.field;
       session.awaitingDeepAnswer = true;
       await saveSession(session);
+      
+      const prefix = tonePrefix(ext);
+      const questionText = ext.suggestedReply 
+        ? `${prefix}${ext.suggestedReply}` 
+        : `${prefix}Got it. ${nextQ.question}`;
+
       return {
-        reply: nextQ.question,
-        uiType: "chips",
-        uiData: { options: nextQ.options },
+        reply: questionText,
+        uiType: nextQ.options ? 'chips' : 'text',
+        uiData: nextQ.options ? { options: nextQ.options } : null,
         nextStep: 0,
         coins: null
       };
@@ -430,14 +379,12 @@ async function buildStep0Response(session) {
   session.step = 0;
   await saveSession(session);
   const prefix = tonePrefix(ext);
-  const options = detectLanguageMode(session) === "Hindi"
-    ? ['टेक्स्ट','इमेज','ऑडियो','वीडियो','विज़न']
-    : detectLanguageMode(session) === "Hinglish"
-      ? ['Text','Image','Audio','Video','Vision']
-      : ['Text','Image','Audio','Video','Vision'];
+  const options = ext && ext.appPurpose && /clinic|hospital/i.test(ext.appPurpose)
+    ? ['Images','Video tour','Written content','Something else']
+    : ['Text','Image','Audio','Video','Vision'];
     
   return {
-    reply: `${prefix}${localizedText(session, "I'd love to help! What type of output does your app need?", "मैं मदद करना चाहूंगा! आपके ऐप को किस प्रकार का आउटपुट चाहिए?", "Main help karunga! Aapke app ko kis type ka output chahiye?")}`,
+    reply: `${prefix}I'd love to help! What type of output does your app need?`,
     uiType: 'chips',
     uiData: { options },
     nextStep: 0,
@@ -445,9 +392,9 @@ async function buildStep0Response(session) {
   };
 }
 
-/* ────────────────────────────────────────────
+/* ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
    EDGE CASE GUARDS
-   ──────────────────────────────────────────── */
+   ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ */
 function checkEdgeCases(message, session) {
   const text = normalize(message);
   const msg = lower(text);
@@ -491,40 +438,21 @@ function checkEdgeCases(message, session) {
     };
   }
 
-  const trimmedText = text.trim();
-  
-  // 1. Pure Greeting Interceptor
-  // Catches "hello", "hi", "hey", "hy", "greetings" even with punctuation like "hello!!"
-  const isGreeting = /^(hi|hello|hey|hy|hola|greetings)[\s!\.]*$/i.test(trimmedText);
-  
-  if (isGreeting) {
-    return {
-      reply: "Hello! I am ready to help you build your AI application today. To get started, what type of output does your app need?",
-      uiType: 'chips',
-      uiData: { options: ['Text', 'Image', 'Audio', 'Video', 'Vision'] },
-      nextStep: session.step,
-      coins: null
-    };
-  }
-
   // 2. Abuse / gibberish guard
+  const trimmedText = text.trim();
   const symbolCount = (trimmedText.match(/[^a-zA-Z0-9\s]/g) || []).length;
   
   const isGibberish = 
     trimmedText.length < 2 || // Too short
-    /(asdf|qwer|zxcv|hjkl|asdasd)/i.test(trimmedText) || // Expanded keyboard smash
+    /(asdf|qwer|zxcv|hjkl)/i.test(trimmedText) || // Classic keyboard smash
     /[a-zA-Z0-9]{20,}/.test(trimmedText) || // Huge 20+ char block with no spaces
-    (symbolCount > trimmedText.length / 2 && trimmedText.length > 5) || // Over 50% symbols
-    /[bcdfghjklmnpqrstvwxz]{5,}/i.test(trimmedText) || // NEW: 5+ consonants in a row (catches 'abcszs')
-    /(.)\1{4,}/i.test(trimmedText) || // 5+ of the exact same character
-    (!trimmedText.includes(' ') && trimmedText.length > 8 && /[0-9@#\$\%\^\&\*]/.test(trimmedText)); // NEW: 8+ chars, no spaces, mixed with numbers/symbols (catches 'asdasd@#q31')
+    (symbolCount > trimmedText.length / 2 && trimmedText.length > 5); // Over 50% symbols
 
   if (isGibberish) {
     return {
-      // Changed the reply to be exactly what you want when nonsense is typed
-      reply: `Sorry, I didn't quite get what you want to build today. What type of output does your app need?`,
+      reply: `I didn't quite catch that. Could you describe what kind of AI app you'd like to build?`,
       uiType: 'chips',
-      uiData: { options: ['Text', 'Image', 'Audio', 'Video', 'Vision'] },
+      uiData: { options: ['Image app', 'Video app', 'Text app', 'Audio app', 'Vision app'] },
       nextStep: session.step,
       coins: null
     };
@@ -532,7 +460,7 @@ function checkEdgeCases(message, session) {
 
   if (!text || text === '') {
     return {
-      reply: `Go ahead — describe what you'd like to build!`,
+      reply: `Go ahead ΓÇö describe what you'd like to build!`,
       uiType: 'text',
       uiData: null,
       nextStep: session.step,
@@ -542,7 +470,7 @@ function checkEdgeCases(message, session) {
 
   if (msg.includes('help') && text.trim().split(' ').length <= 3) {
     return {
-      reply: `Sure! Here's what I can help you build:\n\n🖼️ Image apps\n🎥 Video apps\n📝 Text apps\n🔊 Audio apps\n👁️ Vision apps\n\nWhich type interests you?`,
+      reply: `Sure! Here's what I can help you build:\n\n≡ƒû╝∩╕Å Image apps\n≡ƒÄÑ Video apps\n≡ƒô¥ Text apps\n≡ƒöè Audio apps\n≡ƒæü∩╕Å Vision apps\n\nWhich type interests you?`,
       uiType: 'chips',
       uiData: { options: ['Image app', 'Video app', 'Text app', 'Audio app', 'Vision app', 'Help me choose'] },
       nextStep: 0,
@@ -585,9 +513,9 @@ function checkEdgeCases(message, session) {
   return null; 
 }
 
-/* ════════════════════════════════════════════
+/* ΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉ
    MAIN ROUTER
-   ════════════════════════════════════════════ */
+   ΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉ */
 export async function route(session, message) {
   // 1. WALL OF TEXT GUARD: Truncate to 1000 characters
   const rawText = String(message || "").substring(0, 1000);
@@ -634,7 +562,6 @@ export async function route(session, message) {
 
   const latestExtraction = await extractRequirements(text, session.history || []);
   session.extraction = mergeExtraction(session.extraction, latestExtraction, text);
-  session.languageMode = detectLanguageMode(session);
 
   if (session.extraction.enterpriseSignals !== undefined) {
     session.enterpriseSignals = session.extraction.enterpriseSignals;
@@ -643,7 +570,7 @@ export async function route(session, message) {
     session.userType = session.extraction.userType;
   }
 
-  // ─── STEP 0: First message — detect app type ────────
+  // ΓöÇΓöÇΓöÇ STEP 0: First message ΓÇö detect app type ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
   if (session.step === 0) {
     const greetings = ['hi', 'hello', 'hey', 'hii', 'helo', 'good morning', 'good evening', 'yo', 'sup', 'namaste', 'hola'];
     const isGreeting = greetings.some(g => lower(text) === g || lower(text).startsWith(g + ' '));
@@ -651,7 +578,7 @@ export async function route(session, message) {
     if (isGreeting) {
       await saveSession(session);
       return {
-        reply: `Hey! 👋 I'm RentPrompts Agent.\n\nI help you create and publish AI-powered apps on the RentPrompts marketplace — no coding needed.\n\nWhat kind of AI app are you thinking of building?`,
+        reply: `Hey! ≡ƒæï I'm RentPrompts Agent.\n\nI help you create and publish AI-powered apps on the RentPrompts marketplace ΓÇö no coding needed.\n\nWhat kind of AI app are you thinking of building?`,
         uiType: 'chips',
         uiData: { options: ['Image generator', 'Video creator', 'Text / writing tool', 'Audio generator', 'Vision / image analyzer', 'Not sure yet'] },
         nextStep: 0,
@@ -664,7 +591,7 @@ export async function route(session, message) {
       session.step = 0;
       await saveSession(session);
       return {
-        reply: `No problem! Answer a few quick questions and I'll recommend the best fit. First — what is the main thing you want your app to CREATE or DO?`,
+        reply: `No problem! Answer a few quick questions and I'll recommend the best fit. First ΓÇö what is the main thing you want your app to CREATE or DO?`,
         uiType: 'chips',
         uiData: { options: ['Generate images', 'Create videos', 'Write text', 'Generate audio', 'Analyze images'] },
         nextStep: 0,
@@ -672,69 +599,78 @@ export async function route(session, message) {
       };
     }
 
-    // Handle Multi-Select Form Submission
-    if (text.startsWith("multi_select_form::")) {
-      try {
-        const formData = JSON.parse(text.replace("multi_select_form::", ""));
-
-        session.extraction = session.extraction || {};
-        session.extraction.features = Array.isArray(formData.selectedOptions) ? formData.selectedOptions : [];
-        session.extraction.variables = normalizeSubmittedVariables(formData.variables);
-        session.extraction.keyFeatures = session.extraction.features;
-        session.deepAnswers = session.deepAnswers || {};
-        session.deepAnswers.dynamicFeatures = session.extraction.features;
-        session.deepAnswers.dynamicVariables = session.extraction.variables;
-
-        await saveSession(session);
-
-        const nextQ = getNextDeepQuestion(session);
-
-        if (nextQ) {
-          session.currentDeepField = nextQ.field;
-          session.awaitingDeepAnswer = true;
-          await saveSession(session);
-          return {
-            reply: `Got it! I've saved those features. ${nextQ.question}`,
-            uiType: "chips",
-            uiData: { options: nextQ.options || [] },
-            nextStep: session.step,
-            coins: null
-          };
-        } else {
-          return await showModels(session);
-        }
-      } catch (e) {
-        console.error("Failed to parse form data:", e);
+    if (session.awaitingDeepAnswer && session.currentDeepField) {
+      
+      // NEW: Intercept "User chooses" to ask for the specific dropdown options
+      const isUserChoice = ['user chooses', 'user sets', 'user picks', 'user controls'];
+      if (isUserChoice.some(u => lower(text).includes(u))) {
         return {
-          reply: "Sorry, I had trouble reading that form. Let's try again. What features do you need?",
-          uiType: "text",
+          reply: "Got it! Since the end-user will decide, what specific options should we give them to choose from? (e.g., 'Realistic, Anime, or 3D')",
+          uiType: 'text',
           uiData: null,
-          nextStep: session.step,
+          nextStep: 0,
           coins: null
         };
       }
-    }
 
-    if (session.awaitingDeepAnswer && session.currentDeepField) {
-      const answer = text;
-      if (!session.deepAnswers) session.deepAnswers = {};
-      session.deepAnswers[session.currentDeepField] = answer;
-      if (!session.extraction) session.extraction = {};
-      if (session.currentDeepField === "budgetPreference") {
-        session.extraction.budget = answer;
+      // NEW: INTERCEPT "Something else"
+      const isSomethingElse = ['something else', 'other', 'none of these'];
+      if (isSomethingElse.some(s => lower(text) === s || lower(text) === 'other')) {
+        return {
+          reply: "No problem. Please type out exactly what you have in mind so I can configure the prompt correctly.",
+          uiType: 'text',
+          uiData: null,
+          nextStep: 0,
+          coins: null
+        };
       }
+
+      let finalAnswer = text;
+      
+      // I DON'T KNOW GUARD: If user is unsure, grab the most generic option
+      const unsureSignals = ['idk', 'i dont know', 'not sure', 'you decide', 'whatever', 'doesnt matter'];
+      if (unsureSignals.some(s => lower(text).includes(s))) {
+        const currentQ = getNextDeepQuestion(session);
+        // Default to "User chooses" or the last option in the list
+        finalAnswer = currentQ?.options?.find(opt => lower(opt).includes('user')) || 
+                      currentQ?.options?.[currentQ.options.length - 1] || 'Not specified';
+      }
+
+      if (!session.deepAnswers) session.deepAnswers = {};
+      session.deepAnswers[session.currentDeepField] = finalAnswer;
+      if (!session.extraction) session.extraction = {};
+      Object.assign(session.extraction, session.deepAnswers);
       session.awaitingDeepAnswer = false;
       session.currentDeepField = null;
 
       const nextQ = getNextDeepQuestion(session);
+
       if (nextQ) {
         session.currentDeepField = nextQ.field;
         session.awaitingDeepAnswer = true;
         await saveSession(session);
+
+        const acks = {
+          'appPurpose': 'Great idea.',
+          'Free models only': 'Got it. Keeping it free.',
+          'Low (Under 5 coins)': 'Got it. Budget-friendly models coming right up.',
+          'Medium (5-20 coins)': 'Understood. Finding the best mid-range models.',
+          'Premium / Best Quality': 'Perfect. Giving you the top-tier flagship models.',
+          'Workout / fitness plans': 'Perfect.',
+          'Meal / diet plans': 'Got it.',
+          'Blog posts and articles': 'Got it.',
+          'Photorealistic / photography': 'Nice choice.',
+          'Comic book / superhero style': 'Love it.',
+          'Animate a still photo into video': 'Got it.',
+          'Text description to video': 'Understood.',
+        };
+        const lastAnswer = text;
+        const ack = session.currentDeepField === 'appPurpose' ? acks['appPurpose'] : (acks[lastAnswer] || 'Got it.');
+
         return {
-          reply: nextQ.question,
-          uiType: "chips",
-          uiData: { options: nextQ.options || [] },
+          reply: `${ack} ${nextQ.question}`,
+          uiType: nextQ.options ? 'chips' : 'text',
+          uiData: nextQ.options ? { options: nextQ.options } : null,
           nextStep: 0,
           coins: null
         };
@@ -755,7 +691,7 @@ export async function route(session, message) {
     return await buildStep0Response(session);
   }
 
-  // ─── STEP 1: Model selection → generate config ───────────────────────
+  // ΓöÇΓöÇΓöÇ STEP 1: Model selection ΓåÆ generate config ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
   if (session.step === 1) {
     const selectedModelId = parseSelectedModelId(text);
 
@@ -792,7 +728,7 @@ export async function route(session, message) {
           uiData: { 
             appName: seoData.appName,
             appDescription: seoData.appDescription,
-            cost: session.modelCost, // Strictly overrides any LLM hallucinations or math errors
+            cost: seoData.suggestedPrice || session.modelCost,
             systemPrompt: promptData.systemPrompt,
             userPrompt: promptData.userPrompt,
             variablesUsed: promptData.variablesUsed,
@@ -822,7 +758,7 @@ export async function route(session, message) {
     };
   }
 
-  // ─── STEP 2: Final Review (Publish, Save Draft, Tweak) ───────────────────
+  // ΓöÇΓöÇΓöÇ STEP 2: Final Review (Publish, Save Draft, Tweak) ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
   if (session.step === 2) {
     const msg2 = lower(message);
 
@@ -843,7 +779,7 @@ export async function route(session, message) {
       const payload = {
         appType: session.appType,
         modelId: session.modelId,
-        costPerRun: session.modelCost,
+        costPerRun: session.seoData?.suggestedPrice || session.modelCost,
         systemPrompt: session.promptData?.systemPrompt,
         userPrompt: session.promptData?.userPrompt,
         negativePrompt: session.promptData?.negativePrompt,
@@ -854,12 +790,12 @@ export async function route(session, message) {
         publishedAt: new Date().toISOString()
       };
 
-      console.log("\n══════ MOCK PUBLISH ══════");
+      console.log("\nΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉ MOCK PUBLISH ΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉ");
       console.log(JSON.stringify(payload, null, 2));
-      console.log("══════════════════════════\n");
+      console.log("ΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉ\n");
 
       return {
-        reply: `🎉 Your app "${session.seoData?.appName}" is now live! Users will be charged ${payload.costPerRun} coins per generation.`,
+        reply: `≡ƒÄë Your app "${session.seoData?.appName}" is now live! Users will be charged ${payload.costPerRun} coins per generation.`,
         uiType: "success",
         uiData: {
           appName: session.seoData?.appName,
@@ -911,7 +847,7 @@ export async function route(session, message) {
     }
   }
 
-  // ─── CATCH ALL ───
+  // ΓöÇΓöÇΓöÇ CATCH ALL ΓöÇΓöÇΓöÇ
   return {
     reply: "I'm ready to proceed. Let me know if you want to 'Publish' this app, 'Save Draft', or change something.",
     uiType: "chips",
