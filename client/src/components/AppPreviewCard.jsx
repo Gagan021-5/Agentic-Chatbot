@@ -1,14 +1,24 @@
 import React, { useState } from 'react';
-import { testPromptRun } from '../utils/api';
+import { testPreview } from '../utils/api';
 
 export default function AppPreviewCard({ data, onSendMessage }) {
   const [isEditing, setIsEditing] = useState(false);
   const [editInstruction, setEditInstruction] = useState('');
   const [isPreviewMode, setIsPreviewMode] = useState(false);
-  const [testInputs, setTestInputs] = useState({});
-  const [testOutput, setTestOutput] = useState("");
-  const [testError, setTestError] = useState("");
-  const [isRunningTest, setIsRunningTest] = useState(false);
+  const [testInputs, setTestInputs] = useState(() => {
+    const rawVars = data?.variables || data?.variablesUsed || [];
+    return rawVars.reduce((acc, variable) => {
+      // Handle both object format and old string format
+      const varName = typeof variable === 'object' ? variable.name : String(variable || "").replace(/^\$\$/, "");
+      const testVal = variable.test_value || '';
+      acc[varName] = testVal;
+      return acc;
+    }, {});
+  });
+  const [previewResult, setPreviewResult] = useState(null);
+  const [isGenerating, setIsGenerating] = useState(false);
+  const [previewError, setPreviewError] = useState('');
+  const [testImage, setTestImage] = useState(null);
 
   if (!data) return null;
 
@@ -16,7 +26,7 @@ export default function AppPreviewCard({ data, onSendMessage }) {
   const formatPrompt = (text) => {
     if (!text) return null;
     const parts = text.split(/(\$\$\w+)/g);
-    return parts.map((part, i) => 
+    return parts.map((part, i) =>
       part.startsWith('$$') ? <span key={i} className="text-rent-purple font-semibold">{part}</span> : part
     );
   };
@@ -29,107 +39,247 @@ export default function AppPreviewCard({ data, onSendMessage }) {
     }
   };
 
-  // Ensure variables array exists
-  const variables = data.variablesUsed || [];
-  const normalizedVariables = variables.map((v) => String(v || "").replace(/^\$\$/, "")).filter(Boolean);
+  // Support both data.variables (new) and data.variablesUsed (existing)
+  const rawVariables = data.variables || data.variablesUsed || [];
+  const normalizedVariables = rawVariables.map((v) => {
+    if (typeof v === 'object' && v.name) return v.name;
+    return String(v || "").replace(/^\$\$/, "");
+  }).filter(Boolean);
 
-  const handleInputChange = (key, value) => {
-    setTestInputs((prev) => ({ ...prev, [key]: value }));
+  const handleTestInputChange = (name, value) => {
+    setTestInputs(prev => ({ ...prev, [name]: value }));
   };
 
   const handleRunTest = async () => {
-    setIsRunningTest(true);
-    setTestError("");
+    setIsGenerating(true);
+    setPreviewResult(null);
+    setPreviewError('');
     try {
-      const result = await testPromptRun({
+      // 1. Intelligent Fallback: If appType is missing, guess it from the prompt
+      let currentAppType = data.appType;
+      if (!currentAppType) {
+        const promptText = (data.systemPrompt || '').toLowerCase();
+        if (promptText.includes('image') || promptText.includes('photo') || promptText.includes('realistic')) {
+          currentAppType = 'image';
+        } else if (promptText.includes('audio') || promptText.includes('voice')) {
+          currentAppType = 'audio';
+        } else {
+          currentAppType = 'text';
+        }
+      }
+
+      const json = await testPreview({
+        appType: currentAppType,
+        variables: testInputs,
         systemPrompt: data.systemPrompt,
-        userPrompt: data.userPrompt,
-        testInputs,
+        testImageBase64: testImage
       });
-      setTestOutput(result.output || "");
-    } catch (error) {
-      setTestError(error.message || "Test run failed.");
+      if (json.success) {
+        setPreviewResult(json.preview);
+      } else {
+        setPreviewError(json.error || "Preview generation failed.");
+      }
+    } catch (e) {
+      console.error(e);
+      setPreviewError(e.message || "Network error.");
     } finally {
-      setIsRunningTest(false);
+      setIsGenerating(false);
     }
   };
 
   return (
-    <div className="w-full glass-panel border border-rent-border rounded-xl overflow-hidden mt-2 shadow-soft font-sans">
-      
-      
-      <div className="bg-rent-elevated p-4 border-b border-rent-border flex justify-between items-start">
+    <div className="w-full bg-[#121018] border border-[#2a2238] rounded-2xl overflow-hidden mt-2 shadow-xl font-sans animate-fade-in-up">
+
+      {/* ─── Header ─── */}
+      <div className="bg-[#121018] p-5 border-b border-[#2a2238] flex justify-between items-start">
         <div>
-          <h3 className="text-white font-bold text-lg">{data.appName || 'Untitled App'}</h3>
-          <p className="text-white/50 text-sm mt-1">{data.appDescription}</p>
+          <h3 className="text-xl font-bold text-white mb-1">{data.appName || 'Your AI App'}</h3>
+          <p className="text-sm text-gray-400">{data.appDescription || 'Ready to deploy.'}</p>
         </div>
-        <div className="bg-[#2d1b4e] border border-[#5a32a3] px-3 py-1 rounded-full flex items-center gap-1 shrink-0 ml-2">
-          <span className="text-[#a77bf3] text-sm font-medium">{data.cost} coins / run</span>
+        <div className="bg-[#2d1b4e] border border-[#5a32a3] px-3 py-1 rounded-full flex items-center shrink-0 ml-2">
+          <span className="text-[#a77bf3] text-sm font-medium">{data.cost || '0.00'} coins / run</span>
         </div>
       </div>
 
-      
-      <div className="p-4 space-y-4">
-        <div>
-          <span className="text-xs font-semibold text-white/40 uppercase tracking-wider block mb-2">Backend Logic</span>
-          <div className="bg-black/50 border border-rent-border p-3 rounded-lg text-sm text-white/70 font-mono leading-relaxed h-24 overflow-y-auto custom-scrollbar">
-            {data.systemPrompt}
+      {/* ─── Body ─── */}
+      <div className="p-5">
+        {/* Default view: show prompts */}
+        {!isPreviewMode && !isEditing && (
+          <div className="space-y-4">
+            <div>
+              <span className="text-xs font-semibold text-gray-500 uppercase tracking-wider">Backend Logic</span>
+              <div className="mt-1 text-sm text-gray-300 bg-[#0a0a0f] p-3 rounded-lg border border-[#2a2238] font-mono leading-relaxed h-24 overflow-y-auto custom-scrollbar">
+                {data.systemPrompt}
+              </div>
+            </div>
+            {data.userPrompt && (
+              <div>
+                <span className="text-xs font-semibold text-gray-500 uppercase tracking-wider">Prompt Template</span>
+                <div className="mt-1 text-sm text-gray-300 bg-[#0a0a0f] p-3 rounded-lg border border-[#2a2238] font-mono leading-relaxed custom-scrollbar">
+                  {formatPrompt(data.userPrompt)}
+                </div>
+              </div>
+            )}
           </div>
-        </div>
-        <div>
-          <span className="text-xs font-semibold text-white/40 uppercase tracking-wider block mb-2">Prompt Template</span>
-          <div className="bg-black/50 border border-rent-border p-3 rounded-lg text-sm text-white/70 font-mono leading-relaxed custom-scrollbar">
-            {formatPrompt(data.userPrompt)}
+        )}
+
+        {/* ─── Live Preview Mode ─── */}
+        {isPreviewMode && (
+          <div className="space-y-4 bg-[#0a0a0f] p-4 rounded-xl border border-[#3b2d50]">
+            <div className="flex items-center gap-2">
+              <div className="h-2 w-2 rounded-full bg-[#7c3aed] animate-pulse" />
+              <h4 className="text-sm font-semibold text-white">Live Preview — Test Your App</h4>
+            </div>
+            <p className="text-xs text-gray-400 mb-3">
+              Enter sample data below to see how your <span className="font-bold text-[#a77bf3] uppercase">{data.appType || 'TEXT'}</span> app will respond.
+            </p>
+
+            {rawVariables.map((v, i) => {
+              const varName = typeof v === 'object' ? v.name : String(v || "").replace(/^\$\$/, "");
+              const placeholderText = v.placeholder || `Enter ${varName}...`;
+              
+              return (
+                <div key={i} className="flex flex-col gap-1.5">
+                  <label className="text-xs text-gray-300 ml-1 font-medium">{varName}</label>
+                  <input
+                    type="text"
+                    value={testInputs[varName] || ''}
+                    onChange={(e) => handleTestInputChange(varName, e.target.value)}
+                    placeholder={placeholderText}
+                    className="w-full bg-[#121018] border border-[#2a2238] rounded-lg px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-[#8b5cf6]/60 transition-all placeholder:text-gray-600"
+                  />
+                </div>
+              );
+            })}
+
+            {data.appType?.toLowerCase() === 'vision' && (
+              <div className="flex flex-col gap-1.5 mb-3">
+                <label className="text-xs text-[#a77bf3] font-semibold uppercase tracking-wider ml-1">Upload Test Image</label>
+                <input 
+                  type="file" 
+                  accept="image/*"
+                  onChange={(e) => {
+                    const file = e.target.files[0];
+                    if(file) {
+                      const reader = new FileReader();
+                      reader.onloadend = () => setTestImage(reader.result);
+                      reader.readAsDataURL(file);
+                    }
+                  }}
+                  className="text-xs text-gray-400 file:mr-4 file:py-2 file:px-4 file:rounded-lg file:border-0 file:text-xs file:font-semibold file:bg-[#2a2238] file:text-[#a77bf3] hover:file:bg-[#3b2d50]"
+                />
+              </div>
+            )}
+
+            <button
+              onClick={handleRunTest}
+              disabled={isGenerating}
+              className="w-full mt-2 py-2.5 bg-[#7c3aed] hover:bg-[#6d28d9] disabled:bg-[#3b2d50] disabled:text-gray-500 text-white rounded-lg text-sm font-semibold transition-all flex items-center justify-center gap-2 shadow-lg shadow-[#7c3aed]/20 disabled:shadow-none"
+            >
+              {isGenerating ? (
+                <>
+                  <svg className="animate-spin h-4 w-4 text-white" viewBox="0 0 24 24" fill="none">
+                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z" />
+                  </svg>
+                  <span>Generating Preview...</span>
+                </>
+              ) : '▶ Run Live Test'}
+            </button>
+
+            {/* Error display */}
+            {previewError && (
+              <div className="mt-3 p-3 bg-red-900/20 border border-red-800/40 rounded-lg text-red-300 text-xs">
+                ⚠ {previewError}
+              </div>
+            )}
+
+            {/* PREVIEW RESULTS DISPLAY */}
+            {previewResult && (
+              <div className="mt-4 pt-4 border-t border-[#2a2238] animate-fade-in-up">
+                <span className="text-xs font-semibold text-[#a77bf3] uppercase tracking-wider mb-3 block">Result</span>
+                
+                {/* Image or Multimodal Output */}
+                {(previewResult.type === 'image' || previewResult.type === 'multimodal') && previewResult.url && (
+                  <img 
+                    src={previewResult.url} 
+                    alt="AI Generation Preview" 
+                    className="w-full max-h-64 object-cover rounded-xl shadow-lg border border-[#3b2d50] mb-3" 
+                  />
+                )}
+
+                {/* Text or Multimodal Output (Text Portion) */}
+                {(previewResult.type === 'text' || previewResult.type === 'multimodal') && previewResult.content && (
+                  <div className="bg-[#1a1525] p-3 rounded-lg border border-[#2a2238]">
+                    <p className="text-sm text-gray-200 whitespace-pre-wrap leading-relaxed">{previewResult.content}</p>
+                  </div>
+                )}
+                
+                {/* Audio Output */}
+                {previewResult.type === 'audio' && (
+                  <div className="space-y-2">
+                    <p className="text-sm text-gray-300">{previewResult.content}</p>
+                    <audio controls className="w-full h-10 rounded-md bg-[#121018]">
+                      <source src={previewResult.url} type="audio/mpeg" />
+                    </audio>
+                  </div>
+                )}
+              </div>
+            )}
           </div>
-        </div>
+        )}
       </div>
 
-      
-      <div className="p-4 border-t border-rent-border bg-rent-elevated">
+      {/* ─── Actions Footer ─── */}
+      <div className="p-4 bg-[#0a0a0f] border-t border-[#2a2238]">
         {!isEditing ? (
           <div className="flex flex-wrap gap-2 items-center">
-            <button 
+            <button
               onClick={() => onSendMessage('Publish App')}
-              className="px-5 py-2.5 bg-[#6d28d9] hover:bg-[#5b21b6] text-white rounded-lg text-sm font-medium transition-colors"
+              className="px-5 py-2.5 bg-[#6d28d9] hover:bg-[#5b21b6] text-white rounded-lg text-sm font-medium transition-colors shadow-lg shadow-[#6d28d9]/20"
             >
               Publish to Marketplace
             </button>
-            <button 
+            <button
+              onClick={() => setIsPreviewMode(!isPreviewMode)}
+              className={`px-4 py-2.5 rounded-lg text-sm font-medium transition-colors border ${
+                isPreviewMode
+                  ? 'bg-[#2a2238] text-white border-[#3b2d50]'
+                  : 'bg-transparent text-[#a77bf3] border-[#5a32a3] hover:bg-[#2a2238]'
+              }`}
+            >
+              {isPreviewMode ? '✕ Close Preview' : '⚡ Live Preview'}
+            </button>
+            <button
               onClick={() => onSendMessage('Save Draft')}
               className="px-4 py-2.5 bg-transparent text-gray-400 hover:text-white rounded-lg text-sm font-medium transition-colors"
             >
               Save Draft
             </button>
-            <button 
+            <button
               onClick={() => setIsEditing(true)}
               className="px-4 py-2 bg-[#2a2a2a] text-gray-300 hover:text-white rounded-lg text-sm font-medium ml-auto transition-colors"
             >
               Edit
             </button>
-            <button
-              onClick={() => setIsPreviewMode((prev) => !prev)}
-              className="px-4 py-2 bg-[#2a2a2a] text-gray-300 hover:text-white rounded-lg text-sm font-medium transition-colors"
-            >
-              {isPreviewMode ? "Hide Test" : "Test App"}
-            </button>
           </div>
         ) : (
           <div className="flex gap-2">
-            <input 
-              type="text" 
+            <input
+              type="text"
               value={editInstruction}
               onChange={(e) => setEditInstruction(e.target.value)}
               placeholder="Tell the AI what to change..."
-              className="flex-1 bg-black/50 border border-rent-border rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-[#8b5cf6] transition-colors"
+              className="flex-1 bg-black/50 border border-[#2a2238] rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-[#8b5cf6] transition-colors"
               onKeyDown={(e) => e.key === 'Enter' && handleEditSubmit()}
             />
-            <button 
+            <button
               onClick={handleEditSubmit}
               className="px-4 py-2 bg-[#6d28d9] text-white rounded-lg text-sm font-medium hover:bg-[#5b21b6] transition-colors"
             >
               Update
             </button>
-            <button 
+            <button
               onClick={() => setIsEditing(false)}
               className="px-3 py-2 text-white/50 hover:text-white text-sm transition-colors"
             >
@@ -137,37 +287,6 @@ export default function AppPreviewCard({ data, onSendMessage }) {
             </button>
           </div>
         )}
-
-        {isPreviewMode ? (
-          <div className="mt-4 border-t border-rent-border pt-4 space-y-3">
-            <div className="text-sm text-white/80 font-medium">Live Preview / Test Run</div>
-            <div className="space-y-2">
-              {normalizedVariables.map((name) => (
-                <input
-                  key={name}
-                  type="text"
-                  value={testInputs[name] || ""}
-                  onChange={(e) => handleInputChange(name, e.target.value)}
-                  placeholder={`Enter ${name}`}
-                  className="w-full bg-black/50 border border-rent-border rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-[#8b5cf6]"
-                />
-              ))}
-            </div>
-            <button
-              onClick={handleRunTest}
-              disabled={isRunningTest}
-              className="px-4 py-2 bg-[#6d28d9] text-white rounded-lg text-sm font-medium hover:bg-[#5b21b6] disabled:opacity-60"
-            >
-              {isRunningTest ? "Running..." : "Run Test"}
-            </button>
-            {testError ? <div className="text-red-300 text-xs">{testError}</div> : null}
-            {testOutput ? (
-              <div className="bg-black/50 border border-rent-border p-3 rounded-lg text-sm text-white/80 whitespace-pre-wrap">
-                {testOutput}
-              </div>
-            ) : null}
-          </div>
-        ) : null}
       </div>
     </div>
   );

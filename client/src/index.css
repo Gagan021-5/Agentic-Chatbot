@@ -266,6 +266,22 @@ body::after {
 }
 
 /* ──────────────────────────────────────────────
+   MIC PULSE (VOICE INPUT)
+   ────────────────────────────────────────────── */
+.mic-pulse {
+  animation: micPulse 1.2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}
+
+@keyframes micPulse {
+  0%, 100% {
+    box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.4);
+  }
+  50% {
+    box-shadow: 0 0 0 8px rgba(239, 68, 68, 0);
+  }
+}
+
+/* ──────────────────────────────────────────────
    RESPONSIVE UTILITIES
    ────────────────────────────────────────────── */
 @layer utilities {

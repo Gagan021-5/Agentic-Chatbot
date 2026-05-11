@@ -1,6 +1,6 @@
 import MODELS from "./models.js";
 import mockData from "./mockData.js";
-import { extractRequirements, generateDynamicContext } from "./groq.js";
+import { extractRequirements, generateDynamicContext, triageDynamicContext } from "./groq.js";
 import { generatePromptTemplate, generateSEO, applyPromptInstruction, buildPromptTemplateFromSession } from "./gemini.js";
 import { buildBudgetTiers, getModelCost } from "./costCalculator.js";
 import { isOffTopic, OFF_TOPIC_RESPONSE } from "./requirementRouter.js";
@@ -308,19 +308,64 @@ function getFullUserText(session) {
 async function buildDynamicBundleCard(session) {
   const purpose = session.extraction?.appPurpose || "";
   if (!purpose || purpose.trim().length < 12) return null;
+
+  // ─── AGENTIC TRIAGE: Evaluate specificity before generating form ───
+  // Skip triage if we already have a ready dynamic context (user answered a clarification)
   if (!session.dynamicContext) {
-    session.dynamicContext = await generateDynamicContext({
+    const triageResult = await triageDynamicContext({
       appType: session.appType || session.extraction?.appType || "text",
       appPurpose: purpose,
-      languageHint: detectLanguageMode(session)
+      languageHint: detectLanguageMode(session),
+      conversationHistory: session.history || []
     });
+
+    // ─── NEEDS CONTEXT: Ask a domain-specific clarifying question ───
+    if (triageResult.status === "needs_context" && triageResult.question) {
+      // Cap at 2 triage rounds to prevent infinite loops
+      session.triageRounds = (session.triageRounds || 0) + 1;
+      if (triageResult.domain) session.domainIdentified = triageResult.domain;
+      console.log(`[Triage] Round ${session.triageRounds} — Domain: ${triageResult.domain || "unknown"} — Asking: ${triageResult.question.substring(0, 80)}`);
+      if (session.triageRounds <= 2) {
+        session.awaitingTriageAnswer = true;
+        return {
+          reply: triageResult.question,
+          uiType: null,
+          uiData: null,
+          nextStep: session.step, // Stay on same step
+          coins: null
+        };
+      }
+      // If we've asked 2 clarifications already, force generate with what we have
+    }
+
+    // ─── READY: AI has enough context, store the form ───
+    if (triageResult.status === "ready") {
+      console.log(`Successfully scoped app for domain: ${triageResult.domain || "Unknown"}`);
+      if (triageResult.domain) session.domainIdentified = triageResult.domain;
+    }
+    
+    if (triageResult.form) {
+      session.dynamicContext = triageResult.form;
+    } else {
+      // Fallback: generate via the original method
+      session.dynamicContext = await generateDynamicContext({
+        appType: session.appType || session.extraction?.appType || "text",
+        appPurpose: purpose,
+        languageHint: detectLanguageMode(session)
+      });
+    }
   }
+
+  // Reset triage state
+  session.triageRounds = 0;
+  session.awaitingTriageAnswer = false;
+
   return {
     reply: localizedText(
       session,
-      "Perfect. I generated relevant features and inputs for your app in one step. Select what you want to keep.",
-      "बहुत बढ़िया। मैंने आपके ऐप के लिए ज़रूरी फीचर्स और इनपुट एक साथ तैयार किए हैं। जो चाहिए चुनें।",
-      "Perfect. Maine aapke app ke liye relevant features aur inputs ek saath banaye hain. Jo chahiye select karo."
+      "Perfect. I've scoped out the architecture for your app. Please confirm these settings.",
+      "बहुत बढ़िया। मैंने आपके ऐप के लिए ज़रूरी फीचर्स और इनपुट तैयार किए हैं। कृपया इन्हें कंफर्म करें।",
+      "Perfect. Maine aapke app ka architecture scope kar liya hai. Please in settings ko confirm karo."
     ),
     uiType: "multi_select_form",
     uiData: {
@@ -451,6 +496,11 @@ async function buildStep0Response(session) {
 function checkEdgeCases(message, session) {
   const text = normalize(message);
   const msg = lower(text);
+
+  // Skip edge case guards for structured UI payloads (form submissions, model selections, etc.)
+  if (text.startsWith("multi_select_form::") || text.startsWith("edit prompt::") || text.startsWith("confirm seo::")) {
+    return null;
+  }
 
   if (isOffTopic(text)) return OFF_TOPIC_RESPONSE;
 
@@ -593,17 +643,38 @@ export async function route(session, message) {
   const rawText = String(message || "").substring(0, 1000);
   const text = normalize(rawText);
   const msg = lower(text);
+  const trimmedText = text ? text.trim().toLowerCase() : "";
 
-  // 2. GHOST TOWN GUARD: If session step is > 0 but appType is missing, Redis wiped the session
-  if (session.step > 0 && !session.appType && !parseChipAppType(text)) {
-    return {
-      reply: "It looks like you've been away for a while and your session expired! Let's start fresh. What kind of AI app are you building today?",
-      uiType: 'chips',
-      uiData: { options: ['Image app', 'Video app', 'Text app', 'Audio app', 'Vision app'] },
-      nextStep: 0,
-      coins: null,
-      clearSession: true
-    };
+  // 1. ABSOLUTE GATEKEEPER (Must be at the very top of your logic)
+  if (!session.appType) {
+    const validTypes = ['text', 'image', 'audio', 'video'];
+    
+    // Check if the user clicked a chip or typed a valid type
+    if (validTypes.includes(trimmedText)) {
+      session.appType = trimmedText;
+      // Save session here to persist the appType
+      await saveSession(session); 
+      
+      return {
+        reply: `Awesome. You want to build a ${session.appType} app. Describe what it should do, and I'll scope out the architecture!`,
+        uiType: null,
+        nextStep: 0, 
+        coins: null
+      };
+    } else {
+      // If they typed "I want an astrologer app" BEFORE picking a type, block them.
+      // This also handles the initial welcome message if it's the first empty/greeting ping.
+      const isInitial = trimmedText === "" || /^(hi|hello|hey|hy|hola|greetings)[\s!\.]*$/i.test(trimmedText);
+      return {
+        reply: isInitial 
+          ? "Hey! I'm the RentPrompts App Creation Agent. To get started, what type of output will your AI app generate?"
+          : "Before we design the architecture, I need to know the format. Will this app generate Text, Images, Audio, or Video?",
+        uiType: 'chips',
+        uiData: { options: ['Text', 'Image', 'Audio', 'Video'] },
+        nextStep: 0,
+        coins: null
+      };
+    }
   }
 
   if (lower(text) === 'save draft' || lower(text).includes('save as draft') || lower(text).includes('save to draft')) {
@@ -670,6 +741,23 @@ export async function route(session, message) {
         nextStep: 0,
         coins: null
       };
+    }
+
+    // Handle Triage Clarification Answer
+    if (session.awaitingTriageAnswer) {
+      session.awaitingTriageAnswer = false;
+      // Enrich the appPurpose with the user's clarification
+      const existingPurpose = session.extraction?.appPurpose || "";
+      session.extraction = session.extraction || {};
+      session.extraction.appPurpose = `${existingPurpose}. User clarified: ${text}`;
+      await saveSession(session);
+
+      // Re-run triage with enriched context — should now return "ready"
+      const bundleCard = await buildDynamicBundleCard(session);
+      if (bundleCard) {
+        await saveSession(session);
+        return bundleCard;
+      }
     }
 
     // Handle Multi-Select Form Submission
@@ -791,6 +879,7 @@ export async function route(session, message) {
           uiType: 'app_preview',
           uiData: { 
             appName: seoData.appName,
+            appType: session.appType || session.extraction?.appType || 'text', // Prevent state-loss bug
             appDescription: seoData.appDescription,
             cost: session.modelCost, // Strictly overrides any LLM hallucinations or math errors
             systemPrompt: promptData.systemPrompt,

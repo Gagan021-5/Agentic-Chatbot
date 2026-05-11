@@ -52,17 +52,26 @@ function IconSend() {
   );
 }
 
-
-
-
 function ChatWindow({ messages, isLoading, sendMessage, resetSession }) {
   const [input, setInput] = useState("");
+  const [isListening, setIsListening] = useState(false);
+  const recognitionRef = useRef(null);
   const viewportRef = useRef(null);
 
   useEffect(() => {
     if (!viewportRef.current) return;
     viewportRef.current.scrollTo({ top: viewportRef.current.scrollHeight, behavior: "smooth" });
   }, [messages, isLoading]);
+
+  // Cleanup speech recognition on unmount
+  useEffect(() => {
+    return () => {
+      if (recognitionRef.current) {
+        recognitionRef.current.abort();
+        recognitionRef.current = null;
+      }
+    };
+  }, []);
 
   const memoryLevel = useMemo(() => Math.min(91, 63 + messages.length * 2), [messages.length]);
 
@@ -75,6 +84,54 @@ function ChatWindow({ messages, isLoading, sendMessage, resetSession }) {
 
   function handleKeyDown(e) {
     if (e.key === "Enter" && !e.shiftKey) handleSubmit(e);
+  }
+
+  /* ─── Web Speech API ─── */
+  function startListening() {
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SpeechRecognition) {
+      alert("Your browser does not support voice input. Please use Chrome.");
+      return;
+    }
+
+    const recognition = new SpeechRecognition();
+    recognition.continuous = false;
+    recognition.interimResults = false;
+    recognition.lang = "en-IN"; // Handles English, Hindi, and Hinglish mixed input
+    recognitionRef.current = recognition;
+
+    recognition.onstart = () => setIsListening(true);
+
+    recognition.onresult = (event) => {
+      const transcript = event.results[0][0].transcript;
+      setInput((prev) => (prev ? prev + " " + transcript : transcript));
+    };
+
+    recognition.onerror = (event) => {
+      console.error("Speech recognition error:", event.error);
+      setIsListening(false);
+    };
+
+    recognition.onend = () => {
+      setIsListening(false);
+      recognitionRef.current = null;
+    };
+
+    recognition.start();
+  }
+
+  function stopListening() {
+    if (recognitionRef.current) {
+      recognitionRef.current.stop();
+    }
+  }
+
+  function toggleListening() {
+    if (isListening) {
+      stopListening();
+    } else {
+      startListening();
+    }
   }
 
   return (
@@ -129,9 +186,22 @@ function ChatWindow({ messages, isLoading, sendMessage, resetSession }) {
             <IconPaperclip />
           </button>
           <input disabled={isLoading} value={input} onChange={(e) => setInput(e.target.value)} onKeyDown={handleKeyDown} placeholder="Describe your project, or attach a file." className="h-10 min-w-0 flex-1 bg-transparent text-sm text-white outline-none placeholder:text-white/30 sm:h-11 sm:text-[15px]" />
-          <button type="button" className="hidden h-9 w-9 shrink-0 items-center justify-center rounded-xl text-white/40 transition hover:bg-white/5 hover:text-white/70 sm:inline-flex sm:h-10 sm:w-10">
+
+          {/* Mic Button — pulses red when listening */}
+          <button
+            type="button"
+            onClick={toggleListening}
+            disabled={isLoading}
+            className={`inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-xl transition sm:h-10 sm:w-10 ${
+              isListening
+                ? "mic-pulse bg-red-500/20 text-red-400 shadow-lg shadow-red-500/20"
+                : "text-white/40 hover:bg-white/5 hover:text-white/70"
+            }`}
+            title={isListening ? "Stop listening" : "Start voice input"}
+          >
             <IconMic />
           </button>
+
           <button type="submit" disabled={isLoading || !input.trim()} className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-rent-purple text-white shadow-lg shadow-rent-purple/20 transition hover:bg-[#8b6ffe] hover:shadow-rent-purple/30 disabled:cursor-not-allowed disabled:opacity-40 disabled:shadow-none sm:h-10 sm:w-10">
             <IconSend />
           </button>

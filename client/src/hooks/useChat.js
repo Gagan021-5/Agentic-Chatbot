@@ -70,10 +70,17 @@ function useChat() {
     let displayText = cleanText;
     const lowerText = cleanText.toLowerCase();
     
-    if (lowerText.startsWith("confirm seo::")) {
+    // Hide structured payloads from the chat — show friendly text instead
+    if (lowerText.startsWith("multi_select_form::")) {
+      displayText = "Confirmed settings ✓";
+    } else if (lowerText.startsWith("confirm seo::")) {
       displayText = "Confirmed SEO Metadata ✓";
     } else if (lowerText.startsWith("edit prompt::")) {
       displayText = "Edited prompt template";
+    } else if (lowerText.startsWith("select ")) {
+      displayText = "Selected model ✓";
+    } else if (lowerText === "publish app") {
+      displayText = "Publishing app...";
     }
 
     const userMessage = {

@@ -1,6 +1,7 @@
 import Groq from "groq-sdk";
 import OpenAI from "openai";
 import { normalizeExtraction } from "./gemini.js";
+import { LANGUAGE_MIRROR_DIRECTIVE } from "./languageDirective.js";
 
 const groqApiKey = process.env.GROQ_API_KEY;
 
@@ -8,7 +9,7 @@ const GROQ_SYSTEM_PROMPT = `You are a strict data extraction engine for RentProm
 
 Users describe an app they want to build.
 Your ONLY job: extract what they said. Never invent.
-CRITICAL INSTRUCTION: You are a multilingual agent. You MUST detect the language of the user's input. If the user types in Hindi (Devanagari script) or Hinglish (Hindi written in English alphabet), you MUST respond natively in that exact language and tone. All UI options and questions generated must also be translated into the user's detected language.
+${LANGUAGE_MIRROR_DIRECTIVE}
 
 APP TYPE RULES — read every word carefully:
 - "image" app: generates images, photos, portraits, transforms photos, superhero filter, avatar maker, logo maker, any visual output
@@ -100,12 +101,13 @@ function sanitizeVariableObjects(list, minLen, maxLen, fallback) {
     ? list
       .map((item) => {
         if (typeof item === "string") {
-          return { name: item.trim(), placeholder: "Enter details..." };
+          return { name: item.trim(), placeholder: "Enter details...", test_value: "" };
         }
         if (!item || typeof item !== "object") return null;
         return {
           name: String(item.name || "").trim(),
-          placeholder: String(item.placeholder || "Enter details...").trim()
+          placeholder: String(item.placeholder || "Enter details...").trim(),
+          test_value: String(item.test_value || "").trim()
         };
       })
       .filter((item) => item && item.name)
@@ -210,7 +212,7 @@ async function generateDynamicContext({ appType, appPurpose, languageHint }) {
   const safeLang = normalizeLanguageHint(languageHint);
   const systemPrompt = `You are a strict JSON generator.
 Generate compact, practical setup suggestions for an AI app idea.
-CRITICAL INSTRUCTION: You are a multilingual agent. You MUST detect the language of the user's input. If the user types in Hindi (Devanagari script) or Hinglish (Hindi written in English alphabet), you MUST respond natively in that exact language and tone. All UI options and questions generated must also be translated into the user's detected language.
+${LANGUAGE_MIRROR_DIRECTIVE}
 When generating 'variables', you MUST include a 'placeholder' key.
 - If the variable name contains 'Date', placeholder MUST be 'DD/MM/YYYY'.
 - If the variable name contains 'Time', placeholder MUST be 'HH:MM AM/PM'.
@@ -281,4 +283,143 @@ async function extractWithOpenRouterFallback(message, history) {
   }
 }
 
-export { extractRequirements, generateDynamicContext };
+/* ────────────────────────────────────────────
+   AGENTIC TRIAGE — evaluate specificity before generating form
+   ──────────────────────────────────────────── */
+const TRIAGE_INSTRUCTION = `
+You are a Universal AI Technical Architect. The user wants to build an application. 
+Your goal is to scope the app by first identifying the user's DOMAIN (e.g., Education, E-commerce, Image Generation, Fitness) and then determining the required features and inputs.
+
+STEP 1: DOMAIN DEDUCTION & COMPLEXITY
+- Evaluate the prompt. Is it a "Complex Data App" (e.g., study planner, workout generator, financial calculator) or a "Simple Generation App" (e.g., superhero image filter, basic text rewriter)?
+- Determine if you have enough context to know exactly what the app should output.
+
+STEP 2: ROUTING (READY vs NEEDS_CONTEXT)
+- Vague: "I want a student app" -> Status: "needs_context". Ask: "Are you looking to generate study timetables, quiz questions, or essay outlines?"
+- Specific: "I want an AI study coach and timetable generator" -> Status: "ready".
+- Specific: "I want to turn my photo into a superhero" -> Status: "ready".
+
+STEP 3: UNIVERSAL VARIABLE RULES (IF READY)
+If the status is "ready", generate 3-4 REQUIRED INPUT VARIABLES tailored strictly to the deduced domain.
+- Education Example: "Topic/Subject", "Current Grade/Class", "Days Until Exam".
+- Simple Image Example: "Upload Base Image", "Superhero Name", "Preferred Color Scheme".
+- Fitness Example: "Current Weight", "Goal", "Days per week".
+- STRICT BAN ON SYSTEM METADATA: NEVER ask for "Upload Date", "Creation Time", or "Location" unless the app is specifically for calendars or weather. Do not ask users for data the system automatically handles.
+- TEST DATA: You MUST generate a 'test_value' for each variable. This value should be a highly specific, realistic example based exactly on what the user asked for (e.g., if they asked for a bakery app, the test_value for 'Subject' should be 'Red velvet cake slice', not just 'Cake').
+
+${LANGUAGE_MIRROR_DIRECTIVE}
+
+Return STRICTLY as JSON:
+{
+  "status": "needs_context" | "ready",
+  "domain_identified": "e.g., Education, Creative, Business",
+  "question": "Only filled if needs_context is true",
+  "form": {
+    "options": ["Feature 1", "Feature 2", "Feature 3"],
+    "variables": [
+      {
+        "name": "Subject", 
+        "placeholder": "e.g., Realistic Portrait", 
+        "test_value": "Red velvet cake with cream cheese frosting"
+      }
+    ]
+  }
+}
+`;
+
+function parseTriageResponse(rawContent, appType, languageHint) {
+  const fallbackForm = buildDynamicContextFallback(appType, languageHint);
+  try {
+    const cleaned = String(rawContent || "{}").replace(/```json/gi, "").replace(/```/g, "").trim();
+    const parsed = JSON.parse(cleaned);
+
+    if (!parsed || !parsed.status) {
+      return { status: "ready", domain: null, question: null, form: fallbackForm };
+    }
+
+    const domain = String(parsed.domain_identified || "").trim() || null;
+
+    if (parsed.status === "needs_context") {
+      const question = String(parsed.question || "").trim();
+      if (!question || question.length < 10) {
+        // Question too short / empty — fall through to ready
+        return { status: "ready", domain, question: null, form: fallbackForm };
+      }
+      return { status: "needs_context", domain, question, form: null };
+    }
+
+    // status === "ready"
+    const form = parsed.form && typeof parsed.form === "object" ? parsed.form : {};
+    return {
+      status: "ready",
+      domain,
+      question: null,
+      form: {
+        options: sanitizeStringList(form.options, 4, 4, fallbackForm.options),
+        variables: sanitizeVariableObjects(form.variables, 3, 4, fallbackForm.variables)
+      }
+    };
+  } catch {
+    return { status: "ready", domain: null, question: null, form: fallbackForm };
+  }
+}
+
+async function triageDynamicContext({ appType, appPurpose, languageHint, conversationHistory }) {
+  const safeType = ["text", "image", "video", "audio", "vision"].includes(appType) ? appType : "text";
+  const safePurpose = String(appPurpose || "").trim() || "general assistant app";
+  const safeLang = normalizeLanguageHint(languageHint);
+
+  const historySnippet = Array.isArray(conversationHistory)
+    ? conversationHistory
+        .filter(h => h.role === "user")
+        .map(h => h.content)
+        .slice(-5)
+        .join("\n")
+    : "";
+
+  const userPrompt = `The user wants to build a ${safeType} app.
+Their description: "${safePurpose}"
+${historySnippet ? `Conversation so far:\n${historySnippet}` : ""}
+Language mode: ${safeLang}.
+
+Evaluate if this is specific enough to generate features and variables. If vague, ask ONE clarifying question.`;
+
+  // Try Groq first
+  try {
+    if (groq) {
+      const completion = await groq.chat.completions.create({
+        model: "llama-3.3-70b-versatile",
+        response_format: { type: "json_object" },
+        messages: [
+          { role: "system", content: TRIAGE_INSTRUCTION },
+          { role: "user", content: userPrompt }
+        ]
+      });
+      const content = completion.choices?.[0]?.message?.content || "{}";
+      return parseTriageResponse(content, safeType, safeLang);
+    }
+  } catch (error) {
+    if (!isRateLimitError(error)) {
+      console.error("Groq triage error, falling back:", error.message);
+    }
+  }
+
+  // OpenRouter fallback
+  try {
+    const fallback = await openRouterClient.chat.completions.create({
+      model: "meta-llama/llama-3.3-70b-instruct",
+      response_format: { type: "json_object" },
+      messages: [
+        { role: "system", content: TRIAGE_INSTRUCTION },
+        { role: "user", content: userPrompt }
+      ]
+    });
+    const content = fallback.choices?.[0]?.message?.content || "{}";
+    return parseTriageResponse(content, safeType, safeLang);
+  } catch (error) {
+    console.error("OpenRouter triage fallback failed:", error.message);
+    return { status: "ready", question: null, form: buildDynamicContextFallback(safeType, safeLang) };
+  }
+}
+
+export { extractRequirements, generateDynamicContext, triageDynamicContext };

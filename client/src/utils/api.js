@@ -42,3 +42,20 @@ export async function testPromptRun(payload) {
 
   return response.json();
 }
+
+export async function testPreview(payload) {
+  const response = await fetch("http://localhost:3001/api/test-preview", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify(payload)
+  });
+
+  if (!response.ok) {
+    const errorBody = await response.json().catch(() => ({}));
+    throw new Error(errorBody.error || "Preview failed");
+  }
+
+  return response.json();
+}

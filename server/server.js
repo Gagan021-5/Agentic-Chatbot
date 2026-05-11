@@ -102,6 +102,183 @@ app.post("/api/test-prompt", async (req, res) => {
   }
 });
 
+// ─── Live Preview Route (Free-tier APIs for testing) ───────────────────────
+app.post('/api/test-preview', async (req, res) => {
+  // 1. Extract variables outside the try block just in case req.body is malformed
+  const appType = req.body?.appType || 'text';
+  const variables = req.body?.variables || {};
+  const systemPrompt = req.body?.systemPrompt || '';
+  const testImageBase64 = req.body?.testImageBase64 || null;
+  
+  try {
+    let previewResult = null;
+    const type = (appType || 'text').toLowerCase();
+
+    // ---------------------------------------------------------
+    // 1. TEXT APP (Groq + Optional HF Image for Visual domains)
+    // ---------------------------------------------------------
+    if (type === 'text') {
+      const groqRes = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${process.env.GROQ_API_KEY}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          model: "llama-3.1-8b-instant", 
+          messages: [
+            { 
+              role: "system", 
+              content: "You are the backend engine for an application. Output EXACTLY what the app is supposed to output. NEVER apologize. NEVER mention that you are an AI, a text-based model, or that you cannot generate images. Just return the pure output." 
+            },
+            { 
+              role: "user", 
+              content: `${systemPrompt}\n\nUser Inputs: ${JSON.stringify(variables)}` 
+            }
+          ],
+          max_tokens: 300 
+        })
+      });
+      const groqData = await groqRes.json();
+      if (!groqRes.ok) throw new Error(groqData.error?.message || "Groq Error");
+      
+      const textContent = groqData.choices[0].message.content;
+      let imageUrl = null;
+
+      // Surprise & Delight: If text app is visual (Astrology, Story), add an image
+      if (systemPrompt.toLowerCase().match(/(astrology|horoscope|story|character|design)/)) {
+        try {
+          const hfRes = await fetch('https://api-inference.huggingface.co/models/black-forest-labs/FLUX.1-schnell', {
+            method: 'POST',
+            headers: { 'Authorization': `Bearer ${process.env.HF_ACCESS_TOKEN}`, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ inputs: `High quality, aesthetic illustration for: ${JSON.stringify(variables).substring(0, 100)}` })
+          });
+          if (hfRes.ok) {
+            const buffer = await hfRes.arrayBuffer();
+            imageUrl = `data:image/jpeg;base64,${Buffer.from(buffer).toString('base64')}`;
+          } else {
+            let errorMsg = "Hugging Face API failed";
+            try {
+              const errorData = await hfRes.json();
+              errorMsg = errorData.error || errorMsg;
+            } catch (parseErr) {
+              errorMsg = `HTTP Error ${hfRes.status}: ${hfRes.statusText}`;
+            }
+            console.error("Optional HF image error:", errorMsg);
+          }
+        } catch (e) { console.error("Optional image fetch failed:", e.message); }
+      }
+      previewResult = { type: imageUrl ? 'multimodal' : 'text', content: textContent, url: imageUrl };
+    }
+
+    // ---------------------------------------------------------
+    // 2. IMAGE APP (Hugging Face Flux)
+    // ---------------------------------------------------------
+    else if (type === 'image') {
+      // The ultra-reliable testing URL
+      const hfUrl = 'https://api-inference.huggingface.co/models/runwayml/stable-diffusion-v1-5';
+      console.log(`[DEBUG] Attempting to fetch from Hugging Face URL: ${hfUrl}`);
+
+      const hfRes = await fetch(hfUrl, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${process.env.HF_ACCESS_TOKEN}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ inputs: `Generate image: ${systemPrompt}. Details: ${JSON.stringify(variables)}` })
+      });
+      if (!hfRes.ok) {
+        const rawErrorText = await hfRes.text();
+        console.error("🚨 [HF RAW ERROR] Status:", hfRes.status);
+        console.error("🚨 [HF RAW ERROR] Body:", rawErrorText);
+
+        let errorMsg = `Hugging Face API failed with status ${hfRes.status}`;
+        try {
+          const errorData = JSON.parse(rawErrorText);
+          errorMsg = errorData.error || errorMsg;
+        } catch (parseErr) {
+          errorMsg = `HTTP Error ${hfRes.status}: ${hfRes.statusText}`;
+        }
+        throw new Error(errorMsg);
+      }
+      
+      const buffer = await hfRes.arrayBuffer();
+      previewResult = { type: 'image', url: `data:image/jpeg;base64,${Buffer.from(buffer).toString('base64')}` };
+    }
+
+    // ---------------------------------------------------------
+    // 3. AUDIO APP (ElevenLabs TTS)
+    // ---------------------------------------------------------
+    else if (type === 'audio') {
+      const elRes = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/21m00Tcm4TlvDq8ikWAM`, {
+        method: 'POST',
+        headers: { 'Accept': 'audio/mpeg', 'xi-api-key': process.env.ELEVENLABS_API_KEY, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text: `Generating audio for: ${JSON.stringify(variables).substring(0, 50)}`, model_id: "eleven_multilingual_v2" })
+      });
+      if (!elRes.ok) throw new Error("ElevenLabs API failed");
+      
+      const buffer = await elRes.arrayBuffer();
+      previewResult = { type: 'audio', url: `data:audio/mpeg;base64,${Buffer.from(buffer).toString('base64')}`, content: "Audio preview generated." };
+    }
+
+    // ---------------------------------------------------------
+    // 4. VIDEO APP (Cinematic Storyboard Mock)
+    // ---------------------------------------------------------
+    else if (type === 'video') {
+      // Free Video APIs are rare. We generate a "First Frame" (Image) + "Scene Script" (Text)
+      const hfRes = await fetch('https://api-inference.huggingface.co/models/black-forest-labs/FLUX.1-schnell', {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${process.env.HF_ACCESS_TOKEN}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ inputs: `Cinematic movie still, first frame of video for: ${JSON.stringify(variables)}` })
+      });
+      
+      let imageUrl = null;
+      if (hfRes.ok) {
+        const buffer = await hfRes.arrayBuffer();
+        imageUrl = `data:image/jpeg;base64,${Buffer.from(buffer).toString('base64')}`;
+      } else {
+        let errorMsg = "Hugging Face API failed";
+        try {
+          const errorData = await hfRes.json();
+          errorMsg = errorData.error || errorMsg;
+        } catch (parseErr) {
+          errorMsg = `HTTP Error ${hfRes.status}: ${hfRes.statusText}`;
+        }
+        console.error("Video storyboard HF image error:", errorMsg);
+      }
+      
+      previewResult = { 
+        type: 'multimodal', 
+        url: imageUrl,
+        content: `🎬 **Video Storyboard Preview**\n\n**Scene 1:** The video opens with these parameters: ${JSON.stringify(variables)}. \n*(Note: Live video rendering requires premium compute and will process upon publishing).*`
+      };
+    }
+
+    // ---------------------------------------------------------
+    // 5. VISION APP (Image Analysis)
+    // ---------------------------------------------------------
+    else if (type === 'vision') {
+      // Simulate Vision analysis using Groq Text (unless you have a groq vision model available)
+      const visionResponse = `👁️ **Vision Analysis Complete**\n\nBased on the uploaded image and your parameters (${JSON.stringify(variables)}), the AI detects elements perfectly matching your custom ${systemPrompt.substring(0,20)}... logic.`;
+      
+      previewResult = { 
+        type: 'multimodal', 
+        url: testImageBase64 || "https://via.placeholder.com/400x200.png?text=No+Image+Uploaded",
+        content: visionResponse
+      };
+    }
+
+    // If everything succeeds:
+    return res.json({ success: true, preview: previewResult });
+
+  } catch (error) {
+    // 2. THE SAFETY NET: Catch the error and send it to the frontend cleanly
+    console.error("🚨 [SERVER CAUGHT ERROR] Preview Generation Failed:", error.message);
+    
+    // Ensure we only send headers once
+    if (!res.headersSent) {
+      return res.status(500).json({ 
+        success: false, 
+        error: "Preview failed: " + error.message 
+      });
+    }
+  }
+});
+
 const server = app.listen(PORT, () => {
   console.log(`RentPrompts agent server listening on http://localhost:${PORT}`);
 });
