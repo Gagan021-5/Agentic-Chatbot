@@ -645,28 +645,49 @@ export async function route(session, message) {
   const msg = lower(text);
   const trimmedText = text ? text.trim().toLowerCase() : "";
 
-  // 1. ABSOLUTE GATEKEEPER (Must be at the very top of your logic)
+  // 1. EXTRACTION FIRST (so we never lose the user's context!)
+  if (!session.history) session.history = [];
+  const latestExtraction = await extractRequirements(text, session.history || []);
+  session.extraction = mergeExtraction(session.extraction, latestExtraction, text);
+  session.languageMode = detectLanguageMode(session);
+
+  if (session.extraction.enterpriseSignals !== undefined) {
+    session.enterpriseSignals = session.extraction.enterpriseSignals;
+  }
+  if (session.extraction.userType) {
+    session.userType = session.extraction.userType;
+  }
+
+  // If extraction figured out the appType with decent confidence, save it so we don't ask again
+  if (!session.appType && session.extraction.appType && session.extraction.confidence?.appType !== 'LOW') {
+    session.appType = session.extraction.appType;
+  }
+
+  // 2. ABSOLUTE GATEKEEPER
   if (!session.appType) {
     const validTypes = ['text', 'image', 'audio', 'video'];
-    
+    const chipType = parseChipAppType(text);
+
     // Check if the user clicked a chip or typed a valid type
-    if (validTypes.includes(trimmedText)) {
-      session.appType = trimmedText;
-      // Save session here to persist the appType
-      await saveSession(session); 
-      
-      return {
-        reply: `Awesome. You want to build a ${session.appType} app. Describe what it should do, and I'll scope out the architecture!`,
-        uiType: null,
-        nextStep: 0, 
-        coins: null
-      };
+    if (chipType || validTypes.includes(trimmedText)) {
+      session.appType = chipType || trimmedText;
+      await saveSession(session);
+
+      // SMART CHECK: If we already extracted their app purpose, skip asking them to describe it again!
+      if (session.extraction?.appPurpose && session.extraction.appPurpose.length > 5) {
+        // Do nothing here. Let it fall through to step 0 / triage below!
+      } else {
+        return {
+          reply: `Awesome. You want to build a ${session.appType} app. Describe what it should do, and I'll scope out the architecture!`,
+          uiType: null,
+          nextStep: 0,
+          coins: null
+        };
+      }
     } else {
-      // If they typed "I want an astrologer app" BEFORE picking a type, block them.
-      // This also handles the initial welcome message if it's the first empty/greeting ping.
       const isInitial = trimmedText === "" || /^(hi|hello|hey|hy|hola|greetings)[\s!\.]*$/i.test(trimmedText);
       return {
-        reply: isInitial 
+        reply: isInitial
           ? "Hey! I'm the RentPrompts App Creation Agent. To get started, what type of output will your AI app generate?"
           : "Before we design the architecture, I need to know the format. Will this app generate Text, Images, Audio, or Video?",
         uiType: 'chips',
@@ -699,19 +720,6 @@ export async function route(session, message) {
       await deleteSession(session.sessionId);
     }
     return edgeCaseResponse;
-  }
-
-  if (!session.history) session.history = [];
-
-  const latestExtraction = await extractRequirements(text, session.history || []);
-  session.extraction = mergeExtraction(session.extraction, latestExtraction, text);
-  session.languageMode = detectLanguageMode(session);
-
-  if (session.extraction.enterpriseSignals !== undefined) {
-    session.enterpriseSignals = session.extraction.enterpriseSignals;
-  }
-  if (session.extraction.userType) {
-    session.userType = session.extraction.userType;
   }
 
   // ─── STEP 0: First message — detect app type ────────
