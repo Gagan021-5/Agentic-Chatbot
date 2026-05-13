@@ -156,6 +156,23 @@ function parseChipAppType(msg) {
   return null;
 }
 
+/** User is correcting assumed format after scoping — clear form so triage runs again with full history. */
+function shouldRerunTriageAfterFormatCorrection(session, userMessage) {
+  if (!session?.dynamicContext || session.step !== 0) return false;
+  const t = normalize(userMessage || "");
+  if (!t || t.toLowerCase().startsWith("multi_select_form::")) return false;
+  const v = lower(t);
+  const correctionCue =
+    /\b(no|nope|not that|wrong|actually|instead|change it|make it|switch to|i want|i meant|correction|not a text|not text)\b/i.test(
+      v
+    );
+  if (!correctionCue) return false;
+  const hasFormatSignal =
+    parseChipAppType(t) != null ||
+    /\b(text|image|images|picture|pictures|visual|audio|sound|voice|video|vision|tiktok|reel|clip)\b/i.test(v);
+  return hasFormatSignal;
+}
+
 function parsePromptEditInstruction(msg) {
   const n = normalize(msg);
   if (!n.toLowerCase().startsWith("edit prompt::")) return null;
@@ -309,39 +326,100 @@ async function buildDynamicBundleCard(session) {
   const purpose = session.extraction?.appPurpose || "";
   if (!purpose || purpose.trim().length < 12) return null;
 
+  const lastUserTurn = [...(session.history || [])].reverse().find((h) => h.role === "user");
+  const latestUserText = lastUserTurn?.content || "";
+
+  if (session.dynamicContext && shouldRerunTriageAfterFormatCorrection(session, latestUserText)) {
+    session.dynamicContext = null;
+    session.awaitingTriageAnswer = false;
+    const corrected = parseChipAppType(latestUserText);
+    if (corrected) {
+      session.appType = corrected;
+      session.extraction = session.extraction || {};
+      session.extraction.appType = corrected;
+      session.extraction.confidence = session.extraction.confidence || {};
+      session.extraction.confidence.appType = "HIGH";
+    }
+    await saveSession(session);
+  }
+
   // ─── AGENTIC TRIAGE: Evaluate specificity before generating form ───
   // Skip triage if we already have a ready dynamic context (user answered a clarification)
   if (!session.dynamicContext) {
     const triageResult = await triageDynamicContext({
-      appType: session.appType || session.extraction?.appType || "text",
+      appType: session.appType || null,
       appPurpose: purpose,
       languageHint: detectLanguageMode(session),
       conversationHistory: session.history || []
     });
 
-    // ─── NEEDS CONTEXT: Ask a domain-specific clarifying question ───
-    if (triageResult.status === "needs_context" && triageResult.question) {
-      // Cap at 2 triage rounds to prevent infinite loops
+    // ─── NEEDS CONTEXT OR VERIFICATION: Ask a clarifying question ───
+    if ((triageResult.status === "needs_context" || triageResult.status === "needs_format") && triageResult.question) {
       session.triageRounds = (session.triageRounds || 0) + 1;
       if (triageResult.domain) session.domainIdentified = triageResult.domain;
-      console.log(`[Triage] Round ${session.triageRounds} — Domain: ${triageResult.domain || "unknown"} — Asking: ${triageResult.question.substring(0, 80)}`);
-      if (session.triageRounds <= 2) {
+
+      console.log(
+        `[Triage] Round ${session.triageRounds} — Status: ${triageResult.status} — Asking: ${triageResult.question.substring(0, 80)}`
+      );
+
+      if (session.triageRounds <= 3) {
         session.awaitingTriageAnswer = true;
+
+        // If it's verifying the format, provide the chips so they can click!
+        const isFormatCheck = triageResult.status === "needs_format";
+
         return {
           reply: triageResult.question,
-          uiType: null,
-          uiData: null,
-          nextStep: session.step, // Stay on same step
+          uiType: isFormatCheck ? "chips" : null,
+          uiData: isFormatCheck ? { options: ["Text", "Image", "Audio", "Video"] } : null,
+          nextStep: session.step,
           coins: null
         };
       }
-      // If we've asked 2 clarifications already, force generate with what we have
     }
 
-    // ─── READY: AI has enough context, store the form ───
+    // Same triage outcome but round cap exceeded — still never skip straight to an unconfirmed form
+    if (
+      (triageResult.status === "needs_context" || triageResult.status === "needs_format") &&
+      triageResult.question &&
+      session.triageRounds > 3
+    ) {
+      session.awaitingTriageAnswer = true;
+      const isFormatCheck = triageResult.status === "needs_format";
+      return {
+        reply: triageResult.question,
+        uiType: isFormatCheck ? "chips" : null,
+        uiData: isFormatCheck ? { options: ["Text", "Image", "Audio", "Video"] } : null,
+        nextStep: session.step,
+        coins: null
+      };
+    }
+
+    // Never build the dynamic form while triage still wants domain or format clarification
+    if (triageResult.status === "needs_context" || triageResult.status === "needs_format") {
+      session.awaitingTriageAnswer = true;
+      const isFormatCheck = triageResult.status === "needs_format";
+      const fallbackReply =
+        triageResult.question && String(triageResult.question).trim().length >= 10
+          ? triageResult.question
+          : "What type of output should this app generate for users?";
+      return {
+        reply: fallbackReply,
+        uiType: isFormatCheck ? "chips" : null,
+        uiData: isFormatCheck ? { options: ["Text", "Image", "Audio", "Video"] } : null,
+        nextStep: session.step,
+        coins: null
+      };
+    }
+
+    // ─── READY: AI has enough context, store the form and deduced output format ───
     if (triageResult.status === "ready") {
       console.log(`Successfully scoped app for domain: ${triageResult.domain || "Unknown"}`);
       if (triageResult.domain) session.domainIdentified = triageResult.domain;
+      if (triageResult.app_format) {
+        session.appType = triageResult.app_format;
+        await saveSession(session);
+      }
     }
     
     if (triageResult.form) {
@@ -360,12 +438,16 @@ async function buildDynamicBundleCard(session) {
   session.triageRounds = 0;
   session.awaitingTriageAnswer = false;
 
+  const displayFormat =
+    String(session.appType || "text").charAt(0).toUpperCase() +
+    String(session.appType || "text").slice(1).toLowerCase();
+
   return {
     reply: localizedText(
       session,
-      "Perfect. I've scoped out the architecture for your app. Please confirm these settings.",
-      "बहुत बढ़िया। मैंने आपके ऐप के लिए ज़रूरी फीचर्स और इनपुट तैयार किए हैं। कृपया इन्हें कंफर्म करें।",
-      "Perfect. Maine aapke app ka architecture scope kar liya hai. Please in settings ko confirm karo."
+      `Perfect. I've scoped out the architecture for your ${displayFormat} app.\n\nNote: If you actually wanted this to generate Images, Audio, or Video instead, just let me know.\n\nPlease confirm these settings.`,
+      `बहुत बढ़िया। मैंने इस ऐप को ${displayFormat} प्रारूप में स्कोप किया है।\n\nध्यान दें: अगर आप Image, Audio या Video आउटपुट चाहते हैं तो बता सकते हैं।\n\nकृपया ये सेटिंग्स कन्फर्म करें।`,
+      `Perfect! Maine ise ${displayFormat} app samajh ke scope kiya hai.\n\nNote: Agar tumhe Images, Audio ya Video chahiye ho, bas bata dena.\n\nPlease ab settings confirm karo.`
     ),
     uiType: "multi_select_form",
     uiData: {
@@ -426,68 +508,75 @@ async function showModels(session) {
 
 async function buildStep0Response(session) {
   const ext = session.extraction;
-  
-  // HIGH/MEDIUM CONFIDENCE -> Skip confirmation, jump straight into deep questions
-  if (ext && ext.appType && ['HIGH','MEDIUM'].includes(ext.confidence.appType)) {
-    session.appType = ext.appType;
+
+  // 1. IF APP TYPE IS MISSING: Acknowledge the idea and ask for the format via chips.
+  if (!session.appType) {
     session.step = 0;
-    session.awaitingConfirmation = false; 
+    await saveSession(session);
 
-    const bundleCard = await buildDynamicBundleCard(session);
-    if (bundleCard) {
-      await saveSession(session);
-      return bundleCard;
+    let replyText = "That sounds like a great idea! ";
+    if (ext && ext.appPurpose && ext.appPurpose.length > 5) {
+      replyText = `Awesome, an app for ${ext.appPurpose.toLowerCase().replace("i want to make a ", "")} sounds great! `;
     }
+    replyText += "Before we design the architecture, what kind of output do you want it to generate?";
 
-    if (!ext?.appPurpose || ext.appPurpose.trim().length < 12) {
-      await saveSession(session);
-      return {
-        reply: localizedText(
-          session,
-          `Alright. What kind of ${session.appType || 'AI'} app are you looking to create?`,
-          `ठीक है। आप किस तरह का ${session.appType || 'AI'} ऐप बनाना चाहते हैं?`,
-          `Alright. Aap kis type ka ${session.appType || 'AI'} app banana chahte ho?`
-        ),
-        uiType: "text",
-        uiData: null,
-        nextStep: 0,
-        coins: null
-      };
-    }
+    const options =
+      detectLanguageMode(session) === "Hindi"
+        ? ["टेक्स्ट", "इमेज", "ऑडियो", "वीडियो", "विज़न"]
+        : detectLanguageMode(session) === "Hinglish"
+          ? ["Text", "Image", "Audio", "Video", "Vision"]
+          : ["Text", "Image", "Audio", "Video", "Vision"];
 
-    const nextQ = getNextDeepQuestion(session);
-    if (nextQ) {
-      session.currentDeepField = nextQ.field;
-      session.awaitingDeepAnswer = true;
-      await saveSession(session);
-      return {
-        reply: nextQ.question,
-        uiType: "chips",
-        uiData: { options: nextQ.options },
-        nextStep: 0,
-        coins: null
-      };
-    }
-
-    return await showModels(session);
+    return {
+      reply: replyText,
+      uiType: "chips",
+      uiData: { options },
+      nextStep: 0,
+      coins: null
+    };
   }
-  
+
+  // 2. ONLY PROCEED TO FORMS IF APP TYPE IS EXPLICITLY SET
   session.step = 0;
-  await saveSession(session);
-  const prefix = tonePrefix(ext);
-  const options = detectLanguageMode(session) === "Hindi"
-    ? ['टेक्स्ट','इमेज','ऑडियो','वीडियो','विज़न']
-    : detectLanguageMode(session) === "Hinglish"
-      ? ['Text','Image','Audio','Video','Vision']
-      : ['Text','Image','Audio','Video','Vision'];
-    
-  return {
-    reply: `${prefix}${localizedText(session, "I'd love to help! What type of output does your app need?", "मैं मदद करना चाहूंगा! आपके ऐप को किस प्रकार का आउटपुट चाहिए?", "Main help karunga! Aapke app ko kis type ka output chahiye?")}`,
-    uiType: 'chips',
-    uiData: { options },
-    nextStep: 0,
-    coins: null
-  };
+  session.awaitingConfirmation = false;
+
+  const bundleCard = await buildDynamicBundleCard(session);
+  if (bundleCard) {
+    await saveSession(session);
+    return bundleCard;
+  }
+
+  if (!ext?.appPurpose || ext.appPurpose.trim().length < 12) {
+    await saveSession(session);
+    return {
+      reply: localizedText(
+        session,
+        `Alright. What kind of ${session.appType || "AI"} app are you looking to create?`,
+        `ठीक है। आप किस तरह का ${session.appType || "AI"} ऐप बनाना चाहते हैं?`,
+        `Alright. Aap kis type ka ${session.appType || "AI"} app banana chahte ho?`
+      ),
+      uiType: "text",
+      uiData: null,
+      nextStep: 0,
+      coins: null
+    };
+  }
+
+  const nextQ = getNextDeepQuestion(session);
+  if (nextQ) {
+    session.currentDeepField = nextQ.field;
+    session.awaitingDeepAnswer = true;
+    await saveSession(session);
+    return {
+      reply: nextQ.question,
+      uiType: "chips",
+      uiData: { options: nextQ.options },
+      nextStep: 0,
+      coins: null
+    };
+  }
+
+  return await showModels(session);
 }
 
 /* ────────────────────────────────────────────
@@ -549,9 +638,10 @@ function checkEdgeCases(message, session) {
   
   if (isGreeting) {
     return {
-      reply: "Hello! I am ready to help you build your AI application today. To get started, what type of output does your app need?",
-      uiType: 'chips',
-      uiData: { options: ['Text', 'Image', 'Audio', 'Video', 'Vision'] },
+      reply:
+        "Hey! I'm the RentPrompts App Creation Agent. What kind of AI app would you like to build today? You can just describe what you want it to do.",
+      uiType: null,
+      uiData: null,
       nextStep: session.step,
       coins: null
     };
@@ -643,7 +733,6 @@ export async function route(session, message) {
   const rawText = String(message || "").substring(0, 1000);
   const text = normalize(rawText);
   const msg = lower(text);
-  const trimmedText = text ? text.trim().toLowerCase() : "";
 
   // 1. EXTRACTION FIRST (so we never lose the user's context!)
   if (!session.history) session.history = [];
@@ -658,45 +747,11 @@ export async function route(session, message) {
     session.userType = session.extraction.userType;
   }
 
-  // If extraction figured out the appType with decent confidence, save it so we don't ask again
-  if (!session.appType && session.extraction.appType && session.extraction.confidence?.appType !== 'LOW') {
-    session.appType = session.extraction.appType;
-  }
-
-  // 2. ABSOLUTE GATEKEEPER
-  if (!session.appType) {
-    const validTypes = ['text', 'image', 'audio', 'video'];
-    const chipType = parseChipAppType(text);
-
-    // Check if the user clicked a chip or typed a valid type
-    if (chipType || validTypes.includes(trimmedText)) {
-      session.appType = chipType || trimmedText;
-      await saveSession(session);
-
-      // SMART CHECK: If we already extracted their app purpose, skip asking them to describe it again!
-      if (session.extraction?.appPurpose && session.extraction.appPurpose.length > 5) {
-        // Do nothing here. Let it fall through to step 0 / triage below!
-      } else {
-        return {
-          reply: `Awesome. You want to build a ${session.appType} app. Describe what it should do, and I'll scope out the architecture!`,
-          uiType: null,
-          nextStep: 0,
-          coins: null
-        };
-      }
-    } else {
-      const isInitial = trimmedText === "" || /^(hi|hello|hey|hy|hola|greetings)[\s!\.]*$/i.test(trimmedText);
-      return {
-        reply: isInitial
-          ? "Hey! I'm the RentPrompts App Creation Agent. To get started, what type of output will your AI app generate?"
-          : "Before we design the architecture, I need to know the format. Will this app generate Text, Images, Audio, or Video?",
-        uiType: 'chips',
-        uiData: { options: ['Text', 'Image', 'Audio', 'Video'] },
-        nextStep: 0,
-        coins: null
-      };
-    }
-  }
+  // Silent auto-assign from extraction → session.appType is intentionally disabled so the user
+  // can confirm format (chips / triage) before we lock session.appType.
+  // if (!session.appType && session.extraction.appType && session.extraction.confidence?.appType !== 'LOW') {
+  //   session.appType = session.extraction.appType;
+  // }
 
   if (lower(text) === 'save draft' || lower(text).includes('save as draft') || lower(text).includes('save to draft')) {
     return {
@@ -730,9 +785,14 @@ export async function route(session, message) {
     if (isGreeting) {
       await saveSession(session);
       return {
-        reply: `Hey! 👋 I'm RentPrompts Agent.\n\nI help you create and publish AI-powered apps on the RentPrompts marketplace — no coding needed.\n\nWhat kind of AI app are you thinking of building?`,
-        uiType: 'chips',
-        uiData: { options: ['Image generator', 'Video creator', 'Text / writing tool', 'Audio generator', 'Vision / image analyzer', 'Not sure yet'] },
+        reply: localizedText(
+          session,
+          "Hey! I'm the RentPrompts App Creation Agent. What kind of AI app would you like to build today? You can just describe what you want it to do.",
+          "नमस्ते! मैं RentPrompts ऐप क्रिएशन एजेंट हूँ। आज आप किस तरह का AI ऐप बनाना चाहते हैं? बस बता दें कि आप इसे क्या करवाना चाहते हैं।",
+          "Hey! Main RentPrompts App Creation Agent hoon. Aaj aap kis type ka AI app banana chahte ho? Bas bata do kya karna chahte ho."
+        ),
+        uiType: null,
+        uiData: null,
         nextStep: 0,
         coins: null
       };
@@ -844,8 +904,6 @@ export async function route(session, message) {
       session.appType = chipType;
       session.extraction.appType = chipType;
       session.extraction.confidence.appType = "HIGH";
-    } else if (session.extraction.appType && session.extraction.confidence.appType !== 'LOW') {
-      session.appType = session.extraction.appType;
     }
 
     return await buildStep0Response(session);
@@ -928,7 +986,7 @@ export async function route(session, message) {
       session.promptData = applyPromptInstruction(session.promptData, message);
       await saveSession(session);
       return {
-        reply: `Updated! Here's the revised setup:\n\n**User Prompt:** ${session.promptData.userPrompt}\n\nReady to publish?`,
+        reply: `Updated! Here's the revised setup:\n\nUser Prompt: ${session.promptData.userPrompt}\n\nReady to publish?`,
         uiType: 'chips',
         uiData: { options: ['Publish App', 'Save Draft', 'Tweak Prompts'] },
         nextStep: 2,
@@ -989,7 +1047,7 @@ export async function route(session, message) {
         session.promptData = applyPromptInstruction(session.promptData, correction);
         await saveSession(session);
         return {
-          reply: `Updated!\n\n**User Prompt:** ${session.promptData.userPrompt}\n\nReady to publish?`,
+          reply: `Updated!\n\nUser Prompt: ${session.promptData.userPrompt}\n\nReady to publish?`,
           uiType: 'chips',
           uiData: { options: ['Publish App', 'Save Draft', 'Tweak Prompts'] },
           nextStep: 2,

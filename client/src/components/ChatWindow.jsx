@@ -110,6 +110,14 @@ function ChatWindow({ messages, isLoading, sendMessage, resetSession }) {
     recognition.onerror = (event) => {
       console.error("Speech recognition error:", event.error);
       setIsListening(false);
+
+      if (event.error === "network") {
+        alert(
+          "Microphone network disconnected. Chrome requires an active internet connection to transcribe speech. If testing locally, this may be a Chrome HTTP restriction."
+        );
+      } else if (event.error === "not-allowed") {
+        alert("Microphone access denied. Please allow permissions in your browser address bar.");
+      }
     };
 
     recognition.onend = () => {

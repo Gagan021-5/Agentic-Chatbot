@@ -9,8 +9,14 @@ export default function AppPreviewCard({ data, onSendMessage }) {
     const rawVars = data?.variables || data?.variablesUsed || [];
     return rawVars.reduce((acc, variable) => {
       // Handle both object format and old string format
-      const varName = typeof variable === 'object' ? variable.name : String(variable || "").replace(/^\$\$/, "");
-      const testVal = variable.test_value || '';
+      const varName = typeof variable === "object" ? variable.name : String(variable || "").replace(/^\$\$/, "");
+
+      // THE FIX: 1. Try what the user already typed. 2. Try AI test value. 3. Fallback to empty.
+      const testVal =
+        typeof variable === "object" && variable.value
+          ? variable.value
+          : variable.test_value || "";
+
       acc[varName] = testVal;
       return acc;
     }, {});
@@ -18,6 +24,7 @@ export default function AppPreviewCard({ data, onSendMessage }) {
   const [previewResult, setPreviewResult] = useState(null);
   const [isGenerating, setIsGenerating] = useState(false);
   const [previewError, setPreviewError] = useState('');
+  const [imageError, setImageError] = useState(false);
   const [testImage, setTestImage] = useState(null);
 
   if (!data) return null;
@@ -54,6 +61,7 @@ export default function AppPreviewCard({ data, onSendMessage }) {
     setIsGenerating(true);
     setPreviewResult(null);
     setPreviewError('');
+    setImageError(false);
     try {
       // 1. Intelligent Fallback: If appType is missing, guess it from the prompt
       let currentAppType = data.appType;
@@ -201,11 +209,21 @@ export default function AppPreviewCard({ data, onSendMessage }) {
                 
                 {/* Image or Multimodal Output */}
                 {(previewResult.type === 'image' || previewResult.type === 'multimodal') && previewResult.url && (
-                  <img 
-                    src={previewResult.url} 
-                    alt="AI Generation Preview" 
-                    className="w-full max-h-64 object-cover rounded-xl shadow-lg border border-[#3b2d50] mb-3" 
-                  />
+                  !imageError ? (
+                    <img
+                      src={previewResult.url}
+                      alt="AI Generation Preview"
+                      className="w-full max-h-64 object-cover rounded-xl shadow-lg border border-[#3b2d50] mb-3"
+                      onError={() => {
+                        console.error("Failed to load image from URL:", previewResult.url);
+                        setImageError(true);
+                      }}
+                    />
+                  ) : (
+                    <div className="w-full h-48 bg-[#1a1525] rounded-xl border border-red-500/30 flex items-center justify-center mb-3">
+                      <p className="text-sm text-red-400">⚠️ Image generation blocked by network.</p>
+                    </div>
+                  )
                 )}
 
                 {/* Text or Multimodal Output (Text Portion) */}

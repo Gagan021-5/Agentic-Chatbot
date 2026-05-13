@@ -287,102 +287,170 @@ async function extractWithOpenRouterFallback(message, history) {
    AGENTIC TRIAGE — evaluate specificity before generating form
    ──────────────────────────────────────────── */
 const TRIAGE_INSTRUCTION = `
-You are a Universal AI Technical Architect. The user wants to build an application. 
-Your goal is to scope the app by first identifying the user's DOMAIN (e.g., Education, E-commerce, Image Generation, Fitness) and then determining the required features and inputs.
+You are an elite, conversational AI Architect. The user is describing an app they want to build.
+Your goal is to converse naturally, deduce their DOMAIN, and figure out the APP FORMAT (Text, Image, Audio, Video, Vision).
 
-STEP 1: DOMAIN DEDUCTION & COMPLEXITY
-- Evaluate the prompt. Is it a "Complex Data App" (e.g., study planner, financial calculator) or a "Simple Generation App"?
-- Determine if you have enough context to know exactly what the app should output.
+Trust but verify (avoid the over-automation trap): still deduce the most likely format, but the user may want something different in the same domain (e.g. astrology as text vs tarot images vs zodiac video). You will state your guess in downstream UX; prioritize explicit user intent over stereotypes. Always read the conversation messages you are given and never re-ask for details or format already stated there.
 
-STEP 2: ROUTING (READY vs NEEDS_CONTEXT)
-- Vague: "I want a student app" or "I want an astrologer app" -> Status: "needs_context". 
-  CRITICAL: If you need to ask questions to clarify, COMBINE THEM into a single natural message. Do not ask one minor question at a time.
-  Example Ask: "Are you looking to generate daily horoscopes, personalized birth chart readings, or compatibility matches? Also, what details will the user need to provide (like birth date/time/location)?"
-- Specific: "I want an AI study coach and timetable generator" -> Status: "ready".
+STEP 1: FORMAT & DOMAIN DEDUCTION
+- Analyze the user's request. What is the domain?
+- What format is the output?
+  - e.g., "Astrologer app" often defaults to 'text' ONLY when the user did not ask for visuals, audio, or video.
+  - e.g., "Generate a picture of a cake" is 'image'.
+  - e.g., "Voice cloning" is 'audio'.
+- EXPLICIT OVERRIDE: If the user's exact words include the format words from STEP 2 ("image", "photo", "text", "video", "audio", "voice") or clear equivalents they typed (e.g. "pictures", "speech"), set app_format accordingly. Domain hints alone never bypass STEP 2's EXPLICIT CHECK.
+- CORRECTIONS: If the user corrects the format (e.g., "No, make it an image app instead"), you must immediately set app_format to match their request and regenerate variables and options to match the new format.
 
-STEP 3: UNIVERSAL VARIABLE RULES (IF READY)
-If the status is "ready", generate 3-4 REQUIRED INPUT VARIABLES tailored strictly to the deduced domain.
-- Education Example: "Topic/Subject", "Current Grade/Class", "Days Until Exam".
-- Astrology Example: "Birth Date", "Time of Birth", "City of Birth".
-- STRICT BAN ON SYSTEM METADATA: NEVER ask for "Upload Date" or "Location" unless the app specifically needs it.
-- TEST DATA: You MUST generate a 'test_value' for each variable. This value should be a highly specific, realistic example.
+STEP 2: ROUTING & FORMAT VERIFICATION (NEUTRAL STANCE)
+- Vague: If you genuinely cannot tell what the app outputs, set status to "needs_context" and ask a clarifying question.
+- EXPLICIT CHECK (Strict Rule): Look closely at the user's exact words. Did they explicitly type the word "image", "photo", "text", "video", "audio", or "voice"?
+  - If NO: You MUST set status to "needs_format" to ask the user.
+    - HUMILITY RULE: DO NOT state your assumption out loud. DO NOT act like you know what format they want.
+    - Simply generate a friendly response praising their idea, and ask them neutrally what format they want to use.
+    - Good Example: "A futuristic product generator sounds amazing! What type of output should this app generate?"
+    - Bad Example (Do NOT do this): "I assume you want 3D images, is that correct?"
+  - If YES (or if they just clicked a UI format button in the history): Set status to "ready" and immediately generate the JSON form variables.
+
+STEP 3: VARIABLES (If Ready)
+- Generate 3-4 highly relevant input variables based strictly on the SPECIFIC DOMAIN.
+- Design/Marketing Domain (e.g., Posters, Ads, Logos): Ask for design-focused variables like "Brand Colors", "Event Theme", or "Target Audience".
+- Concept Art Domain (e.g., Product Generator, Characters): Ask for visual properties like "Materials/Finish", "Lighting", or "Art Style".
+- NEVER ask for backend logistical variables like "Release Date", "Budget", or "Physical Location" for any visual app.
 
 ${LANGUAGE_MIRROR_DIRECTIVE}
 
 Return STRICTLY as JSON:
 {
-  "status": "needs_context" | "ready",
-  "domain_identified": "e.g., Education, Astrology, Business",
-  "question": "Only filled if needs_context is true. COMBINE multiple required questions here.",
+  "status": "needs_context" | "needs_format" | "ready",
+  "domain": "e.g., Cooking",
+  "app_format": "text" | "image" | "audio" | "video" | "vision" | "unknown",
+  "question": "Only filled if needs_context or needs_format is true",
   "form": {
-    "options": ["Feature 1", "Feature 2", "Feature 3"],
-    "variables": [
-      {
-        "name": "Subject", 
-        "placeholder": "e.g., Realistic Portrait", 
-        "test_value": "Red velvet cake with cream cheese frosting"
-      }
-    ]
+    "options": ["Feature 1"],
+    "variables": [{"name": "Var", "placeholder": "...", "test_value": "..."}]
   }
 }
 `;
 
-function parseTriageResponse(rawContent, appType, languageHint) {
-  const fallbackForm = buildDynamicContextFallback(appType, languageHint);
+const ALLOWED_TRIAGE_APP_FORMATS = ["text", "image", "audio", "video", "vision"];
+
+function normalizeTriageAppFormat(raw, fallbackType) {
+  const fb = ALLOWED_TRIAGE_APP_FORMATS.includes(fallbackType) ? fallbackType : "text";
+  const v = String(raw == null ? "" : raw).trim().toLowerCase();
+  if (ALLOWED_TRIAGE_APP_FORMATS.includes(v)) return v;
+  if (String(raw || "").trim()) console.warn("[Triage] Invalid or unknown app_format:", raw, "→ using", fb);
+  return fb;
+}
+
+function mapHistoryToTriageMessages(conversationHistory) {
+  // Last 8 turns so chip / format clicks in the previous user turn stay visible to the model
+  const recent = Array.isArray(conversationHistory) ? conversationHistory.slice(-8) : [];
+  return recent
+    .map((m) => {
+      if (!m) return null;
+      const raw = String(m.role || "").toLowerCase();
+      const role = raw === "user" ? "user" : "assistant";
+      const content = String(m.content ?? m.text ?? "").trim();
+      if (!content) return null;
+      return { role, content };
+    })
+    .filter(Boolean);
+}
+
+function parseTriageResponse(rawContent, formatFallback, languageHint) {
+  const fallbackType = ALLOWED_TRIAGE_APP_FORMATS.includes(formatFallback) ? formatFallback : "text";
+
+  const readyShape = (domain, appFormat, form) => ({
+    status: "ready",
+    domain,
+    question: null,
+    app_format: appFormat,
+    form
+  });
+
   try {
     const cleaned = String(rawContent || "{}").replace(/```json/gi, "").replace(/```/g, "").trim();
     const parsed = JSON.parse(cleaned);
 
     if (!parsed || !parsed.status) {
-      return { status: "ready", domain: null, question: null, form: fallbackForm };
+      return readyShape(null, fallbackType, buildDynamicContextFallback(fallbackType, languageHint));
     }
 
-    const domain = String(parsed.domain_identified || "").trim() || null;
+    const domain =
+      String(parsed.domain || parsed.domain_identified || "").trim() || null;
 
-    if (parsed.status === "needs_context") {
+    if (parsed.status === "needs_context" || parsed.status === "needs_format") {
       const question = String(parsed.question || "").trim();
       if (!question || question.length < 10) {
-        // Question too short / empty — fall through to ready
-        return { status: "ready", domain, question: null, form: fallbackForm };
+        const af = normalizeTriageAppFormat(parsed.app_format, fallbackType);
+        const fbForm = buildDynamicContextFallback(af, languageHint);
+        return readyShape(domain, af, fbForm);
       }
-      return { status: "needs_context", domain, question, form: null };
+      const assumedFormat =
+        parsed.status === "needs_format"
+          ? normalizeTriageAppFormat(parsed.app_format, fallbackType)
+          : null;
+      return {
+        status: parsed.status,
+        domain,
+        question,
+        form: null,
+        app_format: assumedFormat
+      };
     }
 
-    // status === "ready"
+    if (parsed.status !== "ready") {
+      return readyShape(domain, fallbackType, buildDynamicContextFallback(fallbackType, languageHint));
+    }
+
+    const appFormat = normalizeTriageAppFormat(parsed.app_format, fallbackType);
+    const fallbackForm = buildDynamicContextFallback(appFormat, languageHint);
     const form = parsed.form && typeof parsed.form === "object" ? parsed.form : {};
-    return {
-      status: "ready",
-      domain,
-      question: null,
-      form: {
-        options: sanitizeStringList(form.options, 4, 4, fallbackForm.options),
-        variables: sanitizeVariableObjects(form.variables, 3, 4, fallbackForm.variables)
-      }
-    };
+    return readyShape(domain, appFormat, {
+      options: sanitizeStringList(form.options, 4, 4, fallbackForm.options),
+      variables: sanitizeVariableObjects(form.variables, 3, 4, fallbackForm.variables)
+    });
   } catch {
-    return { status: "ready", domain: null, question: null, form: fallbackForm };
+    return readyShape(null, fallbackType, buildDynamicContextFallback(fallbackType, languageHint));
   }
 }
 
 async function triageDynamicContext({ appType, appPurpose, languageHint, conversationHistory }) {
-  const safeType = ["text", "image", "video", "audio", "vision"].includes(appType) ? appType : "text";
+  const committed =
+    appType != null &&
+    String(appType).trim() &&
+    ALLOWED_TRIAGE_APP_FORMATS.includes(String(appType).trim().toLowerCase())
+      ? String(appType).trim().toLowerCase()
+      : null;
+  const formatFallback = committed || "text";
   const safePurpose = String(appPurpose || "").trim() || "general assistant app";
   const safeLang = normalizeLanguageHint(languageHint);
 
-  const historySnippet = Array.isArray(conversationHistory)
-    ? conversationHistory
-        .filter(h => h.role === "user")
-        .map(h => h.content)
-        .slice(-5)
-        .join("\n")
-    : "";
+  const historyHint =
+    "Recent conversation turns are included as separate messages above—read them to see if the user already clicked or typed a format (Text, Image, etc.).";
 
-  const userPrompt = `The user wants to build a ${safeType} app.
-Their description: "${safePurpose}"
-${historySnippet ? `Conversation so far:\n${historySnippet}` : ""}
+  const userTaskPrompt = committed
+    ? `The user wants to build a ${committed} app.
+Their description (from extraction / latest turn): "${safePurpose}"
 Language mode: ${safeLang}.
 
-Evaluate if this is specific enough to generate features and variables. If vague, ask ONE clarifying question.`;
+${historyHint}
+The product has already locked output format to "${committed}" (often from a chip). If history shows they just chose this format, you MUST set status to "ready", set app_format to "${committed}", and output the full form—do NOT use needs_format to ask again. Use needs_context only if the goal is too vague to define variables.`
+    : `The user is describing an app they want to build.
+Their description (from extraction / latest turn): "${safePurpose}"
+Language mode: ${safeLang}.
+
+${historyHint}
+Apply STEP 2 strictly: use needs_format unless (a) the user's exact words include an explicit format word from the checklist (image, photo, text, video, audio, voice) or (b) conversation history shows they just used a UI format chip. Domain guesses alone are never enough for "ready". Use needs_context if outputs are unknown. Use ready with the full form only when the domain is clear AND (a) or (b) is true.
+
+When status is needs_format, the "question" string must follow the HUMILITY RULE: never state your format guess—only friendly praise of their idea and a neutral ask for what type of output they want (chips will offer choices).`;
+
+  // System + mapped history + task user message (Groq / OpenRouter)
+  const triageMessages = [
+    { role: "system", content: TRIAGE_INSTRUCTION },
+    ...mapHistoryToTriageMessages(conversationHistory),
+    { role: "user", content: userTaskPrompt }
+  ];
 
   // Try Groq first
   try {
@@ -390,13 +458,10 @@ Evaluate if this is specific enough to generate features and variables. If vague
       const completion = await groq.chat.completions.create({
         model: "llama-3.3-70b-versatile",
         response_format: { type: "json_object" },
-        messages: [
-          { role: "system", content: TRIAGE_INSTRUCTION },
-          { role: "user", content: userPrompt }
-        ]
+        messages: triageMessages
       });
       const content = completion.choices?.[0]?.message?.content || "{}";
-      return parseTriageResponse(content, safeType, safeLang);
+      return parseTriageResponse(content, formatFallback, safeLang);
     }
   } catch (error) {
     if (!isRateLimitError(error)) {
@@ -409,16 +474,19 @@ Evaluate if this is specific enough to generate features and variables. If vague
     const fallback = await openRouterClient.chat.completions.create({
       model: "meta-llama/llama-3.3-70b-instruct",
       response_format: { type: "json_object" },
-      messages: [
-        { role: "system", content: TRIAGE_INSTRUCTION },
-        { role: "user", content: userPrompt }
-      ]
+      messages: triageMessages
     });
     const content = fallback.choices?.[0]?.message?.content || "{}";
-    return parseTriageResponse(content, safeType, safeLang);
+    return parseTriageResponse(content, formatFallback, safeLang);
   } catch (error) {
     console.error("OpenRouter triage fallback failed:", error.message);
-    return { status: "ready", question: null, form: buildDynamicContextFallback(safeType, safeLang) };
+    return {
+      status: "ready",
+      domain: null,
+      question: null,
+      app_format: formatFallback,
+      form: buildDynamicContextFallback(formatFallback, safeLang)
+    };
   }
 }
 

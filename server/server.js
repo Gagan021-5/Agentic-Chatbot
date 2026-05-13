@@ -115,7 +115,7 @@ app.post('/api/test-preview', async (req, res) => {
     const type = (appType || 'text').toLowerCase();
 
     // ---------------------------------------------------------
-    // 1. TEXT APP (Groq + Optional HF Image for Visual domains)
+    // 1. TEXT APP (Groq + optional Pollinations image for visual domains)
     // ---------------------------------------------------------
     if (type === 'text') {
       const groqRes = await fetch('https://api.groq.com/openai/v1/chat/completions', {
@@ -124,13 +124,14 @@ app.post('/api/test-preview', async (req, res) => {
         body: JSON.stringify({
           model: "llama-3.1-8b-instant", 
           messages: [
-            { 
-              role: "system", 
-              content: "You are the backend engine for an application. Output EXACTLY what the app is supposed to output. NEVER apologize. NEVER mention that you are an AI, a text-based model, or that you cannot generate images. Just return the pure output." 
+            {
+              role: "system",
+              content:
+                "You are the backend engine for an application. Output EXACTLY what the app is supposed to output. NEVER apologize. NEVER mention that you are an AI, a text-based model, or that you cannot generate images. CRITICAL DIRECTIVE: You must output ONLY pure, raw plain text. DO NOT use any Markdown formatting whatsoever. No asterisks (**), no hashes (#) for headers, and no markdown bullet points. Just clean, readable plain text."
             },
-            { 
-              role: "user", 
-              content: `${systemPrompt}\n\nUser Inputs: ${JSON.stringify(variables)}` 
+            {
+              role: "user",
+              content: `${systemPrompt}\n\nUser Inputs: ${JSON.stringify(variables)}`
             }
           ],
           max_tokens: 300 
@@ -139,65 +140,46 @@ app.post('/api/test-preview', async (req, res) => {
       const groqData = await groqRes.json();
       if (!groqRes.ok) throw new Error(groqData.error?.message || "Groq Error");
       
-      const textContent = groqData.choices[0].message.content;
+      const rawText = groqData.choices[0].message.content;
+      const textContent = String(rawText)
+        .replace(/\*\*\*/g, "")
+        .replace(/\*\*/g, "")
+        .replace(/\*/g, "")
+        .replace(/^#{1,6}\s?/gm, "")
+        .replace(/#/g, "")
+        .trim();
       let imageUrl = null;
 
-      // Surprise & Delight: If text app is visual (Astrology, Story), add an image
+      // Surprise & Delight: If text app is visual (Astrology, Story), add an image (Pollinations — clean prompt, no raw JSON)
       if (systemPrompt.toLowerCase().match(/(astrology|horoscope|story|character|design)/)) {
-        try {
-          const hfRes = await fetch('https://api-inference.huggingface.co/models/black-forest-labs/FLUX.1-schnell', {
-            method: 'POST',
-            headers: { 'Authorization': `Bearer ${process.env.HF_ACCESS_TOKEN}`, 'Content-Type': 'application/json' },
-            body: JSON.stringify({ inputs: `High quality, aesthetic illustration for: ${JSON.stringify(variables).substring(0, 100)}` })
-          });
-          if (hfRes.ok) {
-            const buffer = await hfRes.arrayBuffer();
-            imageUrl = `data:image/jpeg;base64,${Buffer.from(buffer).toString('base64')}`;
-          } else {
-            let errorMsg = "Hugging Face API failed";
-            try {
-              const errorData = await hfRes.json();
-              errorMsg = errorData.error || errorMsg;
-            } catch (parseErr) {
-              errorMsg = `HTTP Error ${hfRes.status}: ${hfRes.statusText}`;
-            }
-            console.error("Optional HF image error:", errorMsg);
-          }
-        } catch (e) { console.error("Optional image fetch failed:", e.message); }
+        const cleanVars = Object.entries(variables || {})
+          .map(([k, v]) => `${k}: ${String(v)}`)
+          .join(", ");
+        const visualFocus = cleanVars.substring(0, 300);
+        const combinedPrompt = `A high quality, realistic image of: ${visualFocus}`;
+        imageUrl = `https://image.pollinations.ai/prompt/${encodeURIComponent(combinedPrompt)}?width=1024&height=1024&nologo=true`;
       }
       previewResult = { type: imageUrl ? 'multimodal' : 'text', content: textContent, url: imageUrl };
     }
 
     // ---------------------------------------------------------
-    // 2. IMAGE APP (Hugging Face Flux)
+    // 2. IMAGE APP (Pollinations.ai - Bulletproof Free Tier)
     // ---------------------------------------------------------
     else if (type === 'image') {
-      // The ultra-reliable testing URL
-      const hfUrl = 'https://api-inference.huggingface.co/models/runwayml/stable-diffusion-v1-5';
-      console.log(`[DEBUG] Attempting to fetch from Hugging Face URL: ${hfUrl}`);
+      const cleanVars = Object.entries(variables || {})
+        .map(([k, v]) => `${k}: ${String(v)}`)
+        .join(", ");
 
-      const hfRes = await fetch(hfUrl, {
-        method: 'POST',
-        headers: { 'Authorization': `Bearer ${process.env.HF_ACCESS_TOKEN}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ inputs: `Generate image: ${systemPrompt}. Details: ${JSON.stringify(variables)}` })
-      });
-      if (!hfRes.ok) {
-        const rawErrorText = await hfRes.text();
-        console.error("🚨 [HF RAW ERROR] Status:", hfRes.status);
-        console.error("🚨 [HF RAW ERROR] Body:", rawErrorText);
+      const visualFocus = cleanVars.substring(0, 300);
+      const combinedPrompt = `A high quality, realistic image of: ${visualFocus}`;
 
-        let errorMsg = `Hugging Face API failed with status ${hfRes.status}`;
-        try {
-          const errorData = JSON.parse(rawErrorText);
-          errorMsg = errorData.error || errorMsg;
-        } catch (parseErr) {
-          errorMsg = `HTTP Error ${hfRes.status}: ${hfRes.statusText}`;
-        }
-        throw new Error(errorMsg);
-      }
-      
-      const buffer = await hfRes.arrayBuffer();
-      previewResult = { type: 'image', url: `data:image/jpeg;base64,${Buffer.from(buffer).toString('base64')}` };
+      const encodedPrompt = encodeURIComponent(combinedPrompt);
+      const imageUrl = `https://image.pollinations.ai/prompt/${encodedPrompt}?width=1024&height=1024&nologo=true`;
+
+      previewResult = {
+        type: 'image',
+        url: imageUrl
+      };
     }
 
     // ---------------------------------------------------------
