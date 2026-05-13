@@ -52,7 +52,7 @@ function IconSend() {
   );
 }
 
-function ChatWindow({ messages, isLoading, sendMessage, resetSession }) {
+function ChatWindow({ messages, isLoading, sendMessage, resetSession, sessionId = "" }) {
   const [input, setInput] = useState("");
   const [isListening, setIsListening] = useState(false);
   const recognitionRef = useRef(null);
@@ -181,7 +181,14 @@ function ChatWindow({ messages, isLoading, sendMessage, resetSession }) {
       <main ref={viewportRef} className="relative z-10 flex-1 overflow-y-auto px-3 py-5 sm:px-5 sm:py-8 md:px-8">
         <div className="mx-auto flex max-w-[960px] flex-col gap-5 sm:gap-7 md:gap-8">
           {messages.map((msg) => (
-            <MessageBubble key={msg.id} message={msg} onSendMessage={sendMessage} onResetSession={resetSession} isLoading={isLoading} />
+            <MessageBubble
+              key={msg.id}
+              message={msg}
+              sessionId={sessionId}
+              onSendMessage={sendMessage}
+              onResetSession={resetSession}
+              isLoading={isLoading}
+            />
           ))}
           {isLoading ? <TypingIndicator /> : null}
         </div>

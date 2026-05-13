@@ -1,7 +1,12 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useLayoutEffect, useMemo, useRef } from 'react';
 import { testPreview } from '../utils/api';
+import {
+  livePreviewStorageKey,
+  loadLivePreviewFromStorage,
+  saveLivePreviewToStorage
+} from '../utils/livePreviewStorage';
 
-export default function AppPreviewCard({ data, onSendMessage }) {
+export default function AppPreviewCard({ data, onSendMessage, sessionId, storageMessageId }) {
   const [isEditing, setIsEditing] = useState(false);
   const [editInstruction, setEditInstruction] = useState('');
   const [isPreviewMode, setIsPreviewMode] = useState(false);
@@ -26,6 +31,51 @@ export default function AppPreviewCard({ data, onSendMessage }) {
   const [previewError, setPreviewError] = useState('');
   const [imageError, setImageError] = useState(false);
   const [testImage, setTestImage] = useState(null);
+
+  const storageKey = useMemo(
+    () => livePreviewStorageKey(sessionId, storageMessageId),
+    [sessionId, storageMessageId]
+  );
+
+  useLayoutEffect(() => {
+    if (!storageKey) return;
+    const s = loadLivePreviewFromStorage(storageKey);
+    if (!s) return;
+    if (typeof s.isPreviewMode === "boolean") setIsPreviewMode(s.isPreviewMode);
+    if (s.testInputs && typeof s.testInputs === "object") {
+      setTestInputs((prev) => ({ ...prev, ...s.testInputs }));
+    }
+    if (s.previewResult) setPreviewResult(s.previewResult);
+    if (s.testImage) setTestImage(s.testImage);
+  }, [storageKey]);
+
+  const prevStorageKeyRef = useRef(null);
+  const skipNextPersistRef = useRef(true);
+
+  useEffect(() => {
+    if (!storageKey) return;
+    if (prevStorageKeyRef.current !== storageKey) {
+      prevStorageKeyRef.current = storageKey;
+      skipNextPersistRef.current = true;
+    }
+    if (skipNextPersistRef.current) {
+      skipNextPersistRef.current = false;
+      return;
+    }
+    const t = setTimeout(() => {
+      saveLivePreviewToStorage(storageKey, {
+        isPreviewMode,
+        testInputs,
+        previewResult,
+        testImage
+      });
+    }, 450);
+    return () => clearTimeout(t);
+  }, [storageKey, isPreviewMode, testInputs, previewResult, testImage]);
+
+  useEffect(() => {
+    if (previewResult?.url) setImageError(false);
+  }, [previewResult?.url]);
 
   if (!data) return null;
 
@@ -206,22 +256,40 @@ export default function AppPreviewCard({ data, onSendMessage }) {
             {previewResult && (
               <div className="mt-4 pt-4 border-t border-[#2a2238] animate-fade-in-up">
                 <span className="text-xs font-semibold text-[#a77bf3] uppercase tracking-wider mb-3 block">Result</span>
-                
+
+                {(previewResult.type === 'image' || previewResult.type === 'multimodal') &&
+                  !previewResult.url &&
+                  previewResult._imageDroppedForStorage && (
+                    <div className="mb-3 rounded-lg border border-amber-500/25 bg-amber-950/25 px-3 py-2.5 text-xs text-amber-100/95 leading-relaxed">
+                      The image was not kept in browser storage (size limit). Fields and any text below were restored — click{" "}
+                      <strong className="text-amber-50">Run Live Test</strong> to regenerate the image.
+                    </div>
+                  )}
+
                 {/* Image or Multimodal Output */}
                 {(previewResult.type === 'image' || previewResult.type === 'multimodal') && previewResult.url && (
                   !imageError ? (
-                    <img
-                      src={previewResult.url}
-                      alt="AI Generation Preview"
-                      className="w-full max-h-64 object-cover rounded-xl shadow-lg border border-[#3b2d50] mb-3"
-                      onError={() => {
-                        console.error("Failed to load image from URL:", previewResult.url);
-                        setImageError(true);
-                      }}
-                    />
+                    <div className="mb-3 max-h-[min(85vh,960px)] overflow-auto rounded-xl border border-[#3b2d50] bg-[#0a0a0f] shadow-lg flex justify-center items-start p-1">
+                      <img
+                        key={previewResult.url.slice(0, 120)}
+                        src={previewResult.url}
+                        alt="AI Generation Preview"
+                        className="max-w-full w-full h-auto object-contain rounded-lg"
+                        referrerPolicy="no-referrer"
+                        decoding="async"
+                        onError={() => {
+                          const u = previewResult.url;
+                          const hint = u.startsWith("data:") ? "Invalid image data in preview." : "Failed to load image URL.";
+                          console.error(hint, u.slice(0, 200));
+                          setImageError(true);
+                        }}
+                      />
+                    </div>
                   ) : (
-                    <div className="w-full h-48 bg-[#1a1525] rounded-xl border border-red-500/30 flex items-center justify-center mb-3">
-                      <p className="text-sm text-red-400">⚠️ Image generation blocked by network.</p>
+                    <div className="w-full h-48 bg-[#1a1525] rounded-xl border border-red-500/30 flex items-center justify-center mb-3 px-4 text-center">
+                      <p className="text-sm text-red-400">
+                        Preview image could not be displayed. Try Run Live Test again, or check the server log if this persists.
+                      </p>
                     </div>
                   )
                 )}

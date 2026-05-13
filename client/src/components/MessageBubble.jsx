@@ -50,7 +50,9 @@ function renderText(text) {
   ));
 }
 
-function AgentUI({ message, onSendMessage, onResetSession, isLoading }) {
+function AgentUI(props) {
+  const { message, onSendMessage, onResetSession, isLoading } = props;
+  const previewSessionId = props.sessionId ?? "";
   const { uiType, uiData } = message;
   if (uiType === "chips") return <OptionChips options={uiData.options || []} onSendMessage={onSendMessage} isLoading={isLoading} />;
   if (uiType === "text_input") return <InlineTextInput uiData={uiData} onSendMessage={onSendMessage} />;
@@ -67,12 +69,20 @@ function AgentUI({ message, onSendMessage, onResetSession, isLoading }) {
   if (uiType === "success") return <PublishSuccessCard data={uiData} onResetSession={onResetSession} />;
   if (uiType === "scope") return <ScopeCard data={uiData} onSendMessage={onSendMessage} />;
   if (uiType === "confirm") return <RequirementSummaryCard data={uiData} />;
-  if (uiType === "app_preview") return <AppPreviewCard data={uiData} onSendMessage={onSendMessage} />;
+  if (uiType === "app_preview")
+    return (
+      <AppPreviewCard
+        data={uiData}
+        onSendMessage={onSendMessage}
+        sessionId={previewSessionId}
+        storageMessageId={message.id}
+      />
+    );
   if (uiType === "multi_select_form") return <MultiSelectFormCard data={uiData} onSendMessage={onSendMessage} isLoading={isLoading} />;
   return null;
 }
 
-function MessageBubble({ message, onSendMessage, onResetSession, isLoading }) {
+function MessageBubble({ message, onSendMessage, onResetSession, isLoading, sessionId = "" }) {
   const isUser = message.role === "user";
 
   return (
@@ -92,7 +102,13 @@ function MessageBubble({ message, onSendMessage, onResetSession, isLoading }) {
           ) : null}
           {!isUser && message.uiType && message.uiType !== "text" ? (
             <div className={message.text ? "mt-4 sm:mt-5" : ""}>
-              <AgentUI message={message} onSendMessage={onSendMessage} onResetSession={onResetSession} isLoading={isLoading} />
+              <AgentUI
+                message={message}
+                onSendMessage={onSendMessage}
+                onResetSession={onResetSession}
+                isLoading={isLoading}
+                sessionId={sessionId}
+              />
             </div>
           ) : null}
           {/* ConfirmCard — shown after every agent step that needs confirmation */}

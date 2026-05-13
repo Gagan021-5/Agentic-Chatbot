@@ -1,5 +1,6 @@
 import { useEffect, startTransition, useState } from "react";
 import { postAgentMessage, fetchAgentHistory } from "../utils/api";
+import { formatUserPayloadForHistory, normalizeAgentUiData } from "../utils/formatUserHistoryDisplay";
 
 const STORAGE_KEY = "rentprompts-agent-session-id";
 
@@ -43,11 +44,36 @@ function useChat() {
       try {
         const data = await fetchAgentHistory(sessionId);
         if (data.history && data.history.length > 0) {
-          const loadedMessages = data.history.map((msg, index) => ({
-            id: `history-${index}`,
-            role: msg.role,
-            text: msg.content
-          }));
+          const loadedMessages = data.history.map((msg, index) => {
+            const raw = msg.content ?? msg.text ?? "";
+            const isUser = msg.role === "user";
+
+            if (isUser) {
+              const friendly =
+                (msg.displayContent && String(msg.displayContent).trim()) ||
+                formatUserPayloadForHistory(raw) ||
+                raw;
+              return {
+                id: `history-${index}`,
+                role: "user",
+                text: friendly,
+                uiType: "text",
+                uiData: {}
+              };
+            }
+
+            const uiData = normalizeAgentUiData(msg.uiData);
+            return {
+              id: `history-${index}`,
+              role: "agent",
+              text: raw,
+              uiType: msg.uiType || null,
+              uiData,
+              confirm: msg.confirm ?? null,
+              step: msg.step,
+              coins: msg.coins
+            };
+          });
           
           startTransition(() => {
             setMessages([buildWelcomeMessage(), ...loadedMessages]);
@@ -72,11 +98,11 @@ function useChat() {
     
     // Hide structured payloads from the chat — show friendly text instead
     if (lowerText.startsWith("multi_select_form::")) {
-      displayText = "Confirmed settings ✓";
+      displayText = formatUserPayloadForHistory(cleanText) || "Confirmed settings ✓";
     } else if (lowerText.startsWith("confirm seo::")) {
-      displayText = "Confirmed SEO Metadata ✓";
+      displayText = formatUserPayloadForHistory(cleanText) || "Confirmed SEO Metadata ✓";
     } else if (lowerText.startsWith("edit prompt::")) {
-      displayText = "Edited prompt template";
+      displayText = formatUserPayloadForHistory(cleanText) || "Edited prompt template";
     } else if (lowerText.startsWith("select ")) {
       displayText = "Selected model ✓";
     } else if (lowerText === "publish app") {

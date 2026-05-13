@@ -3,11 +3,130 @@ import "dotenv/config";
 import cors from "cors";
 import express from "express";
 import { createSession, getSession, saveSession, deleteSession } from "./lib/redis.js";
+import { formatUserPayloadForHistory } from "./lib/formatUserHistoryDisplay.js";
 import { route } from "./lib/stepRouter.js";
 import { runPromptTest } from "./lib/gemini.js";
 
 const app = express();
 const PORT = Number(process.env.PORT) || 3001;
+
+/** Pollinations GET URLs break in the browser (ad blockers, hotlinking). We fetch on the server and return a data URL. */
+const POLLINATIONS_PREVIEW_SIZE = 768;
+/** Pollinations path length; user variables are prioritized so previews match Live Test inputs. */
+const POLLINATIONS_MAX_PROMPT_CHARS = 640;
+
+/**
+ * Image preview prompts used to lead with a truncated system prompt ("studio lighting", "3D render"),
+ * which drowned out user fields like backgroundStyle / colorScheme. Put user-driven constraints first.
+ */
+function buildUserDrivenVisualClauses(variables) {
+  const entries = Object.entries(variables || {}).filter(([, v]) => v != null && String(v).trim() !== "");
+  if (!entries.length) return "";
+
+  const parts = [];
+
+  const bg = entries.find(([k]) =>
+    /background|backdrop|environment|setting|scene|location|surround/i.test(k)
+  );
+  if (bg) {
+    const val = String(bg[1]).trim();
+    parts.push(
+      `The visible background and environment must clearly show: ${val}. Do not replace this with a plain solid studio backdrop, empty gradient, or flat void unless the user explicitly asked for a minimal or solid background.`
+    );
+  }
+
+  const col = entries.find(([k]) => /color|palette|scheme|hue|tint|tone/i.test(k));
+  if (col) {
+    const val = String(col[1]).trim();
+    parts.push(
+      `Color direction: "${val}" should read as the dominant color story — saturated, vivid, and clearly visible on the subject and in the scene (not pale gray, not mostly white/off-white unless the user asked for that).`
+    );
+  }
+
+  const subject = entries.find(
+    ([k]) =>
+      /shape|subject|object|form|creature|motif|theme|type|design/i.test(k) &&
+      !/background|backdrop/i.test(k)
+  );
+  if (subject) {
+    parts.push(`Primary subject or form to feature: ${String(subject[1]).trim()}.`);
+  }
+
+  const varsCompact = entries.map(([k, v]) => `${k}: ${String(v).trim()}`).join("; ");
+  parts.push(`Honor every user field together in one coherent image: ${varsCompact}.`);
+
+  return parts.join(" ");
+}
+
+function buildPollinationsImageAppPrompt(systemPrompt, variables) {
+  const userBlock = buildUserDrivenVisualClauses(variables);
+  const styleHint = String(systemPrompt || "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 240);
+
+  const core = [
+    userBlock,
+    styleHint ? `Art direction (secondary to user fields above): ${styleHint}` : ""
+  ]
+    .filter(Boolean)
+    .join(" ");
+
+  return core.trim() || "High quality detailed creative render.";
+}
+
+function truncatePollinationsPrompt(text) {
+  const t = String(text || "").trim();
+  if (!t.length) return "High quality detailed illustration, professional lighting.";
+  if (t.length <= POLLINATIONS_MAX_PROMPT_CHARS) return t;
+  return `${t.slice(0, POLLINATIONS_MAX_PROMPT_CHARS).trimEnd()}…`;
+}
+
+function previewImageUnavailableDataUrl() {
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512"><rect fill="#1a1525" width="512" height="512"/><text x="256" y="248" fill="#a77bf3" font-family="system-ui,sans-serif" font-size="18" font-weight="600" text-anchor="middle">Could not load preview image</text><text x="256" y="278" fill="#9ca3af" font-family="system-ui,sans-serif" font-size="13" text-anchor="middle">Pollinations may be busy — try Run again</text></svg>`;
+  return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
+}
+
+async function fetchPollinationsPreviewDataUrl(plainPrompt) {
+  const truncated = truncatePollinationsPrompt(plainPrompt);
+  const imageUrl = `https://image.pollinations.ai/prompt/${encodeURIComponent(
+    truncated
+  )}?width=${POLLINATIONS_PREVIEW_SIZE}&height=${POLLINATIONS_PREVIEW_SIZE}&nologo=true`;
+
+  const imgRes = await fetch(imageUrl, {
+    headers: {
+      Accept: "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+      "User-Agent":
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    },
+    signal: AbortSignal.timeout(120000)
+  });
+
+  if (!imgRes.ok) {
+    throw new Error(`Pollinations HTTP ${imgRes.status}`);
+  }
+
+  const mime = imgRes.headers.get("content-type") || "image/jpeg";
+  const buf = Buffer.from(await imgRes.arrayBuffer());
+  if (!mime.startsWith("image/") || buf.length < 800) {
+    throw new Error(`Pollinations returned non-image or empty body (${mime}, ${buf.length}b)`);
+  }
+
+  return `data:${mime};base64,${buf.toString("base64")}`;
+}
+
+async function fetchPollinationsWithFallback(primaryPrompt, fallbackPrompt) {
+  try {
+    return await fetchPollinationsPreviewDataUrl(primaryPrompt);
+  } catch (err) {
+    console.warn("[test-preview] Pollinations primary failed:", err.message);
+    const fb = String(fallbackPrompt || "").trim();
+    if (fb && fb !== String(primaryPrompt || "").trim()) {
+      return await fetchPollinationsPreviewDataUrl(fb);
+    }
+    throw err;
+  }
+}
 
 app.use(
   cors({
@@ -30,9 +149,11 @@ app.post("/api/agent/chat", async (req, res) => {
     const session = existingSession || createSession(sessionId);
 
     session.history = Array.isArray(session.history) ? session.history : [];
+    const userDisplay = formatUserPayloadForHistory(message);
     session.history.push({
       role: "user",
-      content: message
+      content: message,
+      ...(userDisplay ? { displayContent: userDisplay } : {})
     });
 
     const result = await route(session, message);
@@ -40,7 +161,9 @@ app.post("/api/agent/chat", async (req, res) => {
     session.step = result.nextStep;
     session.history.push({
       role: "agent",
-      content: result.reply
+      content: result.reply,
+      uiType: result.uiType ?? null,
+      uiData: result.uiData ?? null
     });
 
     if (result.clearSession) {
@@ -152,12 +275,23 @@ app.post('/api/test-preview', async (req, res) => {
 
       // Surprise & Delight: If text app is visual (Astrology, Story), add an image (Pollinations — clean prompt, no raw JSON)
       if (systemPrompt.toLowerCase().match(/(astrology|horoscope|story|character|design)/)) {
-        const cleanVars = Object.entries(variables || {})
-          .map(([k, v]) => `${k}: ${String(v)}`)
-          .join(", ");
-        const visualFocus = cleanVars.substring(0, 300);
-        const combinedPrompt = `A high quality, realistic image of: ${visualFocus}`;
-        imageUrl = `https://image.pollinations.ai/prompt/${encodeURIComponent(combinedPrompt)}?width=1024&height=1024&nologo=true`;
+        const combinedPrompt = buildPollinationsImageAppPrompt(
+          `Illustration supporting the app's narrative or design. ${systemPrompt}`,
+          variables
+        );
+        try {
+          imageUrl = await fetchPollinationsWithFallback(
+            combinedPrompt,
+            Object.entries(variables || {})
+              .filter(([, v]) => v && String(v).trim())
+              .map(([k, v]) => `${k}: ${v}`)
+              .join("; ")
+              .slice(0, 320) || combinedPrompt.slice(0, 200)
+          );
+        } catch (e) {
+          console.warn("[test-preview] Multimodal Pollinations failed:", e.message);
+          imageUrl = previewImageUnavailableDataUrl();
+        }
       }
       previewResult = { type: imageUrl ? 'multimodal' : 'text', content: textContent, url: imageUrl };
     }
@@ -167,18 +301,29 @@ app.post('/api/test-preview', async (req, res) => {
     // ---------------------------------------------------------
     else if (type === 'image') {
       const cleanVars = Object.entries(variables || {})
-        .map(([k, v]) => `${k}: ${String(v)}`)
-        .join(", ");
+        .filter(([k, v]) => v && String(v).trim() !== "")
+        .map(([k, v]) => `${k}: ${v}`)
+        .join("; ");
 
-      const visualFocus = cleanVars.substring(0, 300);
-      const combinedPrompt = `A high quality, realistic image of: ${visualFocus}`;
+      const combinedPrompt = buildPollinationsImageAppPrompt(systemPrompt, variables);
+      const shortFallback =
+        cleanVars.slice(0, 320) ||
+        String(systemPrompt || "")
+          .replace(/\s+/g, " ")
+          .trim()
+          .slice(0, 200);
 
-      const encodedPrompt = encodeURIComponent(combinedPrompt);
-      const imageUrl = `https://image.pollinations.ai/prompt/${encodedPrompt}?width=1024&height=1024&nologo=true`;
+      let imageDataUrl;
+      try {
+        imageDataUrl = await fetchPollinationsWithFallback(combinedPrompt, shortFallback);
+      } catch (e) {
+        console.warn("[test-preview] Image app Pollinations failed:", e.message);
+        imageDataUrl = previewImageUnavailableDataUrl();
+      }
 
       previewResult = {
-        type: 'image',
-        url: imageUrl
+        type: "image",
+        url: imageDataUrl
       };
     }
 

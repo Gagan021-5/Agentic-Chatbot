@@ -311,11 +311,15 @@ STEP 2: ROUTING & FORMAT VERIFICATION (NEUTRAL STANCE)
     - Bad Example (Do NOT do this): "I assume you want 3D images, is that correct?"
   - If YES (or if they just clicked a UI format button in the history): Set status to "ready" and immediately generate the JSON form variables.
 
-STEP 3: VARIABLES (If Ready)
-- Generate 3-4 highly relevant input variables based strictly on the SPECIFIC DOMAIN.
-- Design/Marketing Domain (e.g., Posters, Ads, Logos): Ask for design-focused variables like "Brand Colors", "Event Theme", or "Target Audience".
-- Concept Art Domain (e.g., Product Generator, Characters): Ask for visual properties like "Materials/Finish", "Lighting", or "Art Style".
-- NEVER ask for backend logistical variables like "Release Date", "Budget", or "Physical Location" for any visual app.
+STEP 3: FEATURES & VARIABLES (If Ready)
+- FEATURES (\`options\` array): You MUST generate 4-5 optional features the user can include in their app.
+  - For Text Apps: Use structural features (e.g., "Tone Control", "Structured Output", "SEO Optimization").
+  - For Image/Video Apps: Use visual/stylistic features (e.g., "Lighting Style", "Camera Angles", "Art Medium/Style", "Background/Setting", "Color Grading").
+
+- VARIABLES (\`variables\` array): Generate 3-4 highly relevant input variables based strictly on the SPECIFIC DOMAIN.
+  - Design/Marketing Domain (e.g., Posters, Ads): Ask for design variables like "Brand Colors" or "Target Audience".
+  - Concept Art Domain (e.g., Product Generator): Ask for visual properties like "Materials/Finish" or "Subject Details".
+  - NEVER ask for backend logistical variables like "Release Date", "Budget", or "Physical Location" for any visual app.
 
 ${LANGUAGE_MIRROR_DIRECTIVE}
 
