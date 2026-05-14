@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 
 export default function MultiSelectFormCard({ data, onSendMessage, isLoading }) {
   const options = useMemo(() => (Array.isArray(data?.options) ? data.options : []), [data]);
@@ -7,19 +7,42 @@ export default function MultiSelectFormCard({ data, onSendMessage, isLoading }) 
       (Array.isArray(data?.variables) ? data.variables : [])
         .map((variable) => {
           if (typeof variable === "string") {
-            return { name: variable, placeholder: "Enter details..." };
+            return { name: variable, placeholder: "Enter details...", test_value: "" };
           }
           return {
             name: String(variable?.name || "").trim(),
-            placeholder: String(variable?.placeholder || "Enter details...").trim()
+            placeholder: String(variable?.placeholder || "Enter details...").trim(),
+            test_value: String(variable?.test_value || "").trim()
           };
         })
         .filter((variable) => variable.name),
     [data]
   );
   const [selectedOptions, setSelectedOptions] = useState(options.slice(0, 2));
-  const [variables] = useState(initialVariables);
-  const [variableValues, setVariableValues] = useState({});
+  const variables = initialVariables;
+  const [variableValues, setVariableValues] = useState(() => {
+    const initialVals = {};
+    initialVariables.forEach((v) => {
+      if (v.test_value) {
+        initialVals[v.name] = v.test_value;
+      }
+    });
+    return initialVals;
+  });
+
+  useEffect(() => {
+    setVariableValues((prev) => {
+      let changed = false;
+      const next = { ...prev };
+      initialVariables.forEach((v) => {
+        if (v.test_value && !(v.name in next)) {
+          next[v.name] = v.test_value;
+          changed = true;
+        }
+      });
+      return changed ? next : prev;
+    });
+  }, [initialVariables]);
 
   const toggleOption = (option) => {
     setSelectedOptions((prev) =>
@@ -84,6 +107,7 @@ export default function MultiSelectFormCard({ data, onSendMessage, isLoading }) 
             </label>
             <input
               type="text"
+              value={variableValues[variable.name] || ""}
               placeholder={variable.placeholder || "Enter details..."}
               className="w-full bg-[#121018] border border-[#2a2238] rounded-xl px-4 py-3.5 text-sm text-gray-200 placeholder:text-gray-600 focus:outline-none focus:border-[#8b5cf6]/60 focus:bg-[#1a1525] transition-all duration-300 ease-in-out hover:border-[#3b2d50]"
               onChange={(e) => updateVariableValue(variable.name, e.target.value)}

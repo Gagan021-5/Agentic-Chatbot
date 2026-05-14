@@ -294,20 +294,71 @@ export default function AppPreviewCard({ data, onSendMessage, sessionId, storage
                   )
                 )}
 
+                {/* Audio Output (ElevenLabs MP3 from server) */}
+                {previewResult.type === 'audio' && (
+                  <div className="bg-[#1a1525] rounded-xl border border-[#3b2d50] p-5 mb-3 shadow-lg">
+                    <div className="mb-4">
+                      <h4 className="text-sm font-bold text-gray-200">Audio preview</h4>
+                      <p className="text-xs text-gray-400 font-medium mt-0.5">
+                        {previewResult.url
+                          ? "Generated with ElevenLabs (voice from ELEVENLABS_VOICE_ID on the server)."
+                          : "Run Live Test again to regenerate audio."}
+                      </p>
+                    </div>
+                    {previewResult.url && (
+                      <audio
+                        controls
+                        className="w-full h-10 rounded-md bg-[#121018] mb-4"
+                        key={previewResult.url.slice(0, 120)}
+                      >
+                        <source src={previewResult.url} type="audio/mpeg" />
+                      </audio>
+                    )}
+                    <div className="p-4 bg-black/40 rounded-lg text-sm text-gray-300 leading-relaxed border border-white/5">
+                      <span className="text-xs font-semibold text-[#a77bf3] uppercase tracking-wide block mb-2">
+                        Script (spoken)
+                      </span>
+                      <p className="whitespace-pre-wrap">{previewResult.data}</p>
+                    </div>
+                  </div>
+                )}
+
+                {/* Video Output */}
+                {previewResult.type === 'video' && (
+                  <div className="mb-3 animate-fade-in">
+                    {/* Fake Video Player Frame */}
+                    <div className="relative w-full aspect-video rounded-t-xl overflow-hidden shadow-lg border border-[#3b2d50] border-b-0 group cursor-pointer bg-black">
+                      <img
+                        src={previewResult.url}
+                        alt="Video Thumbnail"
+                        className="w-full h-full object-cover opacity-70 group-hover:opacity-90 transition-opacity duration-500"
+                        referrerPolicy="no-referrer"
+                        onError={(e) => {
+                          e.target.src =
+                            "https://via.placeholder.com/1024x576/1a1525/a77bf3?text=Video+Thumbnail";
+                        }}
+                      />
+                      <div className="absolute inset-0 flex items-center justify-center">
+                        <div className="w-16 h-16 bg-black/60 backdrop-blur-md border border-white/20 rounded-full flex items-center justify-center text-white text-2xl shadow-2xl pl-1 group-hover:scale-110 transition-transform">
+                          ▶
+                        </div>
+                      </div>
+                      <div className="absolute top-3 left-3 bg-red-500 text-[10px] font-bold px-2 py-0.5 rounded text-white tracking-wider animate-pulse">
+                        LIVE
+                      </div>
+                    </div>
+                    {/* Screenplay text block */}
+                    <div className="p-4 bg-[#1a1525] border border-[#3b2d50] rounded-b-xl text-sm text-gray-300 whitespace-pre-wrap leading-relaxed shadow-lg">
+                      <h4 className="text-[#a77bf3] font-bold mb-3 uppercase tracking-wide text-xs">Video Concept & Screenplay</h4>
+                      {previewResult.data}
+                    </div>
+                  </div>
+                )}
+
                 {/* Text or Multimodal Output (Text Portion) */}
                 {(previewResult.type === 'text' || previewResult.type === 'multimodal') && previewResult.content && (
                   <div className="bg-[#1a1525] p-3 rounded-lg border border-[#2a2238]">
                     <p className="text-sm text-gray-200 whitespace-pre-wrap leading-relaxed">{previewResult.content}</p>
-                  </div>
-                )}
-                
-                {/* Audio Output */}
-                {previewResult.type === 'audio' && (
-                  <div className="space-y-2">
-                    <p className="text-sm text-gray-300">{previewResult.content}</p>
-                    <audio controls className="w-full h-10 rounded-md bg-[#121018]">
-                      <source src={previewResult.url} type="audio/mpeg" />
-                    </audio>
                   </div>
                 )}
               </div>

@@ -1,7 +1,7 @@
 import "dotenv/config";
-
 import cors from "cors";
 import express from "express";
+import Groq from "groq-sdk";
 import { createSession, getSession, saveSession, deleteSession } from "./lib/redis.js";
 import { formatUserPayloadForHistory } from "./lib/formatUserHistoryDisplay.js";
 import { route } from "./lib/stepRouter.js";
@@ -9,6 +9,8 @@ import { runPromptTest } from "./lib/gemini.js";
 
 const app = express();
 const PORT = Number(process.env.PORT) || 3001;
+
+const groq = process.env.GROQ_API_KEY ? new Groq({ apiKey: process.env.GROQ_API_KEY }) : null;
 
 /** Pollinations GET URLs break in the browser (ad blockers, hotlinking). We fetch on the server and return a data URL. */
 const POLLINATIONS_PREVIEW_SIZE = 768;
@@ -126,6 +128,50 @@ async function fetchPollinationsWithFallback(primaryPrompt, fallbackPrompt) {
     }
     throw err;
   }
+}
+
+/** Groq often wraps voiceover in "Here's the script … : \"…\"" — keep only text safe for TTS. */
+function normalizeSpokenScriptForTTS(raw) {
+  let s = String(raw ?? "")
+    .replace(/\r\n/g, "\n")
+    .replace(/\*\*/g, "")
+    .replace(/\*/g, "")
+    .replace(/#/g, "")
+    .trim();
+
+  const tailQuoted = s.match(/:\s*["“”']([\s\S]+)["”']\s*$/);
+  if (tailQuoted && tailQuoted[1].trim().length > 24) {
+    return tailQuoted[1].trim();
+  }
+
+  const colonQuoteMarkers = [': "', ": \"", ": '", ": '"];
+  for (const m of colonQuoteMarkers) {
+    const at = s.lastIndexOf(m);
+    if (at !== -1) {
+      const rest = s.slice(at + m.length).trim().replace(/["”']\s*$/g, "").trim();
+      if (rest.length > 24) return rest;
+    }
+  }
+
+  s = s
+    .replace(/^(here'?s|here is|this is)\s+[\s\S]{0,480}?[:.;]\s*/i, "")
+    .replace(/^(the\s+)?(script|voiceover|intro|copy|audio)\s*(is|:)\s*/i, "")
+    .trim();
+
+  const lines = s.split("\n");
+  if (
+    lines.length > 1 &&
+    lines[0].length < 220 &&
+    /here'?s|here is|this is|below is|script for/i.test(lines[0])
+  ) {
+    s = lines.slice(1).join("\n").trim();
+  }
+
+  s = s.replace(/^["“'`]+|["”'`]+$/g, "").trim();
+
+  s = s.replace(/^here'?s\s+(?:a\s+)?(?:the\s+)?script[^:]{0,400}:\s*/i, "").trim();
+
+  return s;
 }
 
 app.use(
@@ -328,51 +374,85 @@ app.post('/api/test-preview', async (req, res) => {
     }
 
     // ---------------------------------------------------------
-    // 3. AUDIO APP (ElevenLabs TTS)
+    // 3. AUDIO APP (Groq script + ElevenLabs TTS)
     // ---------------------------------------------------------
-    else if (type === 'audio') {
-      const elRes = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/21m00Tcm4TlvDq8ikWAM`, {
-        method: 'POST',
-        headers: { 'Accept': 'audio/mpeg', 'xi-api-key': process.env.ELEVENLABS_API_KEY, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text: `Generating audio for: ${JSON.stringify(variables).substring(0, 50)}`, model_id: "eleven_multilingual_v2" })
+    else if (type === "audio") {
+      if (!groq) throw new Error("GROQ_API_KEY is not configured");
+      const elevenKey = process.env.ELEVENLABS_API_KEY;
+      if (!elevenKey || /^your_.+_here$/i.test(String(elevenKey).trim())) {
+        throw new Error("ELEVENLABS_API_KEY is not configured for audio preview");
+      }
+      const voiceId = String(process.env.ELEVENLABS_VOICE_ID || "29vD33N1CtxCmqQRPOHJ").trim();
+
+      const chatCompletion = await groq.chat.completions.create({
+        messages: [
+          {
+            role: "system",
+            content:
+              "You write ONLY the exact words a voice actor will read aloud for the final audio. " +
+              "Never add titles, labels, or meta lines (no \"Here is\", \"Here's the script\", \"Below is\", or explanations of what you are doing). " +
+              "Do not describe the tone, music, or duration in prose — fold any style hints into the spoken words only if they belong in the voiceover. " +
+              "No stage directions, sound effects, or speaker names. No markdown. Output plain spoken text only."
+          },
+          { role: "user", content: `${systemPrompt}\n\nInputs: ${JSON.stringify(variables)}` }
+        ],
+        model: "llama-3.1-8b-instant",
+        max_tokens: 400
       });
-      if (!elRes.ok) throw new Error("ElevenLabs API failed");
-      
+      const rawScript = chatCompletion.choices[0]?.message?.content ?? "";
+      const scriptContent = normalizeSpokenScriptForTTS(rawScript);
+      if (!scriptContent.trim()) {
+        throw new Error("Audio preview: empty script after normalization");
+      }
+
+      const ttsText = scriptContent.slice(0, 4500);
+      const elRes = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(voiceId)}`, {
+        method: "POST",
+        headers: {
+          Accept: "audio/mpeg",
+          "xi-api-key": elevenKey,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          text: ttsText,
+          model_id: "eleven_multilingual_v2"
+        })
+      });
+      if (!elRes.ok) {
+        const errBody = await elRes.text();
+        throw new Error(`ElevenLabs TTS failed (${elRes.status}): ${errBody.slice(0, 280)}`);
+      }
       const buffer = await elRes.arrayBuffer();
-      previewResult = { type: 'audio', url: `data:audio/mpeg;base64,${Buffer.from(buffer).toString('base64')}`, content: "Audio preview generated." };
+      previewResult = {
+        type: "audio",
+        url: `data:audio/mpeg;base64,${Buffer.from(buffer).toString("base64")}`,
+        data: scriptContent
+      };
     }
 
     // ---------------------------------------------------------
-    // 4. VIDEO APP (Cinematic Storyboard Mock)
+    // 4. VIDEO APP (Pollinations Thumbnail + Groq Screenplay)
     // ---------------------------------------------------------
     else if (type === 'video') {
-      // Free Video APIs are rare. We generate a "First Frame" (Image) + "Scene Script" (Text)
-      const hfRes = await fetch('https://api-inference.huggingface.co/models/black-forest-labs/FLUX.1-schnell', {
-        method: 'POST',
-        headers: { 'Authorization': `Bearer ${process.env.HF_ACCESS_TOKEN}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ inputs: `Cinematic movie still, first frame of video for: ${JSON.stringify(variables)}` })
+      if (!groq) throw new Error("GROQ_API_KEY is not configured");
+      // Step 1: Generate the Screenplay
+      const chatCompletion = await groq.chat.completions.create({
+        messages: [
+          { role: "system", content: "You are an AI video director. Generate a short, engaging video concept based on the inputs. Include 'Scene 1: [Visual Description]' followed by the Voiceover narration. Keep it under 150 words. Pure plain text, no markdown." },
+          { role: "user", content: `${systemPrompt}\n\nInputs: ${JSON.stringify(variables)}` }
+        ],
+        model: "llama-3.1-8b-instant",
       });
-      
-      let imageUrl = null;
-      if (hfRes.ok) {
-        const buffer = await hfRes.arrayBuffer();
-        imageUrl = `data:image/jpeg;base64,${Buffer.from(buffer).toString('base64')}`;
-      } else {
-        let errorMsg = "Hugging Face API failed";
-        try {
-          const errorData = await hfRes.json();
-          errorMsg = errorData.error || errorMsg;
-        } catch (parseErr) {
-          errorMsg = `HTTP Error ${hfRes.status}: ${hfRes.statusText}`;
-        }
-        console.error("Video storyboard HF image error:", errorMsg);
-      }
-      
-      previewResult = { 
-        type: 'multimodal', 
-        url: imageUrl,
-        content: `🎬 **Video Storyboard Preview**\n\n**Scene 1:** The video opens with these parameters: ${JSON.stringify(variables)}. \n*(Note: Live video rendering requires premium compute and will process upon publishing).*`
-      };
+      const videoScript = chatCompletion.choices[0].message.content.replace(/\*\*/g, '').replace(/\*/g, '');
+
+      // Step 2: Generate a Cinematic Thumbnail
+      const cleanVars = Object.entries(variables || {}).filter(([k, v]) => v && String(v).trim() !== '').map(([k, v]) => `${k}: ${v}`).join(', ');
+      const safeContext = (systemPrompt || '').substring(0, 120).replace(/[^a-zA-Z0-9 \.,]/g, '');
+      const combinedPrompt = `Cinematic high quality video still shot, 8k resolution. Subject: ${safeContext}. ${cleanVars.substring(0, 150)}`;
+      const encodedPrompt = encodeURIComponent(combinedPrompt);
+      const thumbnailUrl = `https://image.pollinations.ai/prompt/${encodedPrompt}?width=1024&height=576&nologo=true`;
+
+      previewResult = { type: 'video', data: videoScript, url: thumbnailUrl };
     }
 
     // ---------------------------------------------------------
