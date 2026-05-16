@@ -85,7 +85,7 @@ function detectBudget(message) {
 function inferAppType(message) {
   const lower = message.toLowerCase();
   if (/(video|animate|reel|cinematic|movie)/.test(lower)) return { value: "video", confidence: "HIGH" };
-  if (/(blog|write|writer|copy|text|article|caption|planner|workout|meal|diet|itinerary|guide|report)/.test(lower)) return { value: "text", confidence: "HIGH" };
+  if (/(blog|write|writer|copy|text|article|caption|planner|workout|meal|diet|itinerary|guide|report|advocate|legal|lawyer|law|document|draft|summary)/.test(lower)) return { value: "text", confidence: "HIGH" };
   if (/(image|photo|picture|poster|thumbnail|logo|design)/.test(lower)) return { value: "image", confidence: "HIGH" };
   if (/(voice|audio|music|podcast|song|speech)/.test(lower)) return { value: "audio", confidence: "HIGH" };
   if (/(vision|analy(s|z)e|ocr|scan|detect|inspect)/.test(lower)) return { value: "vision", confidence: "HIGH" };
@@ -170,10 +170,19 @@ export function normalizeExtraction(raw, fallbackMessage) {
 
 export function applyPromptInstruction(promptData, instruction) {
   const cleanInstruction = (instruction || "").trim();
-  if (!cleanInstruction) return promptData;
+  const base = promptData || {
+    systemPrompt: "",
+    userPrompt: "",
+    negativePrompt: null,
+    acceptImageInput: false,
+    variablesUsed: [],
+    variableDescriptions: {}
+  };
+  if (!cleanInstruction) return base;
+  const current = String(base.userPrompt || "");
   const suffix = ` Additional instruction: ${cleanInstruction}.`;
-  const nextPrompt = promptData.userPrompt.includes(cleanInstruction) ? promptData.userPrompt : `${promptData.userPrompt}${suffix}`;
-  return { ...promptData, userPrompt: nextPrompt };
+  const nextPrompt = current.includes(cleanInstruction) ? current : `${current}${suffix}`;
+  return { ...base, userPrompt: nextPrompt };
 }
 
 export function buildPromptTemplateFromSession(session) {
@@ -192,16 +201,32 @@ export function buildPromptTemplateFromSession(session) {
 // OPENROUTER IMPLEMENTATION
 // ==========================================
 
-const client = new OpenAI({
-  baseURL: 'https://openrouter.ai/api/v1',
-  apiKey: process.env.OPENROUTER_API_KEY,
-  defaultHeaders: {
-    'HTTP-Referer': 'http://localhost:5173',
-    'X-Title': 'RentPrompts Agent Demo',
+function hasRealApiKey(value) {
+  return Boolean(value && !/^your_.+_here$/i.test(String(value).trim()));
+}
+
+let openRouterClient = null;
+
+function getOpenRouterClient() {
+  const apiKey = process.env.OPENROUTER_API_KEY;
+  if (!hasRealApiKey(apiKey)) {
+    throw new Error("OPENROUTER_API_KEY is not configured");
   }
-});
+  if (!openRouterClient) {
+    openRouterClient = new OpenAI({
+      baseURL: "https://openrouter.ai/api/v1",
+      apiKey,
+      defaultHeaders: {
+        "HTTP-Referer": "http://localhost:5173",
+        "X-Title": "RentPrompts Agent Demo"
+      }
+    });
+  }
+  return openRouterClient;
+}
 
 async function callOpenRouter(systemPrompt, userContent, retries = 2) {
+  const client = getOpenRouterClient();
   const models = [
     'google/gemini-1.5-flash',
     'meta-llama/llama-3.3-70b-instruct'
@@ -217,7 +242,7 @@ async function callOpenRouter(systemPrompt, userContent, retries = 2) {
         ],
         // REMOVED response_format to prevent 400 errors on fallback models
         temperature: 0.7,
-        max_tokens: 1000,
+        max_tokens: 3000,
       });
 
       const raw = response.choices[0].message.content;
@@ -259,7 +284,7 @@ export async function runPromptTest({ systemPrompt, userPrompt, testInputs, mode
     resolvedPrompt = resolvedPrompt.split(token).join(safeValue);
   });
 
-  const response = await client.chat.completions.create({
+  const response = await getOpenRouterClient().chat.completions.create({
     model,
     temperature: 0.4,
     max_tokens: 700,
@@ -279,20 +304,22 @@ export async function runPromptTest({ systemPrompt, userPrompt, testInputs, mode
 }
 
 export async function generatePromptTemplate(session) {
-  const systemPrompt = `You are a Senior AI Prompt Engineer for RentPrompts.
-Your job is to take specific user requirements and build a production-ready AI app configuration.
+  const systemPrompt = `You are an Elite Senior AI Prompt Engineer for RentPrompts.
+Your job is to take specific user requirements and build a highly robust, comprehensive, and production-ready AI app configuration.
 ${LANGUAGE_MIRROR_DIRECTIVE}
 
 CRITICAL RULES:
 1. NO GENERIC PLACEHOLDERS. Do not use words like "cat" or "example".
 2. Use $$variableName syntax for any input the final end-user will provide.
-3. Your output must map exactly to the RentPrompts manual form fields.
+3. The userPrompt MUST BE EXTREMELY DETAILED (multiple paragraphs). It must cover persona, context, step-by-step logic, edge cases, output formatting, and constraints to ensure the AI behaves perfectly. DO NOT give a short 2-3 line prompt.
+4. MUST USE EXACT VARIABLES: You MUST use the exact input variables provided in the user constraints below. Do not invent new variables.
+5. ANTI-HALLUCINATION & CONTEXT GROUNDING: If the user mentions acronyms (e.g., BNS, IPC) or specific domains (e.g., Indian Law), you MUST explicitly define them in the systemPrompt you generate (e.g., "BNS refers to Bharatiya Nyaya Sanhita, India's criminal code replacing the IPC"). Do not let the final model guess acronyms.
 
 Return ONLY valid JSON with this exact schema:
 {
-  "reasoning": "Step-by-step logic explaining how you are configuring this based on the user's deep answers.",
+  "reasoning": "Step-by-step logic explaining how you configured this.",
   "systemPrompt": "The backend instruction for the model (persona, behavior, formatting).",
-  "userPrompt": "The highly detailed prompt string containing the $$variables.",
+  "userPrompt": "The highly detailed, comprehensive prompt string containing the $$variables.",
   "negativePrompt": "Detailed negative prompt (for image/video only) or null",
   "acceptImageInput": true or false,
   "variablesUsed": ["$$var1", "$$var2"],
@@ -306,28 +333,23 @@ Analyze these requirements and generate the prompt template:
 - App Type: ${session.appType}
 - App Purpose: ${session.requirements?.appPurpose || session.extraction?.appPurpose || 'Not specified'}
 - Target Users: ${session.requirements?.targetUsers || session.extraction?.targetUsers || 'General Public'}
-- Model Selected: ${session.modelId || 'Unknown'}
-- Deep Answers Gathered: ${JSON.stringify(session.deepAnswers || {})}
+- Context Gathered During Chat: ${JSON.stringify(session.history?.map(h => h.content) || [])}
+- REQUIRED INPUT VARIABLES TO USE: ${JSON.stringify(session.dynamicContext?.variables || [])}
   `;
 
   try {
     const result = await callOpenRouter(systemPrompt, userContent);
-    console.log('[Sub-agent 2] Prompt template generated with reasoning:', result.reasoning?.substring(0, 120));
     return result;
   } catch (err) {
     console.error('[Sub-agent 2] Error:', err.message);
-    // SAFE FALLBACK: Never throw an error. Return a generic prompt so the UI doesn't crash.
     return {
-      reasoning: "Fallback triggered due to API timeout or parsing error. Using a standard baseline template.",
-      systemPrompt: `You are an expert AI for ${session.appType || 'content'} generation. Follow the user's instructions carefully.`,
-      userPrompt: `Execute the task based on this input: $$main_input`,
-      negativePrompt: session.appType === 'image' || session.appType === 'video' ? "low quality, blurry, distorted" : null,
+      reasoning: "Fallback triggered.",
+      systemPrompt: `You are an expert AI for ${session.appType || 'content'} generation.`,
+      userPrompt: `Execute the task comprehensively based on this input: $$main_input`,
+      negativePrompt: null,
       acceptImageInput: session.appType === 'image' || session.appType === 'vision',
       variablesUsed: ["$$main_input"],
-      variableDescriptions: {
-        "$$main_input": "The main instructions or topic for generation"
-      },
-      advancedSettings: {}
+      variableDescriptions: { "$$main_input": "The main instructions" }
     };
   }
 }

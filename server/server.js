@@ -12,10 +12,7 @@ const PORT = Number(process.env.PORT) || 3001;
 
 const groq = process.env.GROQ_API_KEY ? new Groq({ apiKey: process.env.GROQ_API_KEY }) : null;
 
-/** Pollinations GET URLs break in the browser (ad blockers, hotlinking). We fetch on the server and return a data URL. */
 const POLLINATIONS_PREVIEW_SIZE = 768;
-/** Pollinations path length; user variables are prioritized so previews match Live Test inputs. */
-const POLLINATIONS_MAX_PROMPT_CHARS = 640;
 
 /**
  * Image preview prompts used to lead with a truncated system prompt ("studio lighting", "3D render"),
@@ -78,10 +75,16 @@ function buildPollinationsImageAppPrompt(systemPrompt, variables) {
 }
 
 function truncatePollinationsPrompt(text) {
-  const t = String(text || "").trim();
+  let t = String(text || "").trim();
+
+  // CRITICAL FIX: Strip out markdown, asterisks, brackets, and quotes that cause 500 errors in Pollinations' URL path
+  t = t.replace(/[^a-zA-Z0-9\s,.-]/g, " ").replace(/\s+/g, " ").trim();
+
   if (!t.length) return "High quality detailed illustration, professional lighting.";
-  if (t.length <= POLLINATIONS_MAX_PROMPT_CHARS) return t;
-  return `${t.slice(0, POLLINATIONS_MAX_PROMPT_CHARS).trimEnd()}…`;
+
+  // Reduce max length from 640 to 350. Pollinations often throws 500s on very long URLs.
+  if (t.length <= 350) return t;
+  return t.slice(0, 350).trimEnd();
 }
 
 function previewImageUnavailableDataUrl() {
@@ -123,10 +126,19 @@ async function fetchPollinationsWithFallback(primaryPrompt, fallbackPrompt) {
   } catch (err) {
     console.warn("[test-preview] Pollinations primary failed:", err.message);
     const fb = String(fallbackPrompt || "").trim();
-    if (fb && fb !== String(primaryPrompt || "").trim()) {
-      return await fetchPollinationsPreviewDataUrl(fb);
+
+    try {
+      if (fb && fb !== String(primaryPrompt || "").trim()) {
+        return await fetchPollinationsPreviewDataUrl(fb);
+      }
+      throw err;
+    } catch (fallbackErr) {
+      console.warn("[test-preview] Pollinations secondary failed:", fallbackErr.message);
+      // ULTIMATE SAFETY NET: If the prompt is still breaking the server, send a guaranteed clean string
+      return await fetchPollinationsPreviewDataUrl(
+        "A beautiful creative illustration, high quality rendering, detailed"
+      );
     }
-    throw err;
   }
 }
 
@@ -227,9 +239,9 @@ app.post("/api/agent/chat", async (req, res) => {
       confirm: result.confirm ?? null
     });
   } catch (error) {
-    console.error("Agent chat error:", error);
+    console.error("Agent chat error:", error?.message || error);
     return res.status(500).json({
-      error: "Internal server error"
+      error: error?.message || "Internal server error"
     });
   }
 });

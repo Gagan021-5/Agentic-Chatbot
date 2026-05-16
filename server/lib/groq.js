@@ -63,14 +63,25 @@ function hasRealValue(value) {
 
 const groq = hasRealValue(groqApiKey) ? new Groq({ apiKey: groqApiKey }) : null;
 
-const openRouterClient = new OpenAI({
-  baseURL: 'https://openrouter.ai/api/v1',
-  apiKey: process.env.OPENROUTER_API_KEY,
-  defaultHeaders: {
-    'HTTP-Referer': 'http://localhost:5173',
-    'X-Title': 'RentPrompts Agent Demo',
+let openRouterClient = null;
+
+function getOpenRouterClient() {
+  const apiKey = process.env.OPENROUTER_API_KEY;
+  if (!hasRealValue(apiKey)) {
+    throw new Error("OPENROUTER_API_KEY is not configured");
   }
-});
+  if (!openRouterClient) {
+    openRouterClient = new OpenAI({
+      baseURL: "https://openrouter.ai/api/v1",
+      apiKey,
+      defaultHeaders: {
+        "HTTP-Referer": "http://localhost:5173",
+        "X-Title": "RentPrompts Agent Demo"
+      }
+    });
+  }
+  return openRouterClient;
+}
 
 function isRateLimitError(error) {
   return error && (error.status === 429 || error.statusCode === 429 || error.code === 429 || (error.message && error.message.includes('429')));
@@ -247,7 +258,7 @@ For each variable include name and helpful placeholder.`;
   }
 
   try {
-    const fallback = await openRouterClient.chat.completions.create({
+    const fallback = await getOpenRouterClient().chat.completions.create({
       model: "meta-llama/llama-3.3-70b-instruct",
       response_format: { type: "json_object" },
       messages: [
@@ -265,7 +276,7 @@ For each variable include name and helpful placeholder.`;
 
 async function extractWithOpenRouterFallback(message, history) {
   try {
-    const fallback = await openRouterClient.chat.completions.create({
+    const fallback = await getOpenRouterClient().chat.completions.create({
       model: 'meta-llama/llama-3.3-70b-instruct',
       messages: [
         { role: 'system', content: GROQ_SYSTEM_PROMPT },
@@ -287,51 +298,36 @@ async function extractWithOpenRouterFallback(message, history) {
    AGENTIC TRIAGE — evaluate specificity before generating form
    ──────────────────────────────────────────── */
 const TRIAGE_INSTRUCTION = `
-You are an elite, conversational AI Architect. The user is describing an app they want to build.
-Your goal is to converse naturally, deduce their DOMAIN, and figure out the APP FORMAT (Text, Image, Audio, Video, Vision).
+You are a professional, highly intelligent Universal AI Technical Architect. The person you are talking to (the App Creator) wants to build an application. 
+Your goal is to scope the app by identifying the specific USE CASE and the FACTORS the app will analyze before proceeding.
 
-Trust but verify (avoid the over-automation trap): still deduce the most likely format, but the user may want something different in the same domain (e.g. astrology as text vs tarot images vs zodiac video). You will state your guess in downstream UX; prioritize explicit user intent over stereotypes. Always read the conversation messages you are given and never re-ask for details or format already stated there.
+CRITICAL UX RULES - PROACTIVE SUGGESTIONS & LATEST INTENT:
+1. Keep your tone strictly professional, direct, and helpful. 
+2. NEVER ask the lazy literal question: "what inputs/variables should the app collect?". 
+3. UNIVERSAL ADAPTABILITY: Adapt your suggested factors to the user's specific profession or domain instantly.
+4. PROACTIVELY SUGGEST FACTORS: It is your job to suggest the business logic. Actively suggest relevant factors tailored to their specific profession (e.g., "Should the app consider the scam type, location, and date?").
+5. LATEST INTENT PRIORITIZATION: If the App Creator pivots their idea (e.g., they started talking about "fundamental rights" but their latest message is about "finding a scam IPC/BNS section"), prioritize their LATEST actionable goal. Discard old concepts that no longer fit the current workflow. Do not generate variables for discarded concepts.
 
-STEP 1: FORMAT & DOMAIN DEDUCTION
-- Analyze the user's request. What is the domain?
-- What format is the output?
-  - e.g., "Astrologer app" often defaults to 'text' ONLY when the user did not ask for visuals, audio, or video.
-  - e.g., "Generate a picture of a cake" is 'image'.
-  - e.g., "Voice cloning" is 'audio'.
-- EXPLICIT OVERRIDE: If the user's exact words include the format words from STEP 2 ("image", "photo", "text", "video", "audio", "voice") or clear equivalents they typed (e.g. "pictures", "speech"), set app_format accordingly. Domain hints alone never bypass STEP 2's EXPLICIT CHECK.
-- CORRECTIONS: If the user corrects the format (e.g., "No, make it an image app instead"), you must immediately set app_format to match their request and regenerate variables and options to match the new format.
+STEP 1: THE "ZERO CONTEXT" RULE
+- If the App Creator gives NO specific domain at all, return "needs_context" and ask what industry/topic the app is for.
 
-STEP 2: ROUTING & FORMAT VERIFICATION (NEUTRAL STANCE)
-- Vague: If you genuinely cannot tell what the app outputs, set status to "needs_context" and ask a clarifying question.
-- EXPLICIT CHECK (Strict Rule): Look closely at the user's exact words. Did they explicitly type the word "image", "photo", "text", "video", "audio", or "voice"?
-  - If NO: You MUST set status to "needs_format" to ask the user.
-    - HUMILITY RULE: DO NOT state your assumption out loud. DO NOT act like you know what format they want.
-    - Simply generate a friendly response praising their idea, and ask them neutrally what format they want to use.
-    - Good Example: "A futuristic product generator sounds amazing! What type of output should this app generate?"
-    - Bad Example (Do NOT do this): "I assume you want 3D images, is that correct?"
-  - If YES (or if they just clicked a UI format button in the history): Set status to "ready" and immediately generate the JSON form variables.
+STEP 2: THE "NEEDS CONTEXT" RULE (Broad Domain)
+- If they give a broad domain (e.g., "safety app for factory" or "lesson planner"), return "needs_context".
+- Ask specific questions about the app's output AND proactively suggest domain-specific factors to analyze based on their profession.
 
-STEP 3: FEATURES & VARIABLES (If Ready)
-- FEATURES (\`options\` array): You MUST generate 4-5 optional features the user can include in their app.
-  - For Text Apps: Use structural features (e.g., "Tone Control", "Structured Output", "SEO Optimization").
-  - For Image/Video Apps: Use visual/stylistic features (e.g., "Lighting Style", "Camera Angles", "Art Medium/Style", "Background/Setting", "Color Grading").
-
-- VARIABLES (\`variables\` array): Generate 3-4 highly relevant input variables based strictly on the SPECIFIC DOMAIN.
-  - Design/Marketing Domain (e.g., Posters, Ads): Ask for design variables like "Brand Colors" or "Target Audience".
-  - Concept Art Domain (e.g., Product Generator): Ask for visual properties like "Materials/Finish" or "Subject Details".
-  - NEVER ask for backend logistical variables like "Release Date", "Budget", or "Physical Location" for any visual app.
-
-${LANGUAGE_MIRROR_DIRECTIVE}
+STEP 3: UNIVERSAL VARIABLE RULES (ONLY IF READY)
+- If the status is "ready" (meaning they explicitly confirmed the workflow and the factors you suggested OR they explicitly provided the inputs themselves):
+- You MUST autonomously generate 3-4 layman-friendly variables based on the factors you discussed.
+- TEST DATA: You MUST generate a highly specific, realistic 'test_value' for each variable.
 
 Return STRICTLY as JSON:
 {
-  "status": "needs_context" | "needs_format" | "ready",
-  "domain": "e.g., Cooking",
-  "app_format": "text" | "image" | "audio" | "video" | "vision" | "unknown",
-  "question": "Only filled if needs_context or needs_format is true",
+  "status": "needs_context" | "ready",
+  "domain_identified": "e.g., Legal, Education, Industrial, Business",
+  "question": "Only filled if needs_context is true. Ask about the output AND actively suggest domain-specific factors they might want the app to analyze.",
   "form": {
-    "options": ["Feature 1"],
-    "variables": [{"name": "Var", "placeholder": "...", "test_value": "..."}]
+    "options": ["Feature 1", "Feature 2"],
+    "variables": [{"name": "Suggested Factor", "placeholder": "...", "test_value": "..."}]
   }
 }
 `;
@@ -381,25 +377,21 @@ function parseTriageResponse(rawContent, formatFallback, languageHint) {
     }
 
     const domain =
-      String(parsed.domain || parsed.domain_identified || "").trim() || null;
+      String(parsed.domain_identified || parsed.domain || "").trim() || null;
 
-    if (parsed.status === "needs_context" || parsed.status === "needs_format") {
+    if (parsed.status === "needs_context") {
       const question = String(parsed.question || "").trim();
       if (!question || question.length < 10) {
-        const af = normalizeTriageAppFormat(parsed.app_format, fallbackType);
-        const fbForm = buildDynamicContextFallback(af, languageHint);
-        return readyShape(domain, af, fbForm);
+        // Empty question — fall through to ready with fallback form
+        const fbForm = buildDynamicContextFallback(fallbackType, languageHint);
+        return readyShape(domain, fallbackType, fbForm);
       }
-      const assumedFormat =
-        parsed.status === "needs_format"
-          ? normalizeTriageAppFormat(parsed.app_format, fallbackType)
-          : null;
       return {
-        status: parsed.status,
+        status: "needs_context",
         domain,
         question,
         form: null,
-        app_format: assumedFormat
+        app_format: null
       };
     }
 
@@ -407,10 +399,9 @@ function parseTriageResponse(rawContent, formatFallback, languageHint) {
       return readyShape(domain, fallbackType, buildDynamicContextFallback(fallbackType, languageHint));
     }
 
-    const appFormat = normalizeTriageAppFormat(parsed.app_format, fallbackType);
-    const fallbackForm = buildDynamicContextFallback(appFormat, languageHint);
+    const fallbackForm = buildDynamicContextFallback(fallbackType, languageHint);
     const form = parsed.form && typeof parsed.form === "object" ? parsed.form : {};
-    return readyShape(domain, appFormat, {
+    return readyShape(domain, fallbackType, {
       options: sanitizeStringList(form.options, 4, 4, fallbackForm.options),
       variables: sanitizeVariableObjects(form.variables, 3, 4, fallbackForm.variables)
     });
@@ -430,24 +421,14 @@ async function triageDynamicContext({ appType, appPurpose, languageHint, convers
   const safePurpose = String(appPurpose || "").trim() || "general assistant app";
   const safeLang = normalizeLanguageHint(languageHint);
 
-  const historyHint =
-    "Recent conversation turns are included as separate messages above—read them to see if the user already clicked or typed a format (Text, Image, etc.).";
-
-  const userTaskPrompt = committed
-    ? `The user wants to build a ${committed} app.
-Their description (from extraction / latest turn): "${safePurpose}"
+  const userTaskPrompt = `The App Creator wants to build a ${formatFallback} app.
+Their description: "${safePurpose}"
 Language mode: ${safeLang}.
 
-${historyHint}
-The product has already locked output format to "${committed}" (often from a chip). If history shows they just chose this format, you MUST set status to "ready", set app_format to "${committed}", and output the full form—do NOT use needs_format to ask again. Use needs_context only if the goal is too vague to define variables.`
-    : `The user is describing an app they want to build.
-Their description (from extraction / latest turn): "${safePurpose}"
-Language mode: ${safeLang}.
-
-${historyHint}
-Apply STEP 2 strictly: use needs_format unless (a) the user's exact words include an explicit format word from the checklist (image, photo, text, video, audio, voice) or (b) conversation history shows they just used a UI format chip. Domain guesses alone are never enough for "ready". Use needs_context if outputs are unknown. Use ready with the full form only when the domain is clear AND (a) or (b) is true.
-
-When status is needs_format, the "question" string must follow the HUMILITY RULE: never state your format guess—only friendly praise of their idea and a neutral ask for what type of output they want (chips will offer choices).`;
+The app type is already locked to "${formatFallback}". Prioritize their LATEST message in the conversation history over older topics if they pivoted.
+- Zero context: return "needs_context" — ask industry/topic only; do NOT invent random styles.
+- Broad domain: return "needs_context" — ask about output AND proactively suggest profession-specific factors to analyze (never ask "what variables should we collect?").
+- Workflow + factors confirmed (or they supplied inputs): return "ready" and autonomously generate layman-friendly variables with test_value in the form.`;
 
   // System + mapped history + task user message (Groq / OpenRouter)
   const triageMessages = [
@@ -475,7 +456,7 @@ When status is needs_format, the "question" string must follow the HUMILITY RULE
 
   // OpenRouter fallback
   try {
-    const fallback = await openRouterClient.chat.completions.create({
+    const fallback = await getOpenRouterClient().chat.completions.create({
       model: "meta-llama/llama-3.3-70b-instruct",
       response_format: { type: "json_object" },
       messages: triageMessages

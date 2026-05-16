@@ -43,7 +43,9 @@ function createSession(sessionId) {
     requirements: {},
     currentField: null,
     userType: "unknown",
-    enterpriseSignals: false
+    enterpriseSignals: false,
+    lastQuestion: null,
+    isPivot: false
   };
 }
 

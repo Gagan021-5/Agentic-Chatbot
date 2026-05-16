@@ -43,11 +43,24 @@ function Avatar({ role }) {
 }
 
 function renderText(text) {
-  return text.split("\n").map((line, i) => (
-    <p key={`${i}-${line.slice(0, 12)}`} className={i === 0 ? "" : "mt-3"}>
-      {line}
-    </p>
-  ));
+  return text.split("\n").map((line, i) => {
+    const parts = line.split(/(\*\*.*?\*\*)/g);
+
+    return (
+      <p key={`${i}-${line.slice(0, 12)}`} className={i === 0 ? "" : "mt-3"}>
+        {parts.map((part, j) => {
+          if (part.startsWith("**") && part.endsWith("**")) {
+            return (
+              <strong key={j} className="font-bold text-white">
+                {part.slice(2, -2)}
+              </strong>
+            );
+          }
+          return part;
+        })}
+      </p>
+    );
+  });
 }
 
 function AgentUI(props) {
@@ -85,6 +98,12 @@ function AgentUI(props) {
 function MessageBubble({ message, onSendMessage, onResetSession, isLoading, sessionId = "" }) {
   const isUser = message.role === "user";
 
+  // Clean up the displayed text so the user's bubble looks natural
+  let displayText = message.text || "";
+  if (isUser && displayText.toLowerCase().startsWith("select ")) {
+    displayText = `I choose ${displayText.slice(7).trim()}`;
+  }
+
   return (
     <div className={`message-enter flex items-start gap-2.5 sm:gap-3 ${isUser ? "flex-row-reverse" : ""}`}>
       <Avatar role={message.role} />
@@ -95,13 +114,13 @@ function MessageBubble({ message, onSendMessage, onResetSession, isLoading, sess
             ? "border-rent-border-light bg-rent-elevated text-white"
             : "glass-panel border-rent-border bg-rent-card/80 text-white/90"
         }`}>
-          {message.text ? (
+          {displayText ? (
             <div className="text-[13px] leading-7 sm:text-[14.5px] sm:leading-8">
-              {renderText(message.text)}
+              {renderText(displayText)}
             </div>
           ) : null}
           {!isUser && message.uiType && message.uiType !== "text" ? (
-            <div className={message.text ? "mt-4 sm:mt-5" : ""}>
+            <div className={displayText ? "mt-4 sm:mt-5" : ""}>
               <AgentUI
                 message={message}
                 onSendMessage={onSendMessage}

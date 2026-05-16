@@ -130,12 +130,20 @@ function rankModels(availableModels, userInput, budgetStr) {
 /* ────────────────────────────────────────────
    PARSERS (FIXED BULLETPROOF PARSING)
    ──────────────────────────────────────────── */
-function parseSelectedModelId(msg) {
+function parseSelectedModelId(msg, availableModels) {
   const text = normalize(msg).toLowerCase();
-  if (text.startsWith("select")) {
-    return text.replace("select", "").trim();
-  }
-  return null;
+  if (!text.startsWith("select")) return null;
+
+  const query = text.replace(/^select\s+/i, "").trim();
+  if (!query) return null;
+
+  const models = availableModels || [];
+  const found = models.find((m) => {
+    const id = String(m?.id || "").toLowerCase();
+    const name = String(m?.name || "").toLowerCase();
+    return (id && id === query) || (name && name === query);
+  });
+  return found ? found.id : query;
 }
 
 function parseSelectedPlan(msg) {
@@ -301,8 +309,13 @@ function mergeExtraction(existing, latest, message) {
     oneLineUnderstanding: isControl ? (existing.oneLineUnderstanding || latest.oneLineUnderstanding) : (latest.oneLineUnderstanding || existing.oneLineUnderstanding),
     suggestedReply: isControl ? (existing.suggestedReply || latest.suggestedReply) : (latest.suggestedReply || latest.suggestedReply),
     confidence: {
-      appType: keepAppType ? existing.confidence.appType : latest.confidence.appType,
-      budget: latest && latest.budget ? latest.confidence.budget : existing.confidence.budget
+      appType: keepAppType
+        ? (existing.confidence?.appType ?? latest?.confidence?.appType ?? "LOW")
+        : (latest?.confidence?.appType ?? existing.confidence?.appType ?? "LOW"),
+      budget:
+        latest?.budget
+          ? (latest.confidence?.budget ?? existing.confidence?.budget ?? "LOW")
+          : (existing.confidence?.budget ?? latest?.confidence?.budget ?? "LOW")
     },
     keyFeatures: !isControl && latest && Array.isArray(latest.keyFeatures) && latest.keyFeatures.length ? latest.keyFeatures : existing.keyFeatures,
     missingFields: Array.from(new Set([...(existing.missingFields || []), ...((latest && latest.missingFields) || [])])),
@@ -509,7 +522,7 @@ async function showModels(session) {
 async function buildStep0Response(session) {
   const ext = session.extraction;
 
-  // 1. IF APP TYPE IS MISSING: Acknowledge the idea and ask for the format via chips.
+  // 1. IF APP TYPE IS MISSING: Ask for format (Only happens if Smart Inference fails)
   if (!session.appType) {
     session.step = 0;
     await saveSession(session);
@@ -518,64 +531,64 @@ async function buildStep0Response(session) {
     if (ext && ext.appPurpose && ext.appPurpose.length > 5) {
       replyText = `Awesome, an app for ${ext.appPurpose.toLowerCase().replace("i want to make a ", "")} sounds great! `;
     }
-    replyText += "Before we design the architecture, what kind of output do you want it to generate?";
+    replyText += "To get started, what kind of output should it generate?";
 
-    const options =
-      detectLanguageMode(session) === "Hindi"
-        ? ["टेक्स्ट", "इमेज", "ऑडियो", "वीडियो", "विज़न"]
-        : detectLanguageMode(session) === "Hinglish"
-          ? ["Text", "Image", "Audio", "Video", "Vision"]
-          : ["Text", "Image", "Audio", "Video", "Vision"];
-
-    return {
-      reply: replyText,
-      uiType: "chips",
-      uiData: { options },
-      nextStep: 0,
-      coins: null
-    };
+    const options = detectLanguageMode(session) === "Hindi" ? ["टेक्स्ट", "इमेज", "ऑडियो", "वीडियो", "विज़न"] : ["Text", "Image", "Audio", "Video", "Vision"];
+    return { reply: replyText, uiType: "chips", uiData: { options }, nextStep: 0, coins: null };
   }
 
-  // 2. ONLY PROCEED TO FORMS IF APP TYPE IS EXPLICITLY SET
   session.step = 0;
   session.awaitingConfirmation = false;
 
-  const bundleCard = await buildDynamicBundleCard(session);
-  if (bundleCard) {
+  // 2. AGENTIC TRIAGE (Deep Context Questions)
+  // This loops until the AI has enough specific details to build the app's inputs
+  if (!session.dynamicContext) {
+    const triageResult = await triageDynamicContext({
+      appType: session.appType,
+      appPurpose: session.extraction?.appPurpose || "",
+      languageHint: detectLanguageMode(session),
+      conversationHistory: session.history || []
+    });
+
+    // If AI needs more context, ask the specific deep question!
+    if (triageResult.status === "needs_context" && (session.triageRounds || 0) < 3) {
+      const question = String(triageResult.question || "").trim();
+      if (question.length >= 10) {
+        session.triageRounds = (session.triageRounds || 0) + 1;
+        session.lastQuestion = question;
+        await saveSession(session);
+        return {
+          reply: question,
+          uiType: null, // Pure conversational text, no forced UI chips
+          uiData: null,
+          nextStep: 0,
+          coins: null
+        };
+      }
+      // Empty question from triage — skip to ready state
+    }
+
+    // AI is satisfied (or hit max rounds). Save the generated input variables silently for the Live Preview.
+    session.dynamicContext = triageResult.form;
+    session.triageRounds = 0;
     await saveSession(session);
-    return bundleCard;
   }
 
-  if (!ext?.appPurpose || ext.appPurpose.trim().length < 12) {
-    await saveSession(session);
-    return {
-      reply: localizedText(
-        session,
-        `Alright. What kind of ${session.appType || "AI"} app are you looking to create?`,
-        `ठीक है। आप किस तरह का ${session.appType || "AI"} ऐप बनाना चाहते हैं?`,
-        `Alright. Aap kis type ka ${session.appType || "AI"} app banana chahte ho?`
-      ),
-      uiType: "text",
-      uiData: null,
-      nextStep: 0,
-      coins: null
-    };
-  }
-
-  const nextQ = getNextDeepQuestion(session);
-  if (nextQ) {
-    session.currentDeepField = nextQ.field;
+  // 3. BUDGET QUESTION (Only asked AFTER it fully understands the app)
+  if (!session.extraction?.budget && !session.deepAnswers?.budgetPreference) {
+    session.currentDeepField = "budgetPreference";
     session.awaitingDeepAnswer = true;
     await saveSession(session);
     return {
-      reply: nextQ.question,
+      reply: "Got all the details I need! One last thing before I design the architecture — what is your target budget per generation?",
       uiType: "chips",
-      uiData: { options: nextQ.options },
+      uiData: { options: ["Free models only (0 coins)", "Low (< 5 coins)", "Medium (5 - 20 coins)", "Premium (> 20 coins)"] },
       nextStep: 0,
       coins: null
     };
   }
 
+  // 4. ALL DONE -> SHOW MODELS
   return await showModels(session);
 }
 
@@ -734,6 +747,115 @@ export async function route(session, message) {
   const text = normalize(rawText);
   const msg = lower(text);
 
+  // ─── 1. EXPLICIT UI CHIP HANDLER ───
+  if (session.step === 2 && msg === 'edit app') {
+    session.awaitingPromptTweak = true;
+    await saveSession(session);
+    return {
+      reply: "I'm listening! You can describe a completely new app idea, ask to change the model, or just tweak the current instructions.",
+      uiType: "text",
+      uiData: null,
+      nextStep: 2,
+      coins: session.modelCost
+    };
+  }
+
+  // ─── 2. UNIVERSAL PIVOT & EDIT INTERCEPTOR ───
+  const editTriggers = ['change ', 'update ', 'switch ', 'actually', 'instead', 'tweak', 'edit '];
+  const isEditTrigger = editTriggers.some((t) => msg.includes(t)) || session.awaitingPromptTweak;
+
+  const formatRegex = /(image|video|audio|text|vision)\s+(app|generator|tool|creator)\b/i;
+  const isNewFormatMentioned = formatRegex.test(msg);
+
+  const isMajorPivot =
+    isNewFormatMentioned ||
+    msg.includes('app type') ||
+    msg.includes('domain') ||
+    msg.includes('instead') ||
+    msg.includes('new app') ||
+    msg.includes('different app') ||
+    /^(i want (to )?(build|make|create)|let'?s (build|make|create)|build an?|make an?|create an?)/i.test(msg) ||
+    (session.awaitingPromptTweak && msg.includes('app'));
+
+  if (
+    (isEditTrigger || isMajorPivot) &&
+    !text.startsWith("select") &&
+    !text.toLowerCase().startsWith("multi_select")
+  ) {
+    // A. Model Change Request
+    if (msg.includes('model') || msg.includes('ai engine') || msg.includes('different ai')) {
+      if (session.step === 0 && !session.dynamicContext) {
+        return {
+          reply: `We'll pick the perfect AI model in just a moment! But first, let's finish scoping out the app.\n\n${session.lastQuestion || "What specific details should the app analyze?"}`,
+          uiType: null,
+          nextStep: 0,
+          coins: null
+        };
+      }
+      session.awaitingPromptTweak = false;
+      return await showModels(session);
+    }
+
+    // B. Major Pivot (Changing App Type or Domain entirely)
+    const tweakKeywords = ['prompt', 'instruction', 'description', 'tone', 'make it', 'add a', 'remove', 'change the', 'rewrite'];
+    const isMinorTweak = tweakKeywords.some((kw) => msg.includes(kw)) && !isMajorPivot && session.step > 0;
+
+    if (isMajorPivot && !isMinorTweak) {
+      let newType = parseChipAppType(text);
+      if (!newType) {
+        const match = msg.match(/(image|video|audio|text|vision)/i);
+        if (match) newType = match[1].toLowerCase();
+      }
+
+      let cleanPurpose = text
+        .replace(/\b(actually|instead|change it to|switch to|something different)\b/gi, "")
+        .replace(/\bi want to (build|make|create) (a|an)\b/gi, "")
+        .replace(/\bi want (a|an)\b/gi, "")
+        .replace(/refer to the (image|picture|screenshot)/gi, "")
+        .trim();
+
+      if (!cleanPurpose || cleanPurpose.length < 3) {
+        cleanPurpose = newType ? `${newType} generation app` : "a new idea";
+      }
+
+      session.dynamicContext = null;
+      session.appType = newType || null;
+      session.extraction = { appPurpose: cleanPurpose, confidence: {} };
+      session.deepAnswers = {};
+      session.step = 0;
+      session.triageRounds = 0;
+      session.awaitingPromptTweak = false;
+      session.awaitingDeepAnswer = false;
+      session.currentDeepField = null;
+      session.isPivot = true;
+      await saveSession(session);
+
+      return await buildStep0Response(session);
+    }
+
+    // C. Minor Tweak at the Preview Step
+    if (session.step === 2) {
+      session.awaitingPromptTweak = false;
+      session.promptData = applyPromptInstruction(session.promptData, message);
+      await saveSession(session);
+      return {
+        reply: `Got it! I've updated the app logic based on your request: "${text}".\n\n**Updated Logic:**\n${session.promptData.userPrompt}\n\nReady to publish?`,
+        uiType: 'chips',
+        uiData: { options: ['Publish to Marketplace', 'Save Draft', 'Edit App'] },
+        nextStep: 2,
+        coins: session.modelCost
+      };
+    }
+
+    // D. General mid-flight tweak acknowledgement
+    return {
+      reply: `Noted! I've updated your app's requirements to include: "${text}". Let's continue.`,
+      uiType: null,
+      nextStep: session.step,
+      coins: null
+    };
+  }
+
   // 1. EXTRACTION FIRST (so we never lose the user's context!)
   if (!session.history) session.history = [];
   const latestExtraction = await extractRequirements(text, session.history || []);
@@ -747,11 +869,11 @@ export async function route(session, message) {
     session.userType = session.extraction.userType;
   }
 
-  // Silent auto-assign from extraction → session.appType is intentionally disabled so the user
-  // can confirm format (chips / triage) before we lock session.appType.
-  // if (!session.appType && session.extraction.appType && session.extraction.confidence?.appType !== 'LOW') {
-  //   session.appType = session.extraction.appType;
-  // }
+  // 1. SMART INFERENCE: Auto-assign appType so the AI feels intelligent!
+  // If the user says "advocate app", extraction knows it's text. We skip the format question.
+  if (!session.appType && session.extraction.appType && session.extraction.confidence?.appType !== 'LOW') {
+    session.appType = session.extraction.appType;
+  }
 
   if (lower(text) === 'save draft' || lower(text).includes('save as draft') || lower(text).includes('save to draft')) {
     return {
@@ -785,12 +907,7 @@ export async function route(session, message) {
     if (isGreeting) {
       await saveSession(session);
       return {
-        reply: localizedText(
-          session,
-          "Hey! I'm the RentPrompts App Creation Agent. What kind of AI app would you like to build today? You can just describe what you want it to do.",
-          "नमस्ते! मैं RentPrompts ऐप क्रिएशन एजेंट हूँ। आज आप किस तरह का AI ऐप बनाना चाहते हैं? बस बता दें कि आप इसे क्या करवाना चाहते हैं।",
-          "Hey! Main RentPrompts App Creation Agent hoon. Aaj aap kis type ka AI app banana chahte ho? Bas bata do kya karna chahte ho."
-        ),
+        reply: "Hey! I'm the RentPrompts App Creation Agent. What kind of AI app would you like to build today?",
         uiType: null,
         uiData: null,
         nextStep: 0,
@@ -798,12 +915,12 @@ export async function route(session, message) {
       };
     }
 
-    const isNotSure = lower(text).includes('not sure') || lower(text).includes('help me') || lower(text).includes('dont know');
+    const isNotSure = lower(text).includes('not sure') || lower(text).includes('help me');
     if (isNotSure) {
       session.step = 0;
       await saveSession(session);
       return {
-        reply: `No problem! Answer a few quick questions and I'll recommend the best fit. First — what is the main thing you want your app to CREATE or DO?`,
+        reply: "No problem! First — what is the main thing you want your app to CREATE or DO?",
         uiType: 'chips',
         uiData: { options: ['Generate images', 'Create videos', 'Write text', 'Generate audio', 'Analyze images'] },
         nextStep: 0,
@@ -811,74 +928,12 @@ export async function route(session, message) {
       };
     }
 
-    // Handle Triage Clarification Answer
-    if (session.awaitingTriageAnswer) {
-      session.awaitingTriageAnswer = false;
-      // Enrich the appPurpose with the user's clarification
-      const existingPurpose = session.extraction?.appPurpose || "";
-      session.extraction = session.extraction || {};
-      session.extraction.appPurpose = `${existingPurpose}. User clarified: ${text}`;
-      await saveSession(session);
-
-      // Re-run triage with enriched context — should now return "ready"
-      const bundleCard = await buildDynamicBundleCard(session);
-      if (bundleCard) {
-        await saveSession(session);
-        return bundleCard;
-      }
-    }
-
-    // Handle Multi-Select Form Submission
-    if (text.startsWith("multi_select_form::")) {
-      try {
-        const formData = JSON.parse(text.replace("multi_select_form::", ""));
-
-        session.extraction = session.extraction || {};
-        session.extraction.features = Array.isArray(formData.selectedOptions) ? formData.selectedOptions : [];
-        session.extraction.variables = normalizeSubmittedVariables(formData.variables);
-        session.extraction.keyFeatures = session.extraction.features;
-        session.deepAnswers = session.deepAnswers || {};
-        session.deepAnswers.dynamicFeatures = session.extraction.features;
-        session.deepAnswers.dynamicVariables = session.extraction.variables;
-
-        await saveSession(session);
-
-        const nextQ = getNextDeepQuestion(session);
-
-        if (nextQ) {
-          session.currentDeepField = nextQ.field;
-          session.awaitingDeepAnswer = true;
-          await saveSession(session);
-          return {
-            reply: `Got it! I've saved those features. ${nextQ.question}`,
-            uiType: "chips",
-            uiData: { options: nextQ.options || [] },
-            nextStep: session.step,
-            coins: null
-          };
-        } else {
-          return await showModels(session);
-        }
-      } catch (e) {
-        console.error("Failed to parse form data:", e);
-        return {
-          reply: "Sorry, I had trouble reading that form. Let's try again. What features do you need?",
-          uiType: "text",
-          uiData: null,
-          nextStep: session.step,
-          coins: null
-        };
-      }
-    }
-
     if (session.awaitingDeepAnswer && session.currentDeepField) {
       const answer = text;
       if (!session.deepAnswers) session.deepAnswers = {};
       session.deepAnswers[session.currentDeepField] = answer;
       if (!session.extraction) session.extraction = {};
-      if (session.currentDeepField === "budgetPreference") {
-        session.extraction.budget = answer;
-      }
+      if (session.currentDeepField === "budgetPreference") session.extraction.budget = answer;
       session.awaitingDeepAnswer = false;
       session.currentDeepField = null;
 
@@ -895,15 +950,14 @@ export async function route(session, message) {
           coins: null
         };
       }
-
       return await showModels(session);
     }
 
     const chipType = parseChipAppType(text);
     if (chipType && !session.appType) {
       session.appType = chipType;
+      session.extraction = session.extraction || {};
       session.extraction.appType = chipType;
-      session.extraction.confidence.appType = "HIGH";
     }
 
     return await buildStep0Response(session);
@@ -911,7 +965,7 @@ export async function route(session, message) {
 
   // ─── STEP 1: Model selection → generate config ───────────────────────
   if (session.step === 1) {
-    const selectedModelId = parseSelectedModelId(text);
+    const selectedModelId = parseSelectedModelId(text, MODELS[session.appType] || []);
 
     if (selectedModelId) {
       const selectedModel = findModel(session.appType, selectedModelId);
@@ -940,18 +994,39 @@ export async function route(session, message) {
         session.step = 2;
         await saveSession(session);
 
+        // COMPREHENSIVE FINAL SUMMARY TEXT (SEO, Cost, Retail Price, Tags, Model)
+        const summaryText = `🎉 **App Configured Successfully!**
+
+Here is your app's complete setup:
+
+📝 **App Details**
+* **Name:** ${seoData.appName}
+* **Description:** ${seoData.appDescription}
+* **Category:** ${seoData.category}
+* **Tags:** ${Array.isArray(seoData.tags) ? seoData.tags.join(", ") : "—"}
+
+⚙️ **Technical Architecture**
+* **AI Engine:** ${selectedModel.name}
+* **Base API Cost:** ${session.modelCost} coins per run
+* **Suggested Retail Price:** ${seoData.suggestedPrice} coins per run
+
+The AI has automatically generated the required input variables and a highly detailed backend prompt for your users based on our chat. Check the **Live Preview** card to test it!
+
+*Want to edit anything? You can say things like "Change the model", "Make the audience kids", or "Tweak the prompt". Otherwise, click Publish!*`;
+
         return {
-          reply: `I understand your requirement perfectly. You want an app that ${session.extraction?.appPurpose || 'does exactly that'}. Let me confirm the setup so we can proceed.`,
+          reply: summaryText,
           uiType: 'app_preview',
-          uiData: { 
+          uiData: {
             appName: seoData.appName,
-            appType: session.appType || session.extraction?.appType || 'text', // Prevent state-loss bug
+            appType: session.appType || session.extraction?.appType || 'text',
             appDescription: seoData.appDescription,
-            cost: session.modelCost, // Strictly overrides any LLM hallucinations or math errors
+            cost: session.modelCost,
             systemPrompt: promptData.systemPrompt,
             userPrompt: promptData.userPrompt,
             variablesUsed: promptData.variablesUsed,
-            acceptImageInput: promptData.acceptImageInput
+            acceptImageInput: promptData.acceptImageInput,
+            options: ['Publish to Marketplace', 'Save Draft', 'Edit App']
           },
           nextStep: 2,
           coins: session.modelCost
@@ -980,19 +1055,6 @@ export async function route(session, message) {
   // ─── STEP 2: Final Review (Publish, Save Draft, Tweak) ───────────────────
   if (session.step === 2) {
     const msg2 = lower(message);
-
-    if (session.awaitingPromptTweak) {
-      session.awaitingPromptTweak = false;
-      session.promptData = applyPromptInstruction(session.promptData, message);
-      await saveSession(session);
-      return {
-        reply: `Updated! Here's the revised setup:\n\nUser Prompt: ${session.promptData.userPrompt}\n\nReady to publish?`,
-        uiType: 'chips',
-        uiData: { options: ['Publish App', 'Save Draft', 'Tweak Prompts'] },
-        nextStep: 2,
-        coins: session.modelCost
-      };
-    }
 
     if (msg2.includes('publish') || isYes(text)) {
       const payload = {
@@ -1049,7 +1111,7 @@ export async function route(session, message) {
         return {
           reply: `Updated!\n\nUser Prompt: ${session.promptData.userPrompt}\n\nReady to publish?`,
           uiType: 'chips',
-          uiData: { options: ['Publish App', 'Save Draft', 'Tweak Prompts'] },
+          uiData: { options: ['Publish to Marketplace', 'Save Draft', 'Edit App'] },
           nextStep: 2,
           coins: session.modelCost
         };
@@ -1057,7 +1119,7 @@ export async function route(session, message) {
       session.awaitingPromptTweak = true;
       await saveSession(session);
       return {
-        reply: "What would you like to change about the instructions or description?",
+        reply: "What would you like to edit? You can change the AI Model, rewrite the prompt, or completely change the app idea (e.g., 'Change this to an image app').",
         uiType: "text",
         uiData: {},
         nextStep: 2,
@@ -1068,9 +1130,9 @@ export async function route(session, message) {
 
   // ─── CATCH ALL ───
   return {
-    reply: "I'm ready to proceed. Let me know if you want to 'Publish' this app, 'Save Draft', or change something.",
+    reply: "I'm ready to proceed. Let me know if you want to publish, save a draft, or edit the app.",
     uiType: "chips",
-    uiData: { options: ['Publish App', 'Save Draft'] },
+    uiData: { options: ['Publish to Marketplace', 'Save Draft', 'Edit App'] },
     nextStep: session.step || 0,
     coins: session.modelCost
   };
