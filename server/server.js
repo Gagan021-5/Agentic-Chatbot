@@ -193,6 +193,17 @@ app.use(
 );
 app.use(express.json());
 
+// Per-request timeout: send a clean 504 after 115s rather than letting the
+// TCP socket reset (which Vite's proxy reports as ECONNRESET).
+app.use((req, res, next) => {
+  res.setTimeout(115000, () => {
+    if (!res.headersSent) {
+      res.status(504).json({ error: "Request timed out. The AI model is taking too long — please try again." });
+    }
+  });
+  next();
+});
+
 app.post("/api/agent/chat", async (req, res) => {
   const { sessionId, message } = req.body || {};
 
@@ -390,12 +401,9 @@ app.post('/api/test-preview', async (req, res) => {
     // ---------------------------------------------------------
     else if (type === "audio") {
       if (!groq) throw new Error("GROQ_API_KEY is not configured");
-      const elevenKey = process.env.ELEVENLABS_API_KEY;
-      if (!elevenKey || /^your_.+_here$/i.test(String(elevenKey).trim())) {
-        throw new Error("ELEVENLABS_API_KEY is not configured for audio preview");
-      }
-      const voiceId = String(process.env.ELEVENLABS_VOICE_ID || "29vD33N1CtxCmqQRPOHJ").trim();
 
+      // Generate the voiceover script via Groq.
+      // Audio playback is handled client-side via the browser's Web Speech API (no external TTS key needed).
       const chatCompletion = await groq.chat.completions.create({
         messages: [
           {
@@ -417,28 +425,11 @@ app.post('/api/test-preview', async (req, res) => {
         throw new Error("Audio preview: empty script after normalization");
       }
 
-      const ttsText = scriptContent.slice(0, 4500);
-      const elRes = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(voiceId)}`, {
-        method: "POST",
-        headers: {
-          Accept: "audio/mpeg",
-          "xi-api-key": elevenKey,
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify({
-          text: ttsText,
-          model_id: "eleven_multilingual_v2"
-        })
-      });
-      if (!elRes.ok) {
-        const errBody = await elRes.text();
-        throw new Error(`ElevenLabs TTS failed (${elRes.status}): ${errBody.slice(0, 280)}`);
-      }
-      const buffer = await elRes.arrayBuffer();
+      // Return the script text only — browser will use Web Speech API to speak it
       previewResult = {
         type: "audio",
-        url: `data:audio/mpeg;base64,${Buffer.from(buffer).toString("base64")}`,
-        data: scriptContent
+        url: null,
+        data: scriptContent.slice(0, 4500)
       };
     }
 
@@ -501,6 +492,12 @@ app.post('/api/test-preview', async (req, res) => {
 const server = app.listen(PORT, () => {
   console.log(`RentPrompts agent server listening on http://localhost:${PORT}`);
 });
+
+// Prevent ECONNRESET on slow LLM calls:
+// Node's default keepAliveTimeout (5s) is shorter than a typical LLM round-trip,
+// which causes the proxy to see a connection reset mid-request.
+server.keepAliveTimeout = 125000; // 125 s
+server.headersTimeout   = 130000; // must be > keepAliveTimeout
 
 server.on("error", (err) => {
   if (err.code === "EADDRINUSE") {

@@ -240,7 +240,6 @@ async function callOpenRouter(systemPrompt, userContent, retries = 2) {
           { role: 'system', content: systemPrompt },
           { role: 'user', content: userContent }
         ],
-        // REMOVED response_format to prevent 400 errors on fallback models
         temperature: 0.7,
         max_tokens: 3000,
       });
@@ -253,7 +252,18 @@ async function callOpenRouter(systemPrompt, userContent, retries = 2) {
         throw new Error("No JSON object found in response");
       }
       
-      return JSON.parse(jsonMatch[0]);
+      // Sanitize control characters that break JSON.parse (newlines/tabs inside string values)
+      const sanitized = jsonMatch[0].replace(/[\u0000-\u001F\u007F]/g, (c) => {
+        const allowed = { '\n': '\\n', '\r': '\\r', '\t': '\\t' };
+        return allowed[c] || '';
+      });
+      
+      try {
+        return JSON.parse(sanitized);
+      } catch {
+        // Last resort: strip ALL control chars and try again
+        return JSON.parse(jsonMatch[0].replace(/[\u0000-\u001F\u007F]/g, ' '));
+      }
 
     } catch (err) {
       const is429 = err?.status === 429 || 
@@ -304,52 +314,66 @@ export async function runPromptTest({ systemPrompt, userPrompt, testInputs, mode
 }
 
 export async function generatePromptTemplate(session) {
-  const systemPrompt = `You are an Elite Senior AI Prompt Engineer for RentPrompts.
-Your job is to take specific user requirements and build a highly robust, comprehensive, and production-ready AI app configuration.
+  const editInstruction = session.deepAnswers?.lastEditInstruction
+    ? `\n- EDIT INSTRUCTION FROM CREATOR: ${session.deepAnswers.lastEditInstruction}` : '';
+
+  const systemPrompt = `You are an Elite AI Prompt Engineer specializing in production-ready app prompts for the RentPrompts marketplace.
+Your job: generate a HIGHLY SPECIFIC, DOMAIN-AWARE prompt configuration for the app described below.
 ${LANGUAGE_MIRROR_DIRECTIVE}
 
-CRITICAL RULES:
-1. NO GENERIC PLACEHOLDERS. Do not use words like "cat" or "example".
-2. Use $$variableName syntax for any input the final end-user will provide.
-3. The userPrompt MUST BE EXTREMELY DETAILED (multiple paragraphs). It must cover persona, context, step-by-step logic, edge cases, output formatting, and constraints to ensure the AI behaves perfectly. DO NOT give a short 2-3 line prompt.
-4. MUST USE EXACT VARIABLES: You MUST use the exact input variables provided in the user constraints below. Do not invent new variables.
-5. ANTI-HALLUCINATION & CONTEXT GROUNDING: If the user mentions acronyms (e.g., BNS, IPC) or specific domains (e.g., Indian Law), you MUST explicitly define them in the systemPrompt you generate (e.g., "BNS refers to Bharatiya Nyaya Sanhita, India's criminal code replacing the IPC"). Do not let the final model guess acronyms.
+QUALITY RULES:
+1. systemPrompt: Define a tight AI persona. Include: role, domain expertise, tone, output format rules, and constraints. 3-5 sentences.
+2. userPrompt: Must be HIGHLY DETAILED (200-400 words). Structure it as:
+   a) CONTEXT BLOCK: Set the scenario using the $$variables
+   b) PROCESSING LOGIC: Step-by-step instructions on how to analyze/generate
+   c) OUTPUT FORMAT: Exactly how the response should look (headings, bullets, JSON, etc.)
+   d) CONSTRAINTS: What NOT to do (hallucinate, go off-topic, be generic)
+3. Use $$snake_case_variable syntax ONLY for the REQUIRED INPUT VARIABLES listed below. Do not invent extra variables.
+4. negativePrompt: For image/video apps, write a detailed negative prompt. For text/audio/vision, set to null.
+5. acceptImageInput: true ONLY for vision and image-input apps (background removal, room design, plant disease).
+6. NO META-PLATFORM DETAILS: NEVER mention the user's budget, coin cost, or model name (e.g., 'Nano Banana', 'Medium (5 - 20 coins)') in the systemPrompt or userPrompt. The prompt is strictly for the end-user using the app, who doesn't know about models or coins.
+7. DOMAIN GROUNDING: If the app is legal/medical/agricultural, explicitly define domain-specific terms in systemPrompt.
+8. DO NOT write generic prompts. Every sentence must be specific to THIS app's purpose.
+9. NEVER include in prompts: model names (e.g. "Nano Banana", "GPT"), coin costs, budget tiers, platform names ("RentPrompts"), or any internal metadata. Prompts must be self-contained instructions only.
 
-Return ONLY valid JSON with this exact schema:
+Return ONLY valid JSON:
 {
-  "reasoning": "Step-by-step logic explaining how you configured this.",
-  "systemPrompt": "The backend instruction for the model (persona, behavior, formatting).",
-  "userPrompt": "The highly detailed, comprehensive prompt string containing the $$variables.",
-  "negativePrompt": "Detailed negative prompt (for image/video only) or null",
+  "reasoning": "Brief explanation of your design choices.",
+  "systemPrompt": "Tight 3-5 sentence AI persona with role, domain, tone, format rules.",
+  "userPrompt": "Highly detailed 200-400 word prompt with context, processing logic, output format, and constraints.",
+  "negativePrompt": "Detailed negative prompt or null",
   "acceptImageInput": true or false,
   "variablesUsed": ["$$var1", "$$var2"],
-  "variableDescriptions": {
-    "$$var1": "What the user should enter here"
-  }
+  "variableDescriptions": { "$$var1": "What the user enters here" }
 }`;
 
-  const userContent = `
-Analyze these requirements and generate the prompt template:
+  const vars = session.dynamicContext?.variables || [];
+  const varList = vars.map(v => typeof v === 'object' ? `$$${v.name}: ${v.placeholder || ''}` : `$$${v}`).join('\n');
+
+  const userContent = `Generate a production-ready prompt for this app:
 - App Type: ${session.appType}
 - App Purpose: ${session.requirements?.appPurpose || session.extraction?.appPurpose || 'Not specified'}
 - Target Users: ${session.requirements?.targetUsers || session.extraction?.targetUsers || 'General Public'}
-- Context Gathered During Chat: ${JSON.stringify(session.history?.map(h => h.content) || [])}
-- REQUIRED INPUT VARIABLES TO USE: ${JSON.stringify(session.dynamicContext?.variables || [])}
-  `;
+- Domain Context from Chat: ${JSON.stringify(session.deepAnswers || {})}
+- Conversation Summary: ${JSON.stringify((session.history || []).slice(-6).map(h => h.content))}
+- REQUIRED INPUT VARIABLES (use EXACTLY these, no more, no less):
+${varList || 'Use the most logical 3-4 variables for this app type and purpose.'}${editInstruction}`;
 
   try {
     const result = await callOpenRouter(systemPrompt, userContent);
     return result;
   } catch (err) {
     console.error('[Sub-agent 2] Error:', err.message);
+    const acceptImage = session.appType === 'image' || session.appType === 'vision';
+    const mainVar = vars[0]?.name || 'main_input';
     return {
       reasoning: "Fallback triggered.",
-      systemPrompt: `You are an expert AI for ${session.appType || 'content'} generation.`,
-      userPrompt: `Execute the task comprehensively based on this input: $$main_input`,
-      negativePrompt: null,
-      acceptImageInput: session.appType === 'image' || session.appType === 'vision',
-      variablesUsed: ["$$main_input"],
-      variableDescriptions: { "$$main_input": "The main instructions" }
+      systemPrompt: `You are a highly specialized AI assistant for ${session.appType || 'content'} generation. Focus exclusively on the app's stated purpose. Provide structured, accurate, and domain-specific outputs only.`,
+      userPrompt: `Based on the following inputs, perform the requested task precisely:\n\n$$${mainVar}\n\nProvide a detailed, well-structured response that directly addresses the request. Do not add unrelated information.`,
+      negativePrompt: acceptImage ? 'blurry, low quality, distorted, watermark, text overlay, pixelated, overexposed, underexposed' : null,
+      acceptImageInput: acceptImage,
+      variablesUsed: vars.slice(0, 3).map(v => `$$${typeof v === 'object' ? v.name : v}`),
+      variableDescriptions: Object.fromEntries(vars.slice(0, 3).map(v => [`$$${typeof v === 'object' ? v.name : v}`, typeof v === 'object' ? v.placeholder : 'Enter details']))
     };
   }
 }

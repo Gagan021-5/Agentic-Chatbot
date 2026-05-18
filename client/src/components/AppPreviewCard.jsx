@@ -8,21 +8,16 @@ import {
 
 export default function AppPreviewCard({ data, onSendMessage, sessionId, storageMessageId }) {
   const [isEditing, setIsEditing] = useState(false);
+  const [isSpeaking, setIsSpeaking] = useState(false);
   const [editInstruction, setEditInstruction] = useState('');
   const [isPreviewMode, setIsPreviewMode] = useState(false);
   const [testInputs, setTestInputs] = useState(() => {
     const rawVars = data?.variables || data?.variablesUsed || [];
     return rawVars.reduce((acc, variable) => {
-      // Handle both object format and old string format
       const varName = typeof variable === "object" ? variable.name : String(variable || "").replace(/^\$\$/, "");
 
-      // THE FIX: 1. Try what the user already typed. 2. Try AI test value. 3. Fallback to empty.
-      const testVal =
-        typeof variable === "object" && variable.value
-          ? variable.value
-          : variable.test_value || "";
-
-      acc[varName] = testVal;
+      // FIX: Start entirely empty! Let the user type their own case details.
+      acc[varName] = "";
       return acc;
     }, {});
   });
@@ -148,31 +143,20 @@ export default function AppPreviewCard({ data, onSendMessage, sessionId, storage
   return (
     <div className="w-full bg-[#121018] border border-white/[0.06] rounded-2xl overflow-hidden mt-2 shadow-xl font-sans animate-fade-in-up">
 
-      {/* ─── Header ─── */}
-      <div className="bg-[#121018] p-6 border-b border-white/[0.06] flex justify-between items-start">
-        <div>
-          <h3 className="text-xl font-bold text-white mb-1">{data.appName || 'Your AI App'}</h3>
-          <p className="text-sm text-gray-400">{data.appDescription || 'Ready to deploy.'}</p>
-        </div>
-        <div className="bg-[#2d1b4e] border border-[#5a32a3] px-3 py-1 rounded-full flex items-center shrink-0 ml-2">
-          <span className="text-[#a77bf3] text-sm font-medium">{data.cost || '0.00'} coins / run</span>
-        </div>
-      </div>
-
       {/* ─── Body ─── */}
       <div className="p-6">
         {/* Default view: show prompts */}
         {!isPreviewMode && !isEditing && (
           <div className="space-y-4">
             <div>
-              <span className="text-xs font-semibold text-gray-500 uppercase tracking-wider">Backend Logic</span>
+              <span className="text-xs font-semibold text-gray-500 uppercase tracking-wider">System Prompt</span>
               <div className="mt-1.5 text-sm text-gray-300 bg-[#0a0a0f] p-4 rounded-xl border border-white/[0.05] font-mono leading-relaxed h-24 overflow-y-auto custom-scrollbar">
                 {data.systemPrompt}
               </div>
             </div>
             {data.userPrompt && (
               <div>
-                <span className="text-xs font-semibold text-gray-500 uppercase tracking-wider">Prompt Template</span>
+                <span className="text-xs font-semibold text-gray-500 uppercase tracking-wider">User Prompt</span>
                 <div className="mt-1.5 text-sm text-gray-300 bg-[#0a0a0f] p-4 rounded-xl border border-white/[0.05] font-mono leading-relaxed custom-scrollbar">
                   {formatPrompt(data.userPrompt)}
                 </div>
@@ -194,8 +178,12 @@ export default function AppPreviewCard({ data, onSendMessage, sessionId, storage
 
             {rawVariables.map((v, i) => {
               const varName = typeof v === 'object' ? v.name : String(v || "").replace(/^\$\$/, "");
-              const placeholderText = v.placeholder || `Enter ${varName}...`;
-              
+
+              // FIX: Use the AI's test_value as a helpful placeholder hint
+              const placeholderText = typeof v === 'object' && v.test_value
+                ? `e.g., ${v.test_value}`
+                : (typeof v === 'object' && v.placeholder ? v.placeholder : `Enter ${varName}...`);
+
               return (
                 <div key={i} className="flex flex-col gap-1.5">
                   <label className="text-xs text-gray-300 ml-1 font-medium">{varName}</label>
@@ -210,9 +198,20 @@ export default function AppPreviewCard({ data, onSendMessage, sessionId, storage
               );
             })}
 
-            {data.appType?.toLowerCase() === 'vision' && (
+            {(data.appType?.toLowerCase() === 'vision' || data.appType?.toLowerCase() === 'image') && (
               <div className="flex flex-col gap-1.5 mb-3">
-                <label className="text-xs text-[#a77bf3] font-semibold uppercase tracking-wider ml-1">Upload Test Image</label>
+                <label className="text-xs text-[#a77bf3] font-semibold uppercase tracking-wider ml-1">
+                  {data.appType?.toLowerCase() === 'vision' ? 'Upload Image to Analyze' : 'Upload Source Image'}
+                </label>
+                {testImage && (
+                  <div className="relative w-full rounded-xl overflow-hidden border border-purple-500/20 mb-2">
+                    <img src={testImage} alt="Preview" className="w-full max-h-48 object-contain bg-black/40" />
+                    <button
+                      onClick={() => setTestImage(null)}
+                      className="absolute top-2 right-2 bg-black/70 text-white rounded-full w-6 h-6 flex items-center justify-center text-xs hover:bg-red-500/80 transition-colors"
+                    >✕</button>
+                  </div>
+                )}
                 <input 
                   type="file" 
                   accept="image/*"
@@ -224,7 +223,7 @@ export default function AppPreviewCard({ data, onSendMessage, sessionId, storage
                       reader.readAsDataURL(file);
                     }
                   }}
-                  className="text-xs text-gray-400 file:mr-4 file:py-2 file:px-4 file:rounded-lg file:border-0 file:text-xs file:font-semibold file:bg-[#2a2238] file:text-[#a77bf3] hover:file:bg-[#3b2d50]"
+                  className="text-xs text-gray-400 file:mr-4 file:py-2 file:px-4 file:rounded-lg file:border-0 file:text-xs file:font-semibold file:bg-[#2a2238] file:text-[#a77bf3] hover:file:bg-[#3b2d50] cursor-pointer"
                 />
               </div>
             )}
@@ -294,30 +293,56 @@ export default function AppPreviewCard({ data, onSendMessage, sessionId, storage
                   )
                 )}
 
-                {/* Audio Output (ElevenLabs MP3 from server) */}
+                {/* Audio Output — Web Speech API (browser-native, no API key needed) */}
                 {previewResult.type === 'audio' && (
                   <div className="bg-[#1a1525] rounded-xl border border-[#3b2d50] p-5 mb-3 shadow-lg">
-                    <div className="mb-4">
-                      <h4 className="text-sm font-bold text-gray-200">Audio preview</h4>
-                      <p className="text-xs text-gray-400 font-medium mt-0.5">
-                        {previewResult.url
-                          ? "Generated with ElevenLabs (voice from ELEVENLABS_VOICE_ID on the server)."
-                          : "Run Live Test again to regenerate audio."}
-                      </p>
-                    </div>
-                    {previewResult.url && (
-                      <audio
-                        controls
-                        className="w-full h-10 rounded-md bg-[#121018] mb-4"
-                        key={previewResult.url.slice(0, 120)}
+                    <div className="flex items-center justify-between mb-4">
+                      <div>
+                        <h4 className="text-sm font-bold text-gray-200">Audio Preview</h4>
+                        <p className="text-xs text-gray-500 mt-0.5">Powered by your browser's built-in voice engine</p>
+                      </div>
+                      <button
+                        onClick={() => {
+                          if (!previewResult.data) return;
+                          if (isSpeaking) {
+                            window.speechSynthesis.cancel();
+                            setIsSpeaking(false);
+                            return;
+                          }
+                          const utter = new SpeechSynthesisUtterance(previewResult.data);
+                          utter.rate = 1;
+                          utter.pitch = 1;
+                          utter.lang = 'en-US';
+                          utter.onstart = () => setIsSpeaking(true);
+                          utter.onend = () => setIsSpeaking(false);
+                          utter.onerror = () => setIsSpeaking(false);
+                          window.speechSynthesis.cancel();
+                          window.speechSynthesis.speak(utter);
+                        }}
+                        className={`flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-semibold transition-all duration-300 ease-in-out ${
+                          isSpeaking
+                            ? 'bg-red-500/20 text-red-400 border border-red-500/30 hover:bg-red-500/30'
+                            : 'bg-[#7c3aed] text-white hover:bg-[#6d28d9] hover:shadow-[0_0_16px_rgba(124,58,237,0.3)]'
+                        }`}
                       >
-                        <source src={previewResult.url} type="audio/mpeg" />
-                      </audio>
-                    )}
+                        {isSpeaking ? (
+                          <>
+                            <span className="relative flex h-2 w-2">
+                              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-red-400 opacity-75" />
+                              <span className="relative inline-flex rounded-full h-2 w-2 bg-red-500" />
+                            </span>
+                            Stop
+                          </>
+                        ) : (
+                          <>
+                            <svg viewBox="0 0 20 20" fill="currentColor" className="h-4 w-4"><path d="M6.3 2.841A1.5 1.5 0 0 0 4 4.11V15.89a1.5 1.5 0 0 0 2.3 1.269l9.344-5.89a1.5 1.5 0 0 0 0-2.538L6.3 2.84z"/></svg>
+                            Play
+                          </>
+                        )}
+                      </button>
+                    </div>
                     <div className="p-4 bg-black/40 rounded-lg text-sm text-gray-300 leading-relaxed border border-white/5">
-                      <span className="text-xs font-semibold text-[#a77bf3] uppercase tracking-wide block mb-2">
-                        Script (spoken)
-                      </span>
+                      <span className="text-xs font-semibold text-[#a77bf3] uppercase tracking-wide block mb-2">Script (spoken)</span>
                       <p className="whitespace-pre-wrap">{previewResult.data}</p>
                     </div>
                   </div>
@@ -371,12 +396,7 @@ export default function AppPreviewCard({ data, onSendMessage, sessionId, storage
       <div className="p-5 bg-[#0a0a0f] border-t border-white/[0.06]">
         {!isEditing ? (
           <div className="flex flex-wrap gap-2 items-center">
-            <button
-              onClick={() => onSendMessage('Publish App')}
-              className="px-5 py-2.5 bg-[#6d28d9] hover:bg-[#5b21b6] text-white rounded-xl text-sm font-medium transition-all duration-300 ease-in-out shadow-lg shadow-[#6d28d9]/20 hover:shadow-[0_0_20px_rgba(109,40,217,0.3)] active:scale-95"
-            >
-              Publish to Marketplace
-            </button>
+            {/* Live Preview toggle always present */}
             <button
               onClick={() => setIsPreviewMode(!isPreviewMode)}
               className={`px-4 py-2.5 rounded-xl text-sm font-medium transition-all duration-300 ease-in-out border ${
@@ -387,18 +407,48 @@ export default function AppPreviewCard({ data, onSendMessage, sessionId, storage
             >
               {isPreviewMode ? '✕ Close Preview' : '⚡ Live Preview'}
             </button>
-            <button
-              onClick={() => onSendMessage('Save Draft')}
-              className="px-4 py-2.5 bg-transparent text-gray-400 hover:text-white rounded-lg text-sm font-medium transition-colors"
-            >
-              Save Draft
-            </button>
-            <button
-              onClick={() => setIsEditing(true)}
-              className="px-4 py-2 bg-[#2a2a2a] text-gray-300 hover:text-white rounded-xl text-sm font-medium ml-auto transition-all duration-300 ease-in-out hover:bg-[#333] active:scale-95"
-            >
-              Edit
-            </button>
+
+            {/* Action buttons driven by data.options — only what the backend sends */}
+            {(data.options || []).map((option) => {
+              const isPublish = option.toLowerCase().includes('publish');
+              const isApprove = option.toLowerCase().includes('approve');
+              const isDraft   = option.toLowerCase().includes('draft') || option.toLowerCase().includes('save');
+              const isEdit    = option.toLowerCase().includes('edit');
+
+              if (isPublish) return (
+                <button key={option}
+                  onClick={() => onSendMessage('Publish App')}
+                  className="px-5 py-2.5 bg-[#6d28d9] hover:bg-[#5b21b6] text-white rounded-xl text-sm font-medium transition-all duration-300 ease-in-out shadow-lg shadow-[#6d28d9]/20 hover:shadow-[0_0_20px_rgba(109,40,217,0.3)] active:scale-95"
+                >{option}</button>
+              );
+              if (isApprove) return (
+                <button key={option}
+                  onClick={() => onSendMessage('Approve App')}
+                  className="px-5 py-2.5 bg-[#6d28d9] hover:bg-[#5b21b6] text-white rounded-lg text-sm font-medium transition-colors shadow-lg shadow-[#6d28d9]/20"
+                >
+                  Approve & Continue
+                </button>
+              );
+              if (isDraft) return (
+                <button key={option}
+                  onClick={() => onSendMessage('Save Draft')}
+                  className="px-4 py-2.5 bg-transparent text-gray-400 hover:text-white rounded-lg text-sm font-medium transition-colors"
+                >{option}</button>
+              );
+              if (isEdit) return (
+                <button key={option}
+                  onClick={() => setIsEditing(true)}
+                  className="px-4 py-2 bg-[#2a2a2a] text-gray-300 hover:text-white rounded-xl text-sm font-medium ml-auto transition-all duration-300 ease-in-out hover:bg-[#333] active:scale-95"
+                >{option}</button>
+              );
+              // Generic fallback button
+              return (
+                <button key={option}
+                  onClick={() => onSendMessage(option)}
+                  className="px-4 py-2.5 bg-transparent text-gray-300 hover:text-white rounded-lg text-sm font-medium border border-white/10 transition-colors"
+                >{option}</button>
+              );
+            })}
           </div>
         ) : (
           <div className="flex gap-2">
