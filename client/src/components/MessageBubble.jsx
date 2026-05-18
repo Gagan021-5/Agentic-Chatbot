@@ -109,13 +109,13 @@ function MessageBubble({ message, onSendMessage, onResetSession, isLoading, sess
       <Avatar role={message.role} />
 
       <div className={`min-w-0 max-w-[calc(100%-52px)] sm:max-w-[calc(100%-60px)] ${isUser ? "" : "flex-1"}`}>
-        <div className={`rounded-2xl border px-4 py-3 shadow-soft sm:rounded-[22px] sm:px-5 sm:py-4 ${
+        <div className={`rounded-3xl border px-4 py-3.5 shadow-soft sm:px-5 sm:py-4 ${
           isUser
-            ? "border-rent-border-light bg-rent-elevated text-white"
-            : "glass-panel border-rent-border bg-rent-card/80 text-white/90"
+            ? "rounded-br-lg border-white/10 bg-rent-elevated text-gray-200"
+            : "rounded-bl-lg glass-panel border-purple-500/15 bg-rent-card/80 text-gray-300"
         }`}>
           {displayText ? (
-            <div className="text-[13px] leading-7 sm:text-[14.5px] sm:leading-8">
+            <div className="text-[13px] leading-relaxed sm:text-[14.5px] sm:leading-loose">
               {renderText(displayText)}
             </div>
           ) : null}

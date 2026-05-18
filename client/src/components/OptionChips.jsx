@@ -8,7 +8,7 @@ function OptionChips({ options, onSendMessage, isLoading }) {
 
   return (
     // Global Options Container: Vertical Stack
-    <div className="flex flex-col gap-2 mt-3 w-full max-w-md animate-fade-in-up">
+    <div className="flex flex-col gap-2.5 mt-3 w-full max-w-md animate-fade-in-up">
       {options.map((option, i) => (
         <button
           key={i}
@@ -17,18 +17,19 @@ function OptionChips({ options, onSendMessage, isLoading }) {
           className={`
             text-left w-full px-5 py-3.5 
             bg-gradient-to-br from-[#050505] to-[#121018]
-            border border-[#2a2238] rounded-xl 
+            border border-white/[0.06] rounded-2xl 
             text-sm font-medium text-gray-200
             
-            transition-all duration-300 ease-out
+            transition-all duration-300 ease-in-out
             
-            hover:border-[#7c3aed]/60 
-            hover:shadow-[0_0_20px_rgba(124,58,237,0.25)]
+            hover:border-purple-500/40 
+            hover:shadow-[0_0_20px_rgba(168,85,247,0.2)]
             hover:bg-[#0f0b17]
+            hover:-translate-y-1
             
-            active:scale-[0.97]
+            active:scale-95
             
-            disabled:opacity-40 disabled:cursor-not-allowed
+            disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:translate-y-0 disabled:hover:shadow-none
             
             flex justify-between items-center group
           `}

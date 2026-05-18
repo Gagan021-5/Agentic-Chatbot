@@ -793,7 +793,34 @@ export async function route(session, message) {
         };
       }
       session.awaitingPromptTweak = false;
-      return await showModels(session);
+
+      // SMART BUDGET DETECTION
+      const budgetMatch = msg.match(/(free|low|medium|premium)/i);
+      
+      if (budgetMatch) {
+          if (!session.extraction) session.extraction = {};
+          session.extraction.budget = budgetMatch[1].toLowerCase();
+          if (session.deepAnswers) session.deepAnswers.budgetPreference = budgetMatch[1].toLowerCase();
+          await saveSession(session);
+          return await showModels(session);
+      } else {
+          // They just said "change the model". Wipe the old budget and ask again!
+          if (!session.extraction) session.extraction = {};
+          session.extraction.budget = null; 
+          if (session.deepAnswers) session.deepAnswers.budgetPreference = null;
+          session.currentDeepField = "budgetPreference";
+          session.awaitingDeepAnswer = true;
+          session.step = 0; 
+          await saveSession(session);
+          
+          return {
+            reply: "No problem! What target budget per generation would you like to switch to?",
+            uiType: "chips",
+            uiData: { options: ["Free models only (0 coins)", "Low (< 5 coins)", "Medium (5 - 20 coins)", "Premium (> 20 coins)"] },
+            nextStep: 0,
+            coins: null
+          };
+      }
     }
 
     // B. Major Pivot (Changing App Type or Domain entirely)
@@ -818,10 +845,12 @@ export async function route(session, message) {
         cleanPurpose = newType ? `${newType} generation app` : "a new idea";
       }
 
+      // WIPE EVERYTHING INCLUDING CHAT HISTORY SO IT DOESN'T CONFUSE NEW IDEAS WITH OLD ONES
       session.dynamicContext = null;
       session.appType = newType || null;
       session.extraction = { appPurpose: cleanPurpose, confidence: {} };
       session.deepAnswers = {};
+      session.history = []; // <-- THIS KILLS THE GHOST MEMORY!
       session.step = 0;
       session.triageRounds = 0;
       session.awaitingPromptTweak = false;

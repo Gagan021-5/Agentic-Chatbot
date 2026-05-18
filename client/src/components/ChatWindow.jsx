@@ -145,7 +145,7 @@ function ChatWindow({ messages, isLoading, sendMessage, resetSession, sessionId 
   return (
     <div className="relative flex h-screen flex-col overflow-hidden bg-rent-bg" style={{ height: "100dvh" }}>
       {/* Header */}
-      <header className="glass-panel relative z-30 shrink-0 border-b border-rent-border/60">
+      <header className="glass-panel relative z-30 shrink-0 border-b border-rent-border/60 bg-rent-bg/80 backdrop-blur-xl">
         <div className="mx-auto flex h-14 max-w-[1400px] items-center justify-between gap-2 px-3 sm:h-16 sm:gap-3 sm:px-5 md:px-8">
           <button className="inline-flex items-center gap-1.5 rounded-lg px-2 py-1.5 text-sm font-medium text-white/60 transition hover:bg-white/5 hover:text-white sm:gap-2 sm:px-3" type="button">
             <IconArrowLeft />
@@ -179,7 +179,7 @@ function ChatWindow({ messages, isLoading, sendMessage, resetSession, sessionId 
 
       {/* Messages */}
       <main ref={viewportRef} className="relative z-10 flex-1 overflow-y-auto px-3 py-5 sm:px-5 sm:py-8 md:px-8">
-        <div className="mx-auto flex max-w-[960px] flex-col gap-5 sm:gap-7 md:gap-8">
+        <div className="mx-auto flex max-w-[960px] flex-col gap-6 sm:gap-8 md:gap-10">
           {messages.map((msg) => (
             <MessageBubble
               key={msg.id}
@@ -195,12 +195,12 @@ function ChatWindow({ messages, isLoading, sendMessage, resetSession, sessionId 
       </main>
 
       {/* Input Bar */}
-      <div className="relative z-30 shrink-0 border-t border-rent-border/40 bg-rent-bg/80 px-3 pb-3 pt-3 backdrop-blur-xl sm:px-5 sm:pb-5 sm:pt-4 md:px-8 safe-bottom">
-        <form onSubmit={handleSubmit} className="input-focus-ring mx-auto flex max-w-[720px] items-center gap-2 rounded-2xl border border-rent-border bg-rent-surface/90 px-3 py-2.5 shadow-soft transition-all sm:gap-3 sm:rounded-[22px] sm:px-4 sm:py-3 lg:max-w-[820px]">
+      <div className="relative z-30 shrink-0 border-t border-white/5 bg-rent-bg/80 px-3 pb-3 pt-3 backdrop-blur-2xl sm:px-5 sm:pb-5 sm:pt-4 md:px-8 safe-bottom">
+        <form onSubmit={handleSubmit} className="input-focus-ring mx-auto flex max-w-[720px] items-center gap-2 rounded-full border border-white/10 bg-rent-surface/90 px-4 py-2.5 shadow-soft ring-1 ring-transparent transition-all duration-300 ease-in-out focus-within:ring-1 focus-within:ring-purple-500/50 focus-within:border-purple-500/30 sm:gap-3 sm:px-5 sm:py-3 lg:max-w-[820px]">
           <button type="button" className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-xl text-white/40 transition hover:bg-white/5 hover:text-white/70 sm:h-10 sm:w-10">
             <IconPaperclip />
           </button>
-          <input disabled={isLoading} value={input} onChange={(e) => setInput(e.target.value)} onKeyDown={handleKeyDown} placeholder="Describe your project, or attach a file." className="h-10 min-w-0 flex-1 bg-transparent text-sm text-white outline-none placeholder:text-white/30 sm:h-11 sm:text-[15px]" />
+          <input disabled={isLoading} value={input} onChange={(e) => setInput(e.target.value)} onKeyDown={handleKeyDown} placeholder="Describe your project, or attach a file." className="h-10 min-w-0 flex-1 bg-transparent text-sm text-gray-200 outline-none ring-0 focus:ring-0 focus:outline-none placeholder:text-white/30 sm:h-11 sm:text-[15px]" />
 
           {/* Mic Button — pulses red when listening */}
           <button

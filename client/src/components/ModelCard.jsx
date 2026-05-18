@@ -51,7 +51,7 @@ function ModelCard({ model, onSendMessage, isTop3 = true, isLoading }) {
 
   return (
     <div
-      className={`card-hover group relative flex h-full flex-col overflow-hidden rounded-2xl sm:rounded-[22px] shadow-soft p-[1.5px] rent-border: '#d1d1d1'`}
+      className={`card-hover group relative flex h-full flex-col overflow-hidden rounded-2xl sm:rounded-[22px] shadow-soft p-[1.5px] transition-all duration-300 ease-in-out hover:-translate-y-1 hover:shadow-[0_0_24px_rgba(168,85,247,0.2)] active:scale-[0.97]`}
     >
       {/* 1. Outer Wrapper: Replaced standard border with a padding trick (p-[1.5px]) */}
 
@@ -61,7 +61,7 @@ function ModelCard({ model, onSendMessage, isTop3 = true, isLoading }) {
       )}
 
       {/* 3. Inner Content Box: Sits on top of the spinner, masking the center */}
-      <div className="relative z-10 flex h-full w-full flex-col rounded-[15px] sm:rounded-[21px] bg-[#0A0A0A]/95 glass-panel p-4 sm:p-5">
+      <div className="relative z-10 flex h-full w-full flex-col rounded-[15px] sm:rounded-[21px] bg-[#0A0A0A]/95 glass-panel p-5 sm:p-6 border border-white/[0.04]">
         {/* Top accent glow on hover (Kept from your original code) */}
         <div className="pointer-events-none absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-rent-purple/0 to-transparent transition-all duration-300 group-hover:via-rent-purple/40" />
 
@@ -70,7 +70,7 @@ function ModelCard({ model, onSendMessage, isTop3 = true, isLoading }) {
             <h3 className="text-base font-extrabold text-white sm:text-lg">
               {model.name}
             </h3>
-            <p className="mt-1.5 text-xs leading-5 text-white/50 sm:mt-2 sm:text-sm sm:leading-6">
+            <p className="mt-1.5 text-xs leading-relaxed text-white/50 sm:mt-2 sm:text-sm sm:leading-relaxed">
               {model.desc}
             </p>
           </div>
@@ -114,12 +114,12 @@ function ModelCard({ model, onSendMessage, isTop3 = true, isLoading }) {
           </div>
         ) : null}
 
-        <div className="mt-auto pt-4 sm:pt-5">
+        <div className="mt-auto pt-5 sm:pt-6">
           <button
             type="button"
             disabled={isLoading}
             onClick={() => onSendMessage(`Select ${model.name}`)}
-            className="btn-cta h-10 w-full rounded-xl text-xs font-bold text-white sm:h-12 sm:text-sm transition-transform hover:scale-[1.02] active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed"
+            className="btn-cta h-10 w-full rounded-xl text-xs font-bold text-white sm:h-12 sm:text-sm transition-all duration-300 ease-in-out hover:scale-[1.02] hover:shadow-[0_0_16px_rgba(168,85,247,0.25)] active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed"
           >
             Select Model
           </button>
