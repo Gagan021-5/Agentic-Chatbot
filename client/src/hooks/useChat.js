@@ -76,7 +76,13 @@ function useChat() {
           });
           
           startTransition(() => {
-            setMessages([buildWelcomeMessage(), ...loadedMessages]);
+            // Prepend welcome only once — never inject it mid-conversation
+            setMessages((current) => {
+              const hasOnlyWelcome = current.length === 1 && current[0].id === 'welcome-message';
+              return hasOnlyWelcome
+                ? [buildWelcomeMessage(), ...loadedMessages]
+                : [buildWelcomeMessage(), ...loadedMessages]; // always rebuild cleanly from server truth
+            });
           });
         }
       } catch (err) {

@@ -191,7 +191,8 @@ app.use(
     origin: "http://localhost:5173"
   })
 );
-app.use(express.json());
+app.use(express.json({ limit: '15mb' }));
+app.use(express.urlencoded({ extended: true, limit: '15mb' }));
 
 // Per-request timeout: send a clean 504 after 115s rather than letting the
 // TCP socket reset (which Vite's proxy reports as ECONNRESET).
@@ -366,71 +367,319 @@ app.post('/api/test-preview', async (req, res) => {
     }
 
     // ---------------------------------------------------------
-    // 2. IMAGE APP (Pollinations.ai - Bulletproof Free Tier)
+    // 2. IMAGE APP — transform uploaded image OR generate from text
     // ---------------------------------------------------------
     else if (type === 'image') {
-      const cleanVars = Object.entries(variables || {})
-        .filter(([k, v]) => v && String(v).trim() !== "")
-        .map(([k, v]) => `${k}: ${v}`)
-        .join("; ");
 
-      const combinedPrompt = buildPollinationsImageAppPrompt(systemPrompt, variables);
-      const shortFallback =
-        cleanVars.slice(0, 320) ||
-        String(systemPrompt || "")
-          .replace(/\s+/g, " ")
-          .trim()
-          .slice(0, 200);
+      if (testImageBase64) {
+        // ── PATH A: Uploaded image → 2-Sub-agent pipeline ──
+        // Sub-agent 1: Groq Vision — deeply analyzes the photo + writes a precise render prompt
+        // Sub-agent 2: Pollinations — renders the transformed image from that prompt
+        console.log("[SubAgent-1] Analyzing uploaded image via Groq Vision...");
 
-      let imageDataUrl;
-      try {
-        imageDataUrl = await fetchPollinationsWithFallback(combinedPrompt, shortFallback);
-      } catch (e) {
-        console.warn("[test-preview] Image app Pollinations failed:", e.message);
-        imageDataUrl = previewImageUnavailableDataUrl();
+        const groqKey = process.env.GROQ_API_KEY;
+        let renderPrompt = "";
+
+        // Summarize what transformation the user wants
+        const transformGoal = Object.entries(variables || {})
+          .filter(([, v]) => v && String(v).trim())
+          .map(([k, v]) => `${k.replace(/_/g, " ")}: ${String(v).trim()}`)
+          .join("; ") || systemPrompt.slice(0, 200);
+
+        if (groqKey) {
+          try {
+            const visionBody = JSON.stringify({
+              model: "meta-llama/llama-4-scout-17b-16e-instruct",
+              max_tokens: 280,
+              messages: [{
+                role: "user",
+                content: [
+                  { type: "image_url", image_url: { url: testImageBase64 } },
+                  {
+                    type: "text",
+                    text: `You are a professional image-to-prompt writer for an AI image generator.\n\nSTEP 1 — Identify subject details: gender, approximate age, hair (color+length+style), skin tone, expression, clothing (style+color), body pose, lighting.\n\nSTEP 2 — Write a single render prompt (80-120 words) showing EXACTLY the same person AFTER this transformation:\n"${transformGoal}"\n\nRules:\n- Keep ALL subject details identical (face, hair, clothes, pose)\n- Only change what the transformation requires\n- If transformation is "transparent background" or "no background": write "isolated subject on pure white background, no background elements, clean cutout"\n- End with: "photorealistic, ultra-detailed, professional photography, 8K resolution"\n- Output ONLY the prompt text. No explanation, no prefix like "here is".`
+                  }
+                ]
+              }]
+            });
+
+            const groqVisionRes = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+              method: "POST",
+              headers: { "Authorization": `Bearer ${groqKey}`, "Content-Type": "application/json" },
+              body: visionBody,
+              signal: AbortSignal.timeout(25000)
+            });
+
+            const groqVisionData = await groqVisionRes.json();
+            if (groqVisionRes.ok) {
+              renderPrompt = groqVisionData.choices?.[0]?.message?.content?.trim() || "";
+              console.log("[SubAgent-1] Render prompt:", renderPrompt.slice(0, 120));
+            } else {
+              console.warn("[SubAgent-1] Groq Vision error:", groqVisionData.error?.message || groqVisionRes.status);
+            }
+          } catch (e) {
+            console.warn("[SubAgent-1] Groq Vision failed:", e.message);
+          }
+        }
+
+        // Fallback if Groq Vision is unavailable
+        if (!renderPrompt || renderPrompt.length < 20) {
+          renderPrompt = `${transformGoal}, photorealistic, high resolution, professional photography, 8K`;
+          console.log("[SubAgent-1] Using fallback prompt.");
+        }
+
+        // Sub-agent 2: Pollinations renders the final image
+        console.log("[SubAgent-2] Rendering via Pollinations...");
+        let imageDataUrl;
+        try {
+          imageDataUrl = await fetchPollinationsWithFallback(renderPrompt, renderPrompt.slice(0, 200));
+        } catch (e) {
+          console.error("[SubAgent-2] Pollinations failed:", e.message);
+          imageDataUrl = previewImageUnavailableDataUrl();
+        }
+
+        previewResult = { type: "image", url: imageDataUrl };
+
+      } else {
+        // ── PATH B: Check if any variable holds a source image URL ──
+        const SOURCE_IMAGE_FIELDS = [
+          'source_image', 'sourceImage', 'image_url', 'imageUrl', 'input_image',
+          'photo_url', 'portrait', 'person_image', 'subject_image', 'photo'
+        ];
+        // Match URLs with image extensions anywhere, OR from known image CDNs (Unsplash, Cloudinary, etc.)
+        const isImageUrl = (v) => {
+          const s = String(v || '').trim();
+          if (!/^https?:\/\//i.test(s)) return false;
+          return /\.(jpg|jpeg|png|webp|gif|avif)(\?|$|&|#)/i.test(s) ||
+                 /^https?:\/\/(images\.unsplash\.com|cdn\.pixabay\.com|images\.pexels\.com|res\.cloudinary\.com|i\.imgur\.com|raw\.githubusercontent\.com|media\.giphy\.com)/i.test(s) ||
+                 /auto=format/i.test(s); // Unsplash's format param signals an image
+        };
+        const urlField = SOURCE_IMAGE_FIELDS.find(f => variables?.[f] && isImageUrl(variables[f]));
+        const anyUrlField = !urlField && Object.entries(variables || {}).find(([, v]) => isImageUrl(v));
+        const resolvedUrlField = urlField || (anyUrlField && anyUrlField[0]);
+        const sourceImageUrl = resolvedUrlField ? String(variables[resolvedUrlField]).trim() : null;
+
+        if (sourceImageUrl) {
+          // ── PATH B1: Variable contains an image URL → fetch it and run the same pipeline as PATH A ──
+          console.log(`[Image] Variable "${resolvedUrlField}" has an image URL — fetching for Groq Vision pipeline:`, sourceImageUrl.slice(0, 80));
+          let fetchedBase64 = null;
+          let fetchedMime = 'image/jpeg';
+          try {
+            const imgFetch = await fetch(sourceImageUrl, {
+              headers: { 'User-Agent': 'Mozilla/5.0' },
+              signal: AbortSignal.timeout(20000)
+            });
+            if (imgFetch.ok) {
+              const ct = imgFetch.headers.get('content-type') || 'image/jpeg';
+              fetchedMime = ct.split(';')[0].trim();
+              const buf = Buffer.from(await imgFetch.arrayBuffer());
+              fetchedBase64 = `data:${fetchedMime};base64,${buf.toString('base64')}`;
+              console.log(`[Image] Fetched source image: ${buf.length} bytes, mime: ${fetchedMime}`);
+            } else {
+              console.warn(`[Image] Failed to fetch source image URL: HTTP ${imgFetch.status}`);
+            }
+          } catch (fetchErr) {
+            console.warn('[Image] Source image URL fetch error:', fetchErr.message);
+          }
+
+          if (fetchedBase64) {
+            // Run Groq Vision to describe the transformation
+            let roomDescription = '';
+            const groqKey = process.env.GROQ_API_KEY;
+            if (groqKey) {
+              try {
+                const varStr = Object.entries(variables || {})
+                  .filter(([k, v]) => v && String(v).trim() && k !== resolvedUrlField)
+                  .map(([k, v]) => `${k.replace(/_/g, ' ')}: ${v}`)
+                  .join(', ');
+                const groqVisionRes = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+                  method: 'POST',
+                  headers: { 'Authorization': `Bearer ${groqKey}`, 'Content-Type': 'application/json' },
+                  body: JSON.stringify({
+                    model: 'meta-llama/llama-4-scout-17b-16e-instruct',
+                    max_tokens: 220,
+                    messages: [{
+                      role: 'user',
+                      content: [
+                        { type: 'image_url', image_url: { url: fetchedBase64 } },
+                        {
+                          type: 'text',
+                          text: `This is a portrait/subject image. Describe in 2-3 sentences how it looks AFTER these transformations are applied: ${varStr || systemPrompt}. Focus on the person staying the same but with the background replaced/removed as requested. Write only the visual description for an image generator — no preamble.`
+                        }
+                      ]
+                    }]
+                  })
+                });
+                const groqVisionData = await groqVisionRes.json();
+                if (groqVisionRes.ok) {
+                  roomDescription = groqVisionData.choices?.[0]?.message?.content?.trim() || '';
+                  console.log('[Image] Groq vision (URL path):', roomDescription.slice(0, 150));
+                }
+              } catch (e) {
+                console.warn('[Image] Groq vision (URL path) failed:', e.message);
+              }
+            }
+
+            const varStr = Object.entries(variables || {})
+              .filter(([k, v]) => v && String(v).trim() && k !== resolvedUrlField)
+              .map(([k, v]) => `${k.replace(/_/g, ' ')}: ${v}`)
+              .join(', ');
+            const renderPrompt = roomDescription || `${varStr}, photorealistic, high resolution, professional photography`;
+            console.log('[Image] Render prompt (URL path):', renderPrompt.slice(0, 150));
+
+            let imageDataUrl;
+            try {
+              imageDataUrl = await fetchPollinationsWithFallback(renderPrompt, renderPrompt.slice(0, 200));
+            } catch (e) {
+              imageDataUrl = previewImageUnavailableDataUrl();
+            }
+            previewResult = { type: 'image', url: imageDataUrl };
+
+          } else {
+            // URL fetch failed — fall through to pure text-to-image
+            const combinedPrompt = buildPollinationsImageAppPrompt(systemPrompt, variables);
+            let imageDataUrl;
+            try { imageDataUrl = await fetchPollinationsWithFallback(combinedPrompt, combinedPrompt.slice(0, 200)); }
+            catch (e) { imageDataUrl = previewImageUnavailableDataUrl(); }
+            previewResult = { type: 'image', url: imageDataUrl };
+          }
+
+        } else {
+          // ── PATH B2: No image at all → pure text-to-image via Pollinations ──
+          const combinedPrompt = buildPollinationsImageAppPrompt(systemPrompt, variables);
+          console.log('[Image] Text-to-image via Pollinations');
+          let imageDataUrl;
+          try {
+            imageDataUrl = await fetchPollinationsWithFallback(combinedPrompt, combinedPrompt.slice(0, 200));
+          } catch (e) {
+            console.warn('[Image] Pollinations failed:', e.message);
+            imageDataUrl = previewImageUnavailableDataUrl();
+          }
+          previewResult = { type: 'image', url: imageDataUrl };
+        }
       }
-
-      previewResult = {
-        type: "image",
-        url: imageDataUrl
-      };
     }
 
     // ---------------------------------------------------------
-    // 3. AUDIO APP (Groq script + ElevenLabs TTS)
+    // 3. AUDIO APP — speak user's script directly via Murf AI TTS
     // ---------------------------------------------------------
     else if (type === "audio") {
-      if (!groq) throw new Error("GROQ_API_KEY is not configured");
 
-      // Generate the voiceover script via Groq.
-      // Audio playback is handled client-side via the browser's Web Speech API (no external TTS key needed).
-      const chatCompletion = await groq.chat.completions.create({
-        messages: [
-          {
-            role: "system",
-            content:
-              "You write ONLY the exact words a voice actor will read aloud for the final audio. " +
-              "Never add titles, labels, or meta lines (no \"Here is\", \"Here's the script\", \"Below is\", or explanations of what you are doing). " +
-              "Do not describe the tone, music, or duration in prose — fold any style hints into the spoken words only if they belong in the voiceover. " +
-              "No stage directions, sound effects, or speaker names. No markdown. Output plain spoken text only."
-          },
-          { role: "user", content: `${systemPrompt}\n\nInputs: ${JSON.stringify(variables)}` }
-        ],
-        model: "llama-3.1-8b-instant",
-        max_tokens: 400
-      });
-      const rawScript = chatCompletion.choices[0]?.message?.content ?? "";
-      const scriptContent = normalizeSpokenScriptForTTS(rawScript);
-      if (!scriptContent.trim()) {
-        throw new Error("Audio preview: empty script after normalization");
+      // ── Detect if the user already provided the script text in their inputs ──
+      // Common field names for script/text content in audio apps
+      const SCRIPT_FIELDS = [
+        'scripted_conversation', 'script', 'content', 'text', 'dialogue',
+        'narration', 'transcript', 'message', 'body', 'story', 'article', 'podcast_script'
+      ];
+      const userScriptField = SCRIPT_FIELDS.find(f =>
+        variables?.[f] && String(variables[f]).trim().length > 30
+      );
+      const userProvidedScript = userScriptField ? String(variables[userScriptField]).trim() : null;
+
+      let scriptContent;
+
+      if (userProvidedScript) {
+        // ✅ User typed the script — speak it directly, no AI rewriting
+        console.log(`[Audio] Using user-provided script from field: "${userScriptField}" (${userProvidedScript.length} chars)`);
+        scriptContent = userProvidedScript;
+      } else {
+        // ⚙️ No script provided — generate one via Groq based on app inputs
+        if (!groq) throw new Error("GROQ_API_KEY is not configured");
+        console.log("[Audio] No script in variables — generating via Groq...");
+        const chatCompletion = await groq.chat.completions.create({
+          messages: [
+            {
+              role: "system",
+              content:
+                "You write ONLY the exact words a voice actor will read aloud for the final audio. " +
+                "Never add titles, labels, or meta lines (no \"Here is\", \"Here's the script\", \"Below is\"). " +
+                "No stage directions, sound effects, or speaker names. No markdown. Output plain spoken text only."
+            },
+            { role: "user", content: `${systemPrompt}\n\nInputs: ${JSON.stringify(variables)}` }
+          ],
+          model: "llama-3.1-8b-instant",
+          max_tokens: 500
+        });
+        const rawScript = chatCompletion.choices[0]?.message?.content ?? "";
+        scriptContent = normalizeSpokenScriptForTTS(rawScript);
       }
 
-      // Return the script text only — browser will use Web Speech API to speak it
-      previewResult = {
-        type: "audio",
-        url: null,
-        data: scriptContent.slice(0, 4500)
-      };
+      if (!scriptContent.trim()) throw new Error("Audio preview: empty script");
+
+      // ── Murf AI TTS ──────────────────────────────────────────────────
+      const murfKey = process.env.MURF_API_KEY;
+
+      if (!murfKey) {
+        console.warn("[Murf] MURF_API_KEY not set — falling back to browser TTS");
+        previewResult = { type: "audio", url: null, data: scriptContent.slice(0, 4500) };
+      } else {
+        // ── Murf voice selection: explicit UI button → speaker name heuristic → default female ──
+        const explicitGender = (variables?.voice_gender || '').toLowerCase();
+
+        let wantsMale;
+        if (explicitGender === 'male') {
+          wantsMale = true;
+        } else if (explicitGender === 'female') {
+          wantsMale = false;
+        } else {
+          // Fallback: infer from speaker name
+          const speakerName = (variables?.speaker_name || variables?.Speaker_Name || '').toLowerCase();
+          const femaleNames = ['alice','anna','emma','olivia','sophia','emily','sarah','lisa','mary','jessica','jennifer','natalie','rachel','grace','priya','ananya'];
+          const maleNames   = ['john','james','david','michael','robert','marcus','daniel','alex','raj','arjun','sam','adam','chris','kevin','tyler'];
+          const speakerIsMale   = maleNames.some(n => speakerName.includes(n));
+          const speakerIsFemale = femaleNames.some(n => speakerName.includes(n));
+          wantsMale = speakerIsMale && !speakerIsFemale;
+        }
+
+        const voiceId     = wantsMale ? 'marcus' : 'natalie';
+        const genderLabel = wantsMale ? 'Male (Marcus)' : 'Female (Natalie)';
+        console.log(`[Murf] Voice: ${genderLabel} (source: ${explicitGender || 'inferred'})`);
+
+        // Murf free plan: max ~3000 chars per request
+        const ttsText = scriptContent.slice(0, 3000);
+
+        try {
+          const murfRes = await fetch("https://global.api.murf.ai/v1/speech/stream", {
+            method: "POST",
+            headers: {
+              "api-key": murfKey,
+              "Content-Type": "application/json"
+            },
+            body: JSON.stringify({
+              text: ttsText,
+              voice_id: voiceId,  // just "natalie" or "marcus" — no locale prefix
+              model: "FALCON",
+              sample_rate: 24000
+              // no format field — let Murf use its default to avoid 406
+            })
+          });
+
+          const contentType = murfRes.headers.get("content-type") || "";
+          if (!murfRes.ok || contentType.includes("application/json")) {
+            const errText = await murfRes.text();
+            console.error("[Murf] TTS error:", murfRes.status, errText);
+            previewResult = { type: "audio", url: null, data: scriptContent.slice(0, 4500) };
+          } else {
+            const audioBuffer = await murfRes.arrayBuffer();
+            if (!audioBuffer.byteLength) {
+              console.error("[Murf] Empty audio response");
+              previewResult = { type: "audio", url: null, data: scriptContent.slice(0, 4500) };
+            } else {
+              const base64Audio = Buffer.from(audioBuffer).toString("base64");
+              previewResult = {
+                type: "audio",
+                url: `data:audio/mpeg;base64,${base64Audio}`,
+                data: scriptContent.slice(0, 4500),
+                voiceLabel: genderLabel
+              };
+              console.log(`[Murf] Audio generated: ${audioBuffer.byteLength} bytes`);
+            }
+          }
+        } catch (murfErr) {
+          console.error("[Murf] Fetch error:", murfErr.message);
+          previewResult = { type: "audio", url: null, data: scriptContent.slice(0, 4500) };
+        }
+      }
     }
 
     // ---------------------------------------------------------

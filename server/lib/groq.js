@@ -451,7 +451,7 @@ STRATEGY:
 DOMAIN INTELLIGENCE — Use these to ask SMART, SPECIFIC questions:
 - TEACHER/EDUCATOR: D1=lesson type(quiz/plan/explanation), D2=what subject+grade they teach, D3=topic+learning objective+duration, D4=lesson plan format, D5=curriculum board
 - FARMER/AGRICULTURAL: D1=specific problem(disease/yield/pest/irrigation), D2=what crop+region they work with, D3=crop+symptoms+season+location, D4=recommendation+steps, D5=local language+seasonal constraints
-- LAWYER/LEGAL: D1=legal task(explain concept/draft/analyze/advise), D2=what area of law+jurisdiction they deal with, D3=legal situation+relevant section+state, D4=plain-language explanation+relevant laws, D5=Indian law(BNS/IPC/CrPC)+state
+- LAWYER/LEGAL: D1=legal task(explain concept/draft/analyze/advise), D2=what area of law+jurisdiction they deal with, D3=what the user would describe in their own words (incident_description, their_role, state/city) — NEVER ask for section numbers since non-experts don't know them, D4=plain-language explanation+relevant laws cited by AI, D5=Indian law(BNS/IPC/CrPC)+state
 - CONTENT CREATOR: D1=content type(blog/caption/script/reel), D2=what niche+platform they post on, D3=topic+tone+word count+keywords, D4=ready-to-post format, D5=brand voice+SEO rules
 - INDUSTRIAL: D1=inspection task(defect/quality/measurement), D2=what product+industry they work in, D3=product details+defect type+criteria, D4=pass/fail report, D5=tolerance standards
 - BACKGROUND REMOVAL (image): D1=use case(e-commerce/portrait/social), D2=what type of images they work with, D3=source_image+output_background, D4=transparent PNG/white/custom, D5=batch needs+edge cases
@@ -472,6 +472,11 @@ VARIABLE QUALITY (only in "ready" response):
 - Exactly 3-4 variables, snake_case, domain-specific names
 - Each has: name, a descriptive placeholder, a realistic test_value
 - Variables = the EXACT data the end-user types in when running the app
+- ⚠️ USER PERSPECTIVE RULE: NEVER create variables requiring domain expertise the end-user doesn't have
+  BAD: section_number (user doesn't know IPC sections), diagnosis_code, article_citation, statute_reference
+  GOOD: incident_description ("what happened"), situation_type ("type of dispute"), location, their_role
+  For LEGAL apps: user describes what happened → AI identifies the law. Never ask user to provide the law.
+  For MEDICAL apps: user describes symptoms → AI identifies condition. Never ask for diagnosis codes.
 - For image/vision apps requiring file upload: include {"name": "source_image", "placeholder": "Upload your image", "test_value": "photo of product"}
 - options = 4 specific, compelling features of THIS exact app (not generic)
 
@@ -480,7 +485,7 @@ Return STRICTLY as JSON (no markdown, no explanation outside JSON):
   "status": "needs_context" | "ready",
   "domain_identified": "Specific domain, e.g.: Agricultural - Crop Disease Detection",
   "dimensions_covered": ["D1", "D3"],
-  "question": "ONLY if needs_context: one focused question targeting the most important missing dimension. Include 2-3 inline examples to guide the user.",
+  "question": "ONLY if needs_context: one focused question targeting the most important missing dimension. Include 2-3 inline examples to guide the user — write examples as plain text inside parentheses like (e.g., episode title, speaker name, script notes). NEVER wrap examples in single quotes or double quotes.",
   "form": {
     "options": ["4 specific features of this exact app"],
     "variables": [{"name": "snake_case_name", "placeholder": "specific helpful hint", "test_value": "realistic domain example"}]
@@ -587,7 +592,7 @@ App type is LOCKED to: "${formatFallback}" — do NOT ask the user to choose an 
 Language mode: ${safeLang}.${answeredContext}
 
 Look at the conversation history. If it already answers the key domain questions (use case, vertical, output format), return "ready" with domain-appropriate variables immediately.
-If still unclear on ONE key dimension, ask exactly ONE focused question — suggest 2-3 specific examples inline to guide the user.
+If still unclear on ONE key dimension, ask exactly ONE focused question — suggest 2-3 specific examples inline to guide the user, formatted as plain text inside parentheses like (e.g., example one, example two) — NEVER use single quotes or double quotes around example phrases.
 Do NOT ask generic questions. Do NOT re-ask what has already been answered above.`;
 
   const triageMessages = [

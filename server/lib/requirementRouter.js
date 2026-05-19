@@ -1,10 +1,9 @@
 
 const OFF_TOPIC_KEYWORDS = [
-  // science/general knowledge
+  // science/general knowledge (these only fire when there's NO active session)
   'gravity','physics','chemistry','biology','history',
   'math','equation','formula','theorem','law of',
   'what is','who is','who was','when did','where is',
-  'explain','define','meaning of','tell me about',
   'capital of','population of','how far','how old',
   // weather/news
   'weather','news','stock','price of bitcoin',
@@ -17,6 +16,8 @@ const OFF_TOPIC_KEYWORDS = [
   'are you human','are you ai','who made you',
   // harmful
   'hack','crack','illegal','kill','weapon'
+  // NOTE: 'explain', 'define', 'meaning of', 'tell me about' intentionally removed
+  // — these are common triage answers (e.g. "explain a section", "define a term")
 ];
 
 const QUESTION_STARTERS = [
@@ -38,9 +39,18 @@ const APP_CONTEXT_WORDS = [
   'generator','creator','builder'
 ];
 
-export function isOffTopic(message) {
+export function isOffTopic(message, session) {
   const msg = message.toLowerCase().trim();
   if (msg.length < 4) return false;
+
+  // NEVER fire off-topic detection mid-conversation
+  // If the session has history or active triage, the user is answering our questions
+  if (session) {
+    const hasHistory = Array.isArray(session.history) && session.history.length > 1;
+    const hasTriage  = (session.triageRounds || 0) > 0 || session.awaitingTriageAnswer === true;
+    const hasContext = session.dynamicContext || session.appType;
+    if (hasHistory || hasTriage || hasContext) return false;
+  }
 
   // If the message contains app-creation context words,
   // it's NOT off-topic even if it contains a keyword match

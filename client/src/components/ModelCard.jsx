@@ -121,7 +121,7 @@ function ModelCard({ model, onSendMessage, isTop3 = true, isLoading }) {
             onClick={() => onSendMessage(`Select ${model.name}`)}
             className="btn-cta h-10 w-full rounded-xl text-xs font-bold text-white sm:h-12 sm:text-sm transition-all duration-300 ease-in-out hover:scale-[1.02] hover:shadow-[0_0_16px_rgba(168,85,247,0.25)] active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed"
           >
-            Select Model
+            Select {model.name}
           </button>
         </div>
       </div>

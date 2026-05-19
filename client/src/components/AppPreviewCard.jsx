@@ -26,6 +26,7 @@ export default function AppPreviewCard({ data, onSendMessage, sessionId, storage
   const [previewError, setPreviewError] = useState('');
   const [imageError, setImageError] = useState(false);
   const [testImage, setTestImage] = useState(null);
+  const [testImageInfo, setTestImageInfo] = useState(null); // { w, h, kb }
 
   const storageKey = useMemo(
     () => livePreviewStorageKey(sessionId, storageMessageId),
@@ -72,6 +73,32 @@ export default function AppPreviewCard({ data, onSendMessage, sessionId, storage
     if (previewResult?.url) setImageError(false);
   }, [previewResult?.url]);
 
+  /** Resize + compress an image File to a base64 JPEG, max 900px on longest side. */
+  function compressImageToBase64(file, maxPx = 900, quality = 0.85) {
+    return new Promise((resolve) => {
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        const img = new Image();
+        img.onload = () => {
+          const { width, height } = img;
+          const scale = Math.min(1, maxPx / Math.max(width, height));
+          const w = Math.round(width * scale);
+          const h = Math.round(height * scale);
+          const canvas = document.createElement('canvas');
+          canvas.width = w;
+          canvas.height = h;
+          const ctx = canvas.getContext('2d');
+          ctx.drawImage(img, 0, 0, w, h);
+          const dataUrl = canvas.toDataURL('image/jpeg', quality);
+          const kb = Math.round((dataUrl.length * 3) / 4 / 1024);
+          resolve({ dataUrl, w, h, kb });
+        };
+        img.src = e.target.result;
+      };
+      reader.readAsDataURL(file);
+    });
+  }
+
   if (!data) return null;
 
   // Format variables beautifully
@@ -82,6 +109,14 @@ export default function AppPreviewCard({ data, onSendMessage, sessionId, storage
       part.startsWith('$$') ? <span key={i} className="text-rent-purple font-semibold">{part}</span> : part
     );
   };
+
+  // Convert snake_case or camelCase variable names to readable Title Case labels
+  const toLabel = (name) =>
+    String(name || '')
+      .replace(/([a-z])([A-Z])/g, '$1 $2')   // camelCase → words
+      .replace(/[_-]+/g, ' ')                  // snake_case → words
+      .replace(/\b\w/g, (c) => c.toUpperCase()) // capitalize each word
+      .trim();
 
   const handleEditSubmit = () => {
     if (editInstruction.trim()) {
@@ -186,17 +221,52 @@ export default function AppPreviewCard({ data, onSendMessage, sessionId, storage
 
               return (
                 <div key={i} className="flex flex-col gap-1.5">
-                  <label className="text-xs text-gray-300 ml-1 font-medium">{varName}</label>
-                  <input
-                    type="text"
+                  <label className="text-xs text-gray-300 ml-1 font-medium">{toLabel(varName)}</label>
+                  <textarea
+                    rows={1}
                     value={testInputs[varName] || ''}
                     onChange={(e) => handleTestInputChange(varName, e.target.value)}
+                    onInput={(e) => {
+                      e.target.style.height = 'auto';
+                      e.target.style.height = e.target.scrollHeight + 'px';
+                    }}
                     placeholder={placeholderText}
-                    className="w-full bg-[#121018] border border-white/[0.06] rounded-xl px-4 py-2.5 text-sm text-gray-200 outline-none focus:outline-none focus:ring-1 focus:ring-purple-500/50 focus:border-purple-500/30 transition-all duration-300 placeholder:text-gray-600"
+                    className="w-full bg-[#121018] border border-white/[0.06] rounded-xl px-4 py-2.5 text-sm text-gray-200 outline-none focus:outline-none focus:ring-1 focus:ring-purple-500/50 focus:border-purple-500/30 transition-all duration-200 placeholder:text-gray-600 resize-none overflow-hidden leading-relaxed"
                   />
                 </div>
               );
             })}
+
+            {/* Voice gender selector for audio apps */}
+            {data.appType?.toLowerCase() === 'audio' && (
+              <div className="flex flex-col gap-2 p-3 rounded-xl border border-purple-500/20 bg-purple-500/5">
+                <label className="text-xs text-[#a77bf3] font-semibold uppercase tracking-wider">🎙 Voice Gender</label>
+                <div className="flex gap-2">
+                  <button
+                    type="button"
+                    onClick={() => handleTestInputChange('voice_gender', 'female')}
+                    className={`flex-1 py-2 rounded-lg text-sm font-semibold border transition-all ${
+                      testInputs['voice_gender'] !== 'male'
+                        ? 'bg-pink-500/20 border-pink-500/40 text-pink-300'
+                        : 'bg-white/5 border-white/10 text-gray-500 hover:border-white/20'
+                    }`}
+                  >
+                    ♀ Female (Natalie)
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleTestInputChange('voice_gender', 'male')}
+                    className={`flex-1 py-2 rounded-lg text-sm font-semibold border transition-all ${
+                      testInputs['voice_gender'] === 'male'
+                        ? 'bg-blue-500/20 border-blue-500/40 text-blue-300'
+                        : 'bg-white/5 border-white/10 text-gray-500 hover:border-white/20'
+                    }`}
+                  >
+                    ♂ Male (Marcus)
+                  </button>
+                </div>
+              </div>
+            )}
 
             {(data.appType?.toLowerCase() === 'vision' || data.appType?.toLowerCase() === 'image') && (
               <div className="flex flex-col gap-1.5 mb-3">
@@ -212,12 +282,18 @@ export default function AppPreviewCard({ data, onSendMessage, sessionId, storage
                     >✕</button>
                   </div>
                 )}
-                <input 
-                  type="file" 
+                <input
+                  type="file"
                   accept="image/*"
-                  onChange={(e) => {
+                  onChange={async (e) => {
                     const file = e.target.files[0];
-                    if(file) {
+                    if (!file) return;
+                    try {
+                      const { dataUrl, w, h, kb } = await compressImageToBase64(file);
+                      setTestImage(dataUrl);
+                      setTestImageInfo({ w, h, kb });
+                    } catch {
+                      // Fallback: send raw (server limit is now 15MB)
                       const reader = new FileReader();
                       reader.onloadend = () => setTestImage(reader.result);
                       reader.readAsDataURL(file);
@@ -293,54 +369,74 @@ export default function AppPreviewCard({ data, onSendMessage, sessionId, storage
                   )
                 )}
 
-                {/* Audio Output — Web Speech API (browser-native, no API key needed) */}
+                {/* Audio Output — ElevenLabs TTS (with Web Speech fallback) */}
                 {previewResult.type === 'audio' && (
                   <div className="bg-[#1a1525] rounded-xl border border-[#3b2d50] p-5 mb-3 shadow-lg">
                     <div className="flex items-center justify-between mb-4">
                       <div>
                         <h4 className="text-sm font-bold text-gray-200">Audio Preview</h4>
-                        <p className="text-xs text-gray-500 mt-0.5">Powered by your browser's built-in voice engine</p>
+                        <p className="text-xs text-gray-500 mt-0.5">
+                          {previewResult.url
+                            ? `Powered by Murf AI · ${previewResult.voiceLabel || 'AI Voice'}`
+                            : "Powered by your browser's built-in voice engine"}
+                        </p>
                       </div>
-                      <button
-                        onClick={() => {
-                          if (!previewResult.data) return;
-                          if (isSpeaking) {
+
+                      {/* Fallback: Web Speech play button — only shown when no ElevenLabs audio */}
+                      {!previewResult.url && (
+                        <button
+                          onClick={() => {
+                            if (!previewResult.data) return;
+                            if (isSpeaking) {
+                              window.speechSynthesis.cancel();
+                              setIsSpeaking(false);
+                              return;
+                            }
+                            const utter = new SpeechSynthesisUtterance(previewResult.data);
+                            utter.rate = 1;
+                            utter.pitch = 1;
+                            utter.lang = 'en-US';
+                            utter.onstart = () => setIsSpeaking(true);
+                            utter.onend = () => setIsSpeaking(false);
+                            utter.onerror = () => setIsSpeaking(false);
                             window.speechSynthesis.cancel();
-                            setIsSpeaking(false);
-                            return;
-                          }
-                          const utter = new SpeechSynthesisUtterance(previewResult.data);
-                          utter.rate = 1;
-                          utter.pitch = 1;
-                          utter.lang = 'en-US';
-                          utter.onstart = () => setIsSpeaking(true);
-                          utter.onend = () => setIsSpeaking(false);
-                          utter.onerror = () => setIsSpeaking(false);
-                          window.speechSynthesis.cancel();
-                          window.speechSynthesis.speak(utter);
-                        }}
-                        className={`flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-semibold transition-all duration-300 ease-in-out ${
-                          isSpeaking
-                            ? 'bg-red-500/20 text-red-400 border border-red-500/30 hover:bg-red-500/30'
-                            : 'bg-[#7c3aed] text-white hover:bg-[#6d28d9] hover:shadow-[0_0_16px_rgba(124,58,237,0.3)]'
-                        }`}
-                      >
-                        {isSpeaking ? (
-                          <>
-                            <span className="relative flex h-2 w-2">
-                              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-red-400 opacity-75" />
-                              <span className="relative inline-flex rounded-full h-2 w-2 bg-red-500" />
-                            </span>
-                            Stop
-                          </>
-                        ) : (
-                          <>
-                            <svg viewBox="0 0 20 20" fill="currentColor" className="h-4 w-4"><path d="M6.3 2.841A1.5 1.5 0 0 0 4 4.11V15.89a1.5 1.5 0 0 0 2.3 1.269l9.344-5.89a1.5 1.5 0 0 0 0-2.538L6.3 2.84z"/></svg>
-                            Play
-                          </>
-                        )}
-                      </button>
+                            window.speechSynthesis.speak(utter);
+                          }}
+                          className={`flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-semibold transition-all duration-300 ease-in-out ${
+                            isSpeaking
+                              ? 'bg-red-500/20 text-red-400 border border-red-500/30 hover:bg-red-500/30'
+                              : 'bg-[#7c3aed] text-white hover:bg-[#6d28d9] hover:shadow-[0_0_16px_rgba(124,58,237,0.3)]'
+                          }`}
+                        >
+                          {isSpeaking ? (
+                            <>
+                              <span className="relative flex h-2 w-2">
+                                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-red-400 opacity-75" />
+                                <span className="relative inline-flex rounded-full h-2 w-2 bg-red-500" />
+                              </span>
+                              Stop
+                            </>
+                          ) : (
+                            <>
+                              <svg viewBox="0 0 20 20" fill="currentColor" className="h-4 w-4"><path d="M6.3 2.841A1.5 1.5 0 0 0 4 4.11V15.89a1.5 1.5 0 0 0 2.3 1.269l9.344-5.89a1.5 1.5 0 0 0 0-2.538L6.3 2.84z"/></svg>
+                              Play
+                            </>
+                          )}
+                        </button>
+                      )}
                     </div>
+
+                    {/* ElevenLabs native audio player */}
+                    {previewResult.url && (
+                      <audio
+                        src={previewResult.url}
+                        controls
+                        autoPlay
+                        className="w-full rounded-lg mb-4 accent-[#7c3aed]"
+                        style={{ colorScheme: 'dark' }}
+                      />
+                    )}
+
                     <div className="p-4 bg-black/40 rounded-lg text-sm text-gray-300 leading-relaxed border border-white/5">
                       <span className="text-xs font-semibold text-[#a77bf3] uppercase tracking-wide block mb-2">Script (spoken)</span>
                       <p className="whitespace-pre-wrap">{previewResult.data}</p>

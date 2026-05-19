@@ -1,3 +1,4 @@
+import { useState } from "react";
 import BudgetCards from "./BudgetCards";
 import ScopeCard from "./ScopeCard";
 import BountyFallbackCard from "./BountyFallbackCard";
@@ -95,13 +96,41 @@ function AgentUI(props) {
   return null;
 }
 
-function MessageBubble({ message, onSendMessage, onResetSession, isLoading, sessionId = "" }) {
+function MessageBubble({ message, onSendMessage, onResetSession, onEditMessage, isLoading, sessionId = "" }) {
   const isUser = message.role === "user";
+  const [copied, setCopied] = useState(false);
 
   // Clean up the displayed text so the user's bubble looks natural
   let displayText = message.text || "";
   if (isUser && displayText.toLowerCase().startsWith("select ")) {
     displayText = `I choose ${displayText.slice(7).trim()}`;
+  }
+
+  function handleCopy(textToCopy) {
+    const plain = String(textToCopy || "").replace(/\*\*/g, "").replace(/\*/g, "").trim();
+    if (!plain) return;
+    navigator.clipboard.writeText(plain).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    }).catch(() => {
+      // Fallback for browsers without clipboard API
+      const ta = document.createElement("textarea");
+      ta.value = plain;
+      ta.style.position = "fixed";
+      ta.style.opacity = "0";
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand("copy");
+      document.body.removeChild(ta);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    });
+  }
+
+  function handleEdit() {
+    // Put the raw original text back into the input so the user can modify + resend
+    const rawText = message.text || "";
+    if (onEditMessage) onEditMessage(rawText);
   }
 
   return (
@@ -143,19 +172,51 @@ function MessageBubble({ message, onSendMessage, onResetSession, isLoading, sess
 
         {/* Action buttons */}
         <div className={`mt-1.5 flex items-center gap-1 ${isUser ? "justify-end" : ""}`}>
+          {/* Agent message: copy button */}
           {!isUser ? (
-            <button type="button" className="inline-flex h-7 w-7 items-center justify-center rounded-lg text-white/25 transition hover:bg-white/5 hover:text-white/50">
-              <IconCopy />
+            <button
+              type="button"
+              title="Copy reply"
+              onClick={() => handleCopy(message.text)}
+              className="inline-flex h-7 w-7 items-center justify-center rounded-lg text-white/25 transition hover:bg-white/5 hover:text-white/60 active:scale-90"
+            >
+              {copied ? (
+                <svg viewBox="0 0 20 20" fill="none" className="h-3.5 w-3.5 text-green-400">
+                  <path d="M4 10l4.5 4.5L16 6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+                </svg>
+              ) : (
+                <IconCopy />
+              )}
             </button>
           ) : null}
+
+          {/* User message: edit button — pre-fills input with original text */}
           {isUser ? (
-            <button type="button" className="inline-flex h-7 w-7 items-center justify-center rounded-lg text-white/25 transition hover:bg-white/5 hover:text-white/50">
+            <button
+              type="button"
+              title="Edit message"
+              onClick={handleEdit}
+              className="inline-flex h-7 w-7 items-center justify-center rounded-lg text-white/25 transition hover:bg-white/5 hover:text-white/60 active:scale-90"
+            >
               <IconEdit />
             </button>
           ) : null}
+
+          {/* User message: copy button */}
           {isUser ? (
-            <button type="button" className="inline-flex h-7 w-7 items-center justify-center rounded-lg text-white/25 transition hover:bg-white/5 hover:text-white/50">
-              <IconCopy />
+            <button
+              type="button"
+              title="Copy message"
+              onClick={() => handleCopy(message.text)}
+              className="inline-flex h-7 w-7 items-center justify-center rounded-lg text-white/25 transition hover:bg-white/5 hover:text-white/60 active:scale-90"
+            >
+              {copied ? (
+                <svg viewBox="0 0 20 20" fill="none" className="h-3.5 w-3.5 text-green-400">
+                  <path d="M4 10l4.5 4.5L16 6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+                </svg>
+              ) : (
+                <IconCopy />
+              )}
             </button>
           ) : null}
         </div>

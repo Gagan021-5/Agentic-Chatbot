@@ -86,9 +86,16 @@ function rankModels(availableModels, userInput, budgetStr) {
     }
   }
 
-  // UNMATCHABLE BUDGET GUARD (If budget is too strict, return absolute cheapest)
+  // UNMATCHABLE BUDGET GUARD
+  // For premium/medium tiers, show the TOP (most expensive) models when no exact match exists.
+  // For free/low, fall back to cheapest.
   if (filtered.length === 0) {
-    return [...availableModels].sort((a, b) => a.cost - b.cost).slice(0, 3);
+    const isPremiumIntent = b.includes("premium") || b.includes("best") || b.includes("> 20");
+    const isMediumIntent  = b.includes("medium") || b.includes("5-20") || b.includes("5 - 20");
+    if (isPremiumIntent || isMediumIntent) {
+      return [...availableModels].sort((a, bm) => bm.cost - a.cost).slice(0, 3);
+    }
+    return [...availableModels].sort((a, bm) => a.cost - bm.cost).slice(0, 3);
   }
 
   // 2. SCORING ENGINE
@@ -494,6 +501,84 @@ function getNextDeepQuestion(session) {
   return null;
 }
 
+/* ────────────────────────────────────────────
+   APPLY EDIT TO SESSION — rewrites session state so generatePromptTemplate
+   gets clean, up-to-date context instead of old ghost memory.
+   Call this BEFORE generatePromptTemplate on every edit path.
+   ──────────────────────────────────────────── */
+function applyEditToSession(session, editInstruction) {
+  const instr = String(editInstruction || '').trim().toLowerCase();
+  if (!instr) return;
+
+  // 1. Update appPurpose to include the edit intent
+  if (session.extraction) {
+    const oldPurpose = session.extraction.appPurpose || '';
+    // Avoid duplicating if already in there
+    if (!oldPurpose.toLowerCase().includes(instr.slice(0, 20))) {
+      session.extraction.appPurpose = `${oldPurpose} (updated: ${editInstruction.trim()})`;
+    }
+    session.extraction.oneLineUnderstanding = session.extraction.appPurpose;
+  }
+
+  // 2. Remove / replace deepAnswers keys that conflict with the edit
+  if (session.deepAnswers && typeof session.deepAnswers === 'object') {
+    // Detect "transparent" or "no background" edits → kill scene/background answers
+    const wantsTransparent = /transparent|no background|remove background|no bg/i.test(editInstruction);
+    const wantsNewBackground = /background|backdrop|scene|environment/i.test(editInstruction);
+    // Detect "no X" pattern — user explicitly rejecting a value
+    const noXMatch = editInstruction.match(/no\s+(\w+)/i);
+
+    const keysToRemove = [];
+    for (const [k, v] of Object.entries(session.deepAnswers)) {
+      const kl = k.toLowerCase();
+      const vl = String(v || '').toLowerCase();
+
+      if (wantsTransparent && /scene|background|forest|nature|backdrop|environment|location|setting/i.test(kl)) {
+        keysToRemove.push(k);
+      } else if (wantsNewBackground && /scene|background|backdrop|environment/i.test(kl)) {
+        // Replace old value with the new instruction
+        session.deepAnswers[k] = editInstruction.trim();
+      } else if (noXMatch) {
+        const rejectedWord = noXMatch[1].toLowerCase();
+        if (vl.includes(rejectedWord) || kl.includes(rejectedWord)) {
+          keysToRemove.push(k);
+        }
+      }
+    }
+    keysToRemove.forEach(k => delete session.deepAnswers[k]);
+
+    // If transparent, also store this as a positive requirement
+    if (wantsTransparent) {
+      session.deepAnswers.outputType = 'transparent PNG';
+      session.deepAnswers.backgroundType = 'transparent';
+    }
+  }
+
+  // 3. Rebuild dynamicContext variables to strip obsolete ones
+  if (session.dynamicContext?.variables) {
+    const wantsTransparent = /transparent|no background|remove background|no bg/i.test(editInstruction);
+    if (wantsTransparent) {
+      // Remove scene/forest/backdrop variables — they conflict with transparent background
+      session.dynamicContext.variables = session.dynamicContext.variables.filter(v => {
+        const vname = (typeof v === 'object' ? v.name : String(v)).toLowerCase();
+        return !/scene|forest|nature|backdrop|environment|location|background_scene|forest_scene/i.test(vname);
+      });
+    }
+  }
+
+  // 4. Store the edit instruction so generatePromptTemplate sees it
+  if (!session.deepAnswers) session.deepAnswers = {};
+  session.deepAnswers.lastEditInstruction = editInstruction.trim();
+
+  // 5. Append to history so the LLM's context window reflects the change
+  if (Array.isArray(session.history)) {
+    session.history.push({
+      role: 'user',
+      content: `[EDIT REQUEST]: ${editInstruction.trim()}`
+    });
+  }
+}
+
 // FIXED: Removed ConfirmCard, set step=1
 async function showModels(session) {
   const fullText = [
@@ -659,7 +744,7 @@ function checkEdgeCases(message, session) {
     return null;
   }
 
-  if (isOffTopic(text)) return OFF_TOPIC_RESPONSE;
+  if (isOffTopic(text, session)) return OFF_TOPIC_RESPONSE;
 
   // JAILBREAK / PROMPT INJECTION GUARD
   const jailbreaks = ['ignore all previous', 'system prompt', 'developer mode', 'you are now', 'disregard instructions'];
@@ -701,10 +786,10 @@ function checkEdgeCases(message, session) {
   const trimmedText = text.trim();
   
   // 1. Pure Greeting Interceptor
-  // Catches "hello", "hi", "hey", "hy", "greetings" even with punctuation like "hello!!"
+  // Only fires at step 0 with no history — prevents "hey" inside a real word/sentence from triggering
   const isGreeting = /^(hi|hello|hey|hy|hola|greetings)[\s!\.]*$/i.test(trimmedText);
-  
-  if (isGreeting) {
+
+  if (isGreeting && session.step === 0 && (session.history || []).length < 3) {
     return {
       reply:
         "Hey! I'm the RentPrompts App Creation Agent. What kind of AI app would you like to build today? You can just describe what you want it to do.",
@@ -727,7 +812,9 @@ function checkEdgeCases(message, session) {
     /(.)\1{4,}/i.test(trimmedText) || // 5+ of the exact same character
     (!trimmedText.includes(' ') && trimmedText.length > 8 && /[0-9@#\$\%\^\&\*]/.test(trimmedText)); // NEW: 8+ chars, no spaces, mixed with numbers/symbols (catches 'asdasd@#q31')
 
-  if (isGibberish) {
+  // Only run gibberish detection at step 0 (no established session)
+  // Mid-conversation, unusual short inputs like "ipc" or domain jargon should never be rejected
+  if (isGibberish && session.step === 0) {
     return {
       // Changed the reply to be exactly what you want when nonsense is typed
       reply: `Sorry, I didn't quite get what you want to build today. What type of output does your app need?`,
@@ -815,6 +902,52 @@ export async function route(session, message) {
     };
   }
 
+  // ─── 2a. CHANGE-PREFIX FAST PATH (step 2 or 3) ───────────────────────────
+  // If the user explicitly prefixes with "Change:" while at the preview or publish step,
+  // NEVER run pivot detection — treat it as a direct app edit and return a fresh preview card.
+  if (
+    (session.step === 2 || session.step === 3) &&
+    /^change\s*:/i.test(msg)
+  ) {
+    const correction = text.replace(/^change\s*:/i, '').trim();
+    if (correction.length > 1) {
+      applyEditToSession(session, correction);
+      let promptData = session.promptData;
+      let seoData = session.seoData;
+      try {
+        [promptData, seoData] = await Promise.all([
+          generatePromptTemplate(session),
+          generateSEO(session)
+        ]);
+        session.promptData = promptData;
+        session.seoData = seoData;
+      } catch (e) {
+        console.warn('[Change-prefix fast path] Regen failed:', e.message);
+        session.promptData = applyPromptInstruction(session.promptData || {}, correction);
+      }
+      session.step = 2;
+      session.awaitingPromptTweak = false;
+      await saveSession(session);
+      return {
+        reply: `Done! I've updated the app: "${correction}".\n\nHere's the refreshed preview — test it out and approve when you're happy!`,
+        uiType: 'app_preview',
+        uiData: {
+          appName: session.seoData?.appName || 'Your App',
+          appType: session.appType || session.extraction?.appType || 'text',
+          appDescription: session.seoData?.appDescription || '',
+          cost: session.modelCost,
+          systemPrompt: session.promptData?.systemPrompt || '',
+          userPrompt: session.promptData?.userPrompt || '',
+          variablesUsed: session.promptData?.variablesUsed || [],
+          acceptImageInput: session.promptData?.acceptImageInput || false,
+          options: ['Approve App', 'Edit App']
+        },
+        nextStep: 2,
+        coins: session.modelCost
+      };
+    }
+  }
+
   // ─── 2. UNIVERSAL PIVOT & EDIT INTERCEPTOR ───
   const editTriggers = ['change ', 'update ', 'switch ', 'actually', 'instead', 'tweak', 'edit '];
   const isEditTrigger = editTriggers.some((t) => msg.includes(t)) || session.awaitingPromptTweak;
@@ -822,15 +955,23 @@ export async function route(session, message) {
   const formatRegex = /(image|video|audio|text|vision)\s+(app|generator|tool|creator)\b/i;
   const isNewFormatMentioned = formatRegex.test(msg);
 
+  // TRIAGE GUARD: If the user is answering a triage/clarification question at step 0,
+  // do NOT treat their reply as a major pivot — they're giving us the info we asked for.
+  const isAnsweringTriage = session.step === 0 &&
+    (session.awaitingTriageAnswer === true || (session.triageRounds || 0) > 0) &&
+    !isNewFormatMentioned; // Only allow format correction (e.g. "actually image") to still pivot
+
   const isMajorPivot =
-    isNewFormatMentioned ||
-    msg.includes('app type') ||
-    msg.includes('domain') ||
-    msg.includes('instead') ||
-    msg.includes('new app') ||
-    msg.includes('different app') ||
-    /^(i want (to )?(build|make|create)|let'?s (build|make|create)|build an?|make an?|create an?)/i.test(msg) ||
-    (session.awaitingPromptTweak && msg.includes('app'));
+    !isAnsweringTriage && (
+      isNewFormatMentioned ||
+      msg.includes('app type') ||
+      msg.includes('domain') ||
+      msg.includes('instead') ||
+      msg.includes('new app') ||
+      msg.includes('different app') ||
+      /^(i want (to )?(build|make|create)|let'?s (build|make|create)|build an?|make an?|create an?)/i.test(msg) ||
+      (session.awaitingPromptTweak && msg.includes('app'))
+    );
 
   if (
     (isEditTrigger || isMajorPivot) &&
@@ -920,12 +1061,35 @@ export async function route(session, message) {
     // C. Minor Tweak at the Preview Step
     if (session.step === 2) {
       session.awaitingPromptTweak = false;
-      session.promptData = applyPromptInstruction(session.promptData, message);
+      // Apply the edit to session context FIRST (kills ghost memory), then regenerate
+      applyEditToSession(session, message);
+      try {
+        const [newPromptData, newSeoData] = await Promise.all([
+          generatePromptTemplate(session),
+          generateSEO(session)
+        ]);
+        session.promptData = newPromptData;
+        session.seoData = newSeoData;
+      } catch (e) {
+        // Fallback: just patch the existing prompt text
+        console.warn('[Edit] Regen failed, keeping patched promptData:', e.message);
+        session.promptData = applyPromptInstruction(session.promptData, message);
+      }
       await saveSession(session);
       return {
-        reply: `Got it! I've updated the app logic based on your request: "${text}".\n\n**Updated Logic:**\n${session.promptData.userPrompt}\n\nReady to publish?`,
-        uiType: 'chips',
-        uiData: { options: ['Publish to Marketplace', 'Save Draft', 'Edit App'] },
+        reply: `Got it! I've updated the app based on your request: "${text}".\n\nCheck the refreshed preview below, test it out, then approve when ready.`,
+        uiType: 'app_preview',
+        uiData: {
+          appName: session.seoData?.appName || 'Your App',
+          appType: session.appType || session.extraction?.appType || 'text',
+          appDescription: session.seoData?.appDescription || '',
+          cost: session.modelCost,
+          systemPrompt: session.promptData.systemPrompt,
+          userPrompt: session.promptData.userPrompt,
+          variablesUsed: session.promptData.variablesUsed,
+          acceptImageInput: session.promptData.acceptImageInput,
+          options: ['Approve App', 'Edit App']
+        },
         nextStep: 2,
         coins: session.modelCost
       };
@@ -1051,6 +1215,23 @@ export async function route(session, message) {
 
   // ─── STEP 1: Model selection → generate config ───────────────────────
   if (session.step === 1) {
+    // ── BUDGET RE-ROLL DETECTOR ──────────────────────────────────────────
+    // Catches: "I want medium models", "show me low models", "switch to premium", etc.
+    // Fires when a budget tier keyword appears in ANY model-change intent message.
+    const budgetTierMatch = msg.match(/\b(free|low|medium|premium)\b/i);
+    const hasModelIntent = /\b(model|models|different|change|switch|show|want|use|prefer|budget)\b/i.test(msg);
+
+    if (budgetTierMatch && hasModelIntent && !text.toLowerCase().startsWith("select")) {
+      const newBudget = budgetTierMatch[1].toLowerCase();
+      if (!session.extraction) session.extraction = {};
+      session.extraction.budget = newBudget;
+      if (!session.deepAnswers) session.deepAnswers = {};
+      session.deepAnswers.budgetPreference = newBudget;
+      await saveSession(session);
+      return await showModels(session);
+    }
+    // ────────────────────────────────────────────────────────────────────
+
     const selectedModelId = parseSelectedModelId(text, MODELS[session.appType] || []);
 
     if (selectedModelId) {
@@ -1131,12 +1312,19 @@ export async function route(session, message) {
       await saveSession(session);
       
       const seoData = session.seoData || {};
-      const finalSummaryText = `🎉 **App Details Generated Successfully!**\n\n📝 **App Details**\n* **Name:** ${seoData.appName || 'Your App'}\n* **Description:** ${seoData.appDescription || ''}\n* **Category:** ${seoData.category || ''}\n* **Tags:** ${Array.isArray(seoData.tags) ? seoData.tags.join(", ") : "—"}\n\n⚙️ **Technical Architecture**\n* **Base API Cost:** ${session.modelCost} coins per run\n* **Suggested Retail Price:** ${seoData.suggestedPrice || session.modelCost * 1.2} coins per run\n\nReady to publish to the marketplace?`;
 
       return {
-        reply: finalSummaryText,
-        uiType: "chips",
-        uiData: { options: ['Publish to Marketplace', 'Save Draft', 'Edit App'] },
+        reply: `🎉 Your app is configured! Review the details below — you can edit the name, description, or tags before publishing.`,
+        uiType: "seo_preview",
+        uiData: {
+          appName: seoData.appName || 'Your App',
+          appDescription: seoData.appDescription || '',
+          category: seoData.category || '',
+          tags: Array.isArray(seoData.tags) ? seoData.tags : [],
+          appType: session.appType || 'text',
+          modelId: session.modelId,
+          costPerRun: session.modelCost
+        },
         nextStep: 3,
         coins: session.modelCost
       };
@@ -1145,12 +1333,34 @@ export async function route(session, message) {
     if (msg2.includes('tweak') || isChangeMessage(text)) {
       const correction = isChangeMessage(text) ? getChangeText(text) : null;
       if (correction) {
-        session.promptData = applyPromptInstruction(session.promptData, correction);
+        // Apply edit to session context FIRST (kills ghost memory), then regenerate
+        applyEditToSession(session, correction);
+        try {
+          const [newPromptData, newSeoData] = await Promise.all([
+            generatePromptTemplate(session),
+            generateSEO(session)
+          ]);
+          session.promptData = newPromptData;
+          session.seoData = newSeoData;
+        } catch (e) {
+          console.warn('[Step2 Edit] Regen failed, keeping patched promptData:', e.message);
+          session.promptData = applyPromptInstruction(session.promptData, correction);
+        }
         await saveSession(session);
         return {
-          reply: `Updated!\n\nUser Prompt: ${session.promptData.userPrompt}\n\nReady to approve?`,
-          uiType: 'chips',
-          uiData: { options: ['Approve App', 'Edit App'] },
+          reply: `Updated! Check the refreshed preview below — test it out, then approve when ready.`,
+          uiType: 'app_preview',
+          uiData: {
+            appName: session.seoData?.appName || 'Your App',
+            appType: session.appType || session.extraction?.appType || 'text',
+            appDescription: session.seoData?.appDescription || '',
+            cost: session.modelCost,
+            systemPrompt: session.promptData.systemPrompt,
+            userPrompt: session.promptData.userPrompt,
+            variablesUsed: session.promptData.variablesUsed,
+            acceptImageInput: session.promptData.acceptImageInput,
+            options: ['Approve App', 'Edit App']
+          },
           nextStep: 2,
           coins: session.modelCost
         };
@@ -1180,57 +1390,105 @@ export async function route(session, message) {
   if (session.step === 3) {
     const msg3 = lower(message);
 
-    if (msg3.includes('publish') || isYes(text)) {
-      const payload = {
-        appType: session.appType,
-        modelId: session.modelId,
-        costPerRun: session.modelCost,
-        systemPrompt: session.promptData?.systemPrompt,
-        userPrompt: session.promptData?.userPrompt,
-        negativePrompt: session.promptData?.negativePrompt,
-        acceptImageInput: session.promptData?.acceptImageInput,
-        appName: session.seoData?.appName,
-        appDescription: session.seoData?.appDescription,
-        tags: session.seoData?.tags,
-        publishedAt: new Date().toISOString()
-      };
+    // ── Handle SEO card actions (single message with embedded payload) ──
+    const isSeoPublish = message.startsWith('SEO_PUBLISH::');
+    const isSeoДraft   = message.startsWith('SEO_DRAFT::');
+    if (isSeoPublish || isSeoДraft) {
+      try {
+        const jsonStr  = message.slice(message.indexOf('::') + 2);
+        const cardData = JSON.parse(jsonStr);
+        // Merge card edits into session seoData
+        session.seoData = { ...session.seoData, ...cardData };
+        await saveSession(sessionId, session);
+        console.log('[stepRouter] SEO card data merged:', session.seoData?.appName);
+      } catch (e) {
+        console.warn('[stepRouter] Failed to parse SEO card payload:', e.message);
+      }
+      // Now proceed as publish or draft
+      if (isSeoPublish) {
+        const payload = {
+          appType:          session.appType,
+          modelId:          session.modelId,
+          costPerRun:       session.modelCost,
+          systemPrompt:     session.promptData?.systemPrompt,
+          userPrompt:       session.promptData?.userPrompt,
+          negativePrompt:   session.promptData?.negativePrompt,
+          acceptImageInput: session.promptData?.acceptImageInput,
+          appName:          session.seoData?.appName,
+          appDescription:   session.seoData?.appDescription,
+          tags:             session.seoData?.tags,
+          publishedAt:      new Date().toISOString()
+        };
+        console.log('\n══ MOCK PUBLISH ══');
+        console.log(JSON.stringify(payload, null, 2));
+        console.log('══════════════════\n');
+        await deleteSession(sessionId);
+        return {
+          reply: `🎉 Your app "${session.seoData?.appName}" is now live! Users will be charged ${payload.costPerRun} coins per generation.`,
+          uiType: "success",
+          uiData: {
+            appName:    session.seoData?.appName,
+            modelId:    session.modelId,
+            modelName:  session.modelName || session.modelId,
+            costPerRun: payload.costPerRun,
+            tags:       session.seoData?.tags,
+            mockUrl:    `https://rentprompts.ai/app/demo-${Date.now()}`
+          },
+          nextStep: 0,
+          coins: session.modelCost,
+          clearSession: true
+        };
+      } else {
+        // SEO_DRAFT — save draft silently
+        session.status = 'draft';
+        await saveSession(sessionId, session);
+        return {
+          reply: `Done! "${session.seoData?.appName}" saved as a draft. Publish anytime from your dashboard.`,
+          uiType: 'success',
+          uiData: { appName: session.seoData?.appName, status: 'Draft' },
+          nextStep: 0,
+          coins: null
+        };
+      }
+    }
 
+    if (msg3.includes('edit app') || msg3.includes('tweak') || isChangeMessage(text)) {
+      const correction = isChangeMessage(text) ? getChangeText(text) : text;
+      // Apply edit to session context FIRST (kills ghost memory), then regenerate
+      if (correction && correction.trim().length > 2) {
+        applyEditToSession(session, correction);
+      }
+      try {
+        const [newPromptData, newSeoData] = await Promise.all([
+          generatePromptTemplate(session),
+          generateSEO(session)
+        ]);
+        session.promptData = newPromptData;
+        session.seoData = newSeoData;
+      } catch (e) {
+        console.warn('[Step3 Edit] Regen failed, keeping patched promptData:', e.message);
+        if (session.promptData) session.promptData = applyPromptInstruction(session.promptData, correction);
+      }
+      session.step = 2;
+      session.awaitingPromptTweak = false;
+      await saveSession(session);
       return {
-        reply: `🎉 Your app "${session.seoData?.appName}" is now live! Users will be charged ${payload.costPerRun} coins per generation.`,
-        uiType: "success",
+        reply: isChangeMessage(text)
+          ? `Done! I've updated the app based on: "${correction}".\n\nHere's the refreshed preview — test it out and approve when you're happy!`
+          : "No problem! I've re-opened the app preview so you can make changes. Test it below, then approve to continue.",
+        uiType: 'app_preview',
         uiData: {
-          appName: session.seoData?.appName,
-          modelId: session.modelId,
-          costPerRun: payload.costPerRun,
-          tags: session.seoData?.tags,
-          mockUrl: `https://rentprompts.ai/app/demo-${Date.now()}`
+          appName: session.seoData?.appName || 'Your App',
+          appType: session.appType || session.extraction?.appType || 'text',
+          appDescription: session.seoData?.appDescription || '',
+          cost: session.modelCost,
+          systemPrompt: session.promptData.systemPrompt,
+          userPrompt: session.promptData.userPrompt,
+          variablesUsed: session.promptData.variablesUsed,
+          acceptImageInput: session.promptData.acceptImageInput,
+          options: ['Approve App', 'Edit App']
         },
-        nextStep: 0,
-        coins: session.modelCost,
-        clearSession: true
-      };
-    }
-
-    if (msg3.includes('draft') || msg3.includes('save')) {
-      session.status = 'draft';
-      await saveSession(session);
-      return {
-        reply: `Done! "${session.seoData?.appName}" saved as a draft. Publish anytime from your dashboard.`,
-        uiType: 'success',
-        uiData: { appName: session.seoData?.appName, status: 'Draft' },
-        nextStep: 0,
-        coins: null
-      };
-    }
-
-    if (msg3.includes('edit app') || msg3.includes('tweak')) {
-      session.awaitingPromptTweak = true;
-      await saveSession(session);
-      return {
-        reply: "What would you like to edit? You can change the AI Model, rewrite the prompt, or completely change the app idea.",
-        uiType: "text",
-        uiData: {},
-        nextStep: 3,
+        nextStep: 2,
         coins: session.modelCost
       };
     }

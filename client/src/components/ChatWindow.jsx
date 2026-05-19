@@ -57,6 +57,7 @@ function ChatWindow({ messages, isLoading, sendMessage, resetSession, sessionId 
   const [isListening, setIsListening] = useState(false);
   const recognitionRef = useRef(null);
   const viewportRef = useRef(null);
+  const inputRef = useRef(null);
 
   useEffect(() => {
     if (!viewportRef.current) return;
@@ -80,6 +81,12 @@ function ChatWindow({ messages, isLoading, sendMessage, resetSession, sessionId 
     if (!input.trim()) return;
     sendMessage(input);
     setInput("");
+  }
+
+  function handleEditMessage(text) {
+    setInput(text);
+    // Focus the input field so user can immediately modify and resend
+    setTimeout(() => inputRef.current?.focus(), 50);
   }
 
   function handleKeyDown(e) {
@@ -187,6 +194,7 @@ function ChatWindow({ messages, isLoading, sendMessage, resetSession, sessionId 
               sessionId={sessionId}
               onSendMessage={sendMessage}
               onResetSession={resetSession}
+              onEditMessage={handleEditMessage}
               isLoading={isLoading}
             />
           ))}
@@ -200,7 +208,7 @@ function ChatWindow({ messages, isLoading, sendMessage, resetSession, sessionId 
           <button type="button" className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-xl text-white/40 transition hover:bg-white/5 hover:text-white/70 sm:h-10 sm:w-10">
             <IconPaperclip />
           </button>
-          <input disabled={isLoading} value={input} onChange={(e) => setInput(e.target.value)} onKeyDown={handleKeyDown} placeholder="Describe your project, or attach a file." className="h-10 min-w-0 flex-1 bg-transparent text-sm text-gray-200 outline-none ring-0 focus:ring-0 focus:outline-none placeholder:text-white/30 sm:h-11 sm:text-[15px]" />
+          <input ref={inputRef} disabled={isLoading} value={input} onChange={(e) => setInput(e.target.value)} onKeyDown={handleKeyDown} placeholder="Describe your project, or attach a file." className="h-10 min-w-0 flex-1 bg-transparent text-sm text-gray-200 outline-none ring-0 focus:ring-0 focus:outline-none placeholder:text-white/30 sm:h-11 sm:text-[15px]" />
 
           {/* Mic Button — pulses red when listening */}
           <button

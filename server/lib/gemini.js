@@ -335,6 +335,20 @@ QUALITY RULES:
 7. DOMAIN GROUNDING: If the app is legal/medical/agricultural, explicitly define domain-specific terms in systemPrompt.
 8. DO NOT write generic prompts. Every sentence must be specific to THIS app's purpose.
 9. NEVER include in prompts: model names (e.g. "Nano Banana", "GPT"), coin costs, budget tiers, platform names ("RentPrompts"), or any internal metadata. Prompts must be self-contained instructions only.
+10. USER PERSPECTIVE PRINCIPLE (CRITICAL): Variables must reflect what a NON-EXPERT end-user can actually provide.
+    - WRONG: asking a layperson for "section_number", "diagnosis_code", "article_number", "statute_citation" — they DON'T know these
+    - RIGHT: ask for "incident_description" (what happened), "symptoms" (how they feel), "situation_type" (type of problem)
+    - The AI in the prompt should DERIVE the technical/legal/medical answer from the user's plain description
+    - LEGAL APPS: User describes the incident → AI identifies applicable sections → AI explains them in plain language
+    - MEDICAL APPS: User describes symptoms → AI identifies conditions → AI gives advice
+    - GOVERNMENT/COMPLIANCE APPS: User describes their situation → AI identifies relevant rules → AI explains them
+    - If variables list contains expert-level inputs (section numbers, code references), REPLACE them with plain-language equivalents
+11. CONFLICT DETECTION & ANTI-HALLUCINATION (CRITICAL for legal/medical/expert apps):
+    - If the app has multiple inputs that could contradict each other (e.g., section number + incident description), the generated systemPrompt MUST include a cross-validation instruction:
+      "CROSS-VALIDATION: Before answering, verify that all provided inputs are internally consistent. If $$section_number and $$incident_description describe different types of offenses, explicitly flag the mismatch: (1) state what IPC Section [X] actually covers, (2) identify which section correctly applies to the described incident, (3) explain the discrepancy in plain language. NEVER silently merge contradictory inputs into a fabricated answer."
+    - For legal apps: The AI must cite actual IPC/BNS section text and real-world examples. If unsure, it must say so — never invent section content.
+    - For medical apps: The AI must note when symptoms don't match stated diagnosis and recommend professional consultation.
+    - The CONSTRAINTS block in userPrompt must explicitly say: "Do NOT hallucinate section numbers, case outcomes, or legal precedents. If the input is ambiguous or contradictory, state that clearly."
 
 Return ONLY valid JSON:
 {
@@ -379,38 +393,47 @@ ${varList || 'Use the most logical 3-4 variables for this app type and purpose.'
 }
 
 export async function generateSEO(session) {
-  const systemPrompt = `You are an SEO & Monetization Expert for AI app marketplaces.
-Generate metadata that maximizes discoverability.
+  const systemPrompt = `You are an SEO Expert for an AI app marketplace.
+Generate marketplace metadata that describes what the app DOES for its users.
 ${LANGUAGE_MIRROR_DIRECTIVE}
 
 Rules:
-- App name: catchy, specific, under 55 characters.
-- Description: mentions model + main benefit, under 155 characters.
-- Tags: exactly 10 tags, lowercase, hyphens not spaces.
-- Category must be one of: creative, business, education,
-  healthcare, entertainment, productivity, social, other
-- Suggested Price: Set this to the exact base model cost + a small 10% to 20% creator markup.
-  This is a PER-GENERATION cost. Apps on this platform typically cost between 1 to 50 coins.
-  DO NOT suggest thousands of coins. Keep it realistic and competitive.
+- App name: SHORT, catchy, describes the USE CASE (not the model name). Under 55 characters.
+  GOOD examples: "Podcast Script to Voice", "Legal Contract Analyzer", "Crop Disease Detector"
+  BAD examples: "lyriaudio", "lyria-3-pro app", "GeminiText" — NEVER use model names as app names.
+- Description: 1 sentence explaining what the user can DO with the app. Under 155 characters.
+  Focus on the user's task, NOT the model. Do NOT mention model names like "lyria", "gemini", "groq".
+  Example: "Convert your podcast scripts into natural-sounding audio with a professional AI voice."
+- Tags: exactly 10 tags, lowercase, hyphens not spaces. Based on the app's use case and domain.
+- Category must be one of: creative, business, education, healthcare, entertainment, productivity, social, other
 
 Return ONLY valid JSON with this exact schema:
 {
   "appName": "string max 55 chars",
   "appDescription": "string max 155 chars",
-  "tags": ["tag1", "tag2", "tag3", "tag4", "tag5",
-           "tag6", "tag7", "tag8", "tag9", "tag10"],
-  "category": "creative | business | education | productivity | other",
-  "suggestedPrice": 12.5
+  "tags": ["tag1", "tag2", "tag3", "tag4", "tag5", "tag6", "tag7", "tag8", "tag9", "tag10"],
+  "category": "creative | business | education | productivity | other"
 }`;
 
+  const appPurpose = session.extraction?.appPurpose
+    || session.extraction?.oneLineUnderstanding
+    || '';
+  const deepAnswers = session.deepAnswers || {};
+  const triageHistory = (session.history || [])
+    .filter(m => m.role === 'user')
+    .map(m => m.content)
+    .join(' | ')
+    .slice(0, 600);
+
   const userContent = `
-Generate SEO metadata for this app:
-- App Type: ${session.appType}
-- Deep Answers: ${JSON.stringify(session.deepAnswers || {})}
-- Model Selected: ${session.modelId || 'unknown'}
-- Base Model Cost: ${session.modelCost || 0} coins
-- Generated System Prompt: ${session.promptData?.systemPrompt || 'N/A'}
+Generate SEO metadata for this AI app:
+- What the app does: ${appPurpose}
+- App type: ${session.appType}
+- User answers during setup: ${JSON.stringify(deepAnswers)}
+- Conversation context: ${triageHistory}
+- Model used (DO NOT use as app name): ${session.modelId || 'unknown'}
   `;
+
 
   try {
     const result = await callOpenRouter(systemPrompt, userContent);
@@ -419,14 +442,13 @@ Generate SEO metadata for this app:
   } catch (err) {
     console.error('[Sub-agent 3] Error:', err.message);
     return {
-      appName: `AI ${session.appType || 'Content'} Generator`,
-      appDescription: `Generate ${session.appType} content with AI. Fast, easy, professional results.`,
+      appName: `AI ${appPurpose || session.appType || 'Content'} Tool`,
+      appDescription: `${appPurpose || `Generate ${session.appType} content with AI`}. Fast, easy, professional results.`.slice(0, 155),
       tags: ['ai-generated', 'content-creation', 'automation',
              'ai-tool', 'no-code', 'productivity',
              session.appType || 'creative', 'rentprompts',
              'generative-ai', 'easy-to-use'],
-      category: 'creative',
-      suggestedPrice: (session.modelCost || 5) * 1.2
+      category: 'creative'
     };
   }
 }
