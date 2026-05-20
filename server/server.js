@@ -631,9 +631,15 @@ app.post('/api/test-preview', async (req, res) => {
           wantsMale = speakerIsMale && !speakerIsFemale;
         }
 
-        const voiceId     = wantsMale ? 'marcus' : 'natalie';
-        const genderLabel = wantsMale ? 'Male (Marcus)' : 'Female (Natalie)';
-        console.log(`[Murf] Voice: ${genderLabel} (source: ${explicitGender || 'inferred'})`);
+        // Murf voice IDs — FALCON model catalog only (Marcus is Gen2-only, not on FALCON)
+        // en-US-natalie = Female (works on FALCON), en-US-terrell = Male (deep, authoritative)
+        const MURF_VOICES = {
+          female: 'en-US-natalie',
+          male:   'en-US-terrell'   // Terrell: Calm, Conversational, Inspirational, Narration, Promo
+        };
+        const voiceId     = wantsMale ? MURF_VOICES.male : MURF_VOICES.female;
+        const genderLabel = wantsMale ? 'Male (Terrell)' : 'Female (Natalie)';
+        console.log(`[Murf] Voice: ${genderLabel} → voice_id: ${voiceId} (source: ${explicitGender || 'inferred'})`);
 
         // Murf free plan: max ~3000 chars per request
         const ttsText = scriptContent.slice(0, 3000);
@@ -647,10 +653,10 @@ app.post('/api/test-preview', async (req, res) => {
             },
             body: JSON.stringify({
               text: ttsText,
-              voice_id: voiceId,  // just "natalie" or "marcus" — no locale prefix
-              model: "FALCON",
+              voice_id: voiceId,
+              style: "Conversational",
               sample_rate: 24000
-              // no format field — let Murf use its default to avoid 406
+              // no 'model' or 'format' fields — let Murf use defaults to avoid 406
             })
           });
 

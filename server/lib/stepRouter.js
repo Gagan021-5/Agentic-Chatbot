@@ -624,7 +624,9 @@ async function buildStep0Response(session, text) {
       audio: [
         'audio generat', 'voiceover', 'voice over', 'text to speech', 'tts', 'speech generat',
         'music generat', 'podcast', 'narration', 'voice cloning', 'sound effect',
-        'audio app', 'speak text'
+        'audio app', 'speak text', 'spoken audio', 'verbal briefing', 'audio briefing',
+        'spoken summary', 'audio log', 'spoken log', 'verbal report', 'spoken report',
+        'convert to audio', 'read aloud', 'audio file', 'voice briefing', 'tts app'
       ],
       vision: [
         'crop disease', 'plant disease', 'detect disease', 'object detect', 'image analys',
@@ -740,7 +742,14 @@ function checkEdgeCases(message, session) {
   const msg = lower(text);
 
   // Skip edge case guards for structured UI payloads (form submissions, model selections, etc.)
-  if (text.startsWith("multi_select_form::") || text.startsWith("edit prompt::") || text.startsWith("confirm seo::")) {
+  if (
+    text.startsWith("multi_select_form::") ||
+    text.startsWith("edit prompt::") ||
+    text.startsWith("confirm seo::") ||
+    text.startsWith("SEO_PUBLISH::") ||
+    text.startsWith("SEO_DRAFT::") ||
+    text.startsWith("SEO_EDIT::")
+  ) {
     return null;
   }
 
@@ -889,6 +898,69 @@ export async function route(session, message) {
   const text = normalize(rawText);
   const msg = lower(text);
 
+  // ─── 0. SEO PUBLISH / DRAFT — MUST be first, before ANY extraction or keyword matching ───
+  // These payloads come from the SEOPreviewCard UI and contain JSON. They MUST NOT be
+  // processed as regular messages (keyword matching sees "cost" → fires "Great question!").
+  const isSeoPublish = text.startsWith('SEO_PUBLISH::');
+  const isSeoSaveDraft = text.startsWith('SEO_DRAFT::');
+  if (isSeoPublish || isSeoSaveDraft) {
+    // Ensure we're at step 3 — if session was cleared, still handle gracefully
+    try {
+      const jsonStr  = text.slice(text.indexOf('::') + 2);
+      const cardData = JSON.parse(jsonStr);
+      session.seoData = { ...session.seoData, ...cardData };
+      await saveSession(session);
+      console.log('[stepRouter] SEO card merged:', session.seoData?.appName);
+    } catch (e) {
+      console.warn('[stepRouter] Failed to parse SEO card payload:', e.message);
+    }
+    if (isSeoPublish) {
+      const payload = {
+        appType:          session.appType,
+        modelId:          session.modelId,
+        costPerRun:       session.modelCost,
+        systemPrompt:     session.promptData?.systemPrompt,
+        userPrompt:       session.promptData?.userPrompt,
+        negativePrompt:   session.promptData?.negativePrompt,
+        acceptImageInput: session.promptData?.acceptImageInput,
+        appName:          session.seoData?.appName,
+        appDescription:   session.seoData?.appDescription,
+        tags:             session.seoData?.tags,
+        publishedAt:      new Date().toISOString()
+      };
+      console.log('\n══ MOCK PUBLISH ══');
+      console.log(JSON.stringify(payload, null, 2));
+      console.log('══════════════════\n');
+      await deleteSession(session.sessionId);
+      return {
+        reply: `🎉 Your app "${session.seoData?.appName}" is now live! Users will be charged ${payload.costPerRun} coins per generation.`,
+        uiType: "success",
+        uiData: {
+          appName:    session.seoData?.appName,
+          modelId:    session.modelId,
+          modelName:  session.modelName || session.modelId,
+          costPerRun: payload.costPerRun,
+          tags:       session.seoData?.tags,
+          mockUrl:    `https://rentprompts.ai/app/demo-${Date.now()}`
+        },
+        nextStep: 0,
+        coins: session.modelCost,
+        clearSession: true
+      };
+    } else {
+      // SEO_DRAFT
+      session.status = 'draft';
+      await saveSession(session);
+      return {
+        reply: `Done! "${session.seoData?.appName}" saved as a draft. Publish anytime from your dashboard.`,
+        uiType: 'success',
+        uiData: { appName: session.seoData?.appName, status: 'Draft' },
+        nextStep: 0,
+        coins: null
+      };
+    }
+  }
+
   // ─── 1. EXPLICIT UI CHIP HANDLER ───
   if ((session.step === 2 || session.step === 3) && msg === 'edit app') {
     session.awaitingPromptTweak = true;
@@ -1030,6 +1102,54 @@ export async function route(session, message) {
         if (match) newType = match[1].toLowerCase();
       }
 
+      // ── FORMAT-ONLY PIVOT: User is changing the OUTPUT TYPE of the SAME app ──
+      // e.g., "change this to an audio app" / "make it generate audio instead"
+      // Keep ALL context (purpose, triage answers, model), just swap appType + regenerate.
+      // Do NOT wipe history — the user described their app already, no need to re-ask.
+      const isFormatOnlyPivot =
+        newType &&                                      // a valid new format was found
+        newType !== session.appType &&                  // it's actually different
+        session.extraction?.appPurpose &&               // we already know the app purpose
+        session.extraction.appPurpose.trim().length > 10 && // purpose is meaningful
+        !msg.includes('new app') &&
+        !msg.includes('different app') &&
+        !/^(i want (to )?(build|make|create)|let'?s (build|make|create)|build an?|make an?|create an?)/i.test(msg);
+
+      if (isFormatOnlyPivot) {
+        // Just swap the app type and regenerate — no triage restart!
+        session.appType = newType;
+        if (session.extraction) session.extraction.appType = newType;
+        // Reset dynamic context so the preview variables rebuild for the new type
+        session.dynamicContext = null;
+        session.modelId = null;
+        session.modelCost = null;
+        session.step = 0;
+        session.triageRounds = 0;
+        session.awaitingPromptTweak = false;
+        session.awaitingDeepAnswer = false;
+        session.currentDeepField = null;
+        // Keep: session.history, session.extraction.appPurpose, session.deepAnswers
+        await saveSession(session);
+
+        // Skip straight to model selection if we already have budget
+        const hasBudget = session.deepAnswers?.budgetPreference || session.extraction?.budget;
+        if (hasBudget) {
+          return await showModels(session);
+        }
+        // Otherwise just ask for budget (skip triage — purpose is already known)
+        session.currentDeepField = 'budgetPreference';
+        session.awaitingDeepAnswer = true;
+        await saveSession(session);
+        return {
+          reply: `Got it! Switching to an **${newType}** app — your incident briefing context is preserved.\n\nWhat budget per generation works for you?`,
+          uiType: 'chips',
+          uiData: { options: ['Free models only (0 coins)', 'Low (< 5 coins)', 'Medium (5 - 20 coins)', 'Premium (> 20 coins)'] },
+          nextStep: 0,
+          coins: null
+        };
+      }
+
+      // ── FULL PIVOT: Completely new app idea ──
       let cleanPurpose = text
         .replace(/\b(actually|instead|change it to|switch to|something different)\b/gi, "")
         .replace(/\bi want to (build|make|create) (a|an)\b/gi, "")
@@ -1041,12 +1161,12 @@ export async function route(session, message) {
         cleanPurpose = newType ? `${newType} generation app` : "a new idea";
       }
 
-      // WIPE EVERYTHING INCLUDING CHAT HISTORY SO IT DOESN'T CONFUSE NEW IDEAS WITH OLD ONES
+      // Wipe everything — completely new app idea
       session.dynamicContext = null;
       session.appType = newType || null;
       session.extraction = { appPurpose: cleanPurpose, confidence: {} };
       session.deepAnswers = {};
-      session.history = []; // <-- THIS KILLS THE GHOST MEMORY!
+      session.history = []; // Kill ghost memory for full pivots only
       session.step = 0;
       session.triageRounds = 0;
       session.awaitingPromptTweak = false;
@@ -1390,67 +1510,21 @@ export async function route(session, message) {
   if (session.step === 3) {
     const msg3 = lower(message);
 
-    // ── Handle SEO card actions (single message with embedded payload) ──
-    const isSeoPublish = message.startsWith('SEO_PUBLISH::');
-    const isSeoДraft   = message.startsWith('SEO_DRAFT::');
-    if (isSeoPublish || isSeoДraft) {
-      try {
-        const jsonStr  = message.slice(message.indexOf('::') + 2);
-        const cardData = JSON.parse(jsonStr);
-        // Merge card edits into session seoData
-        session.seoData = { ...session.seoData, ...cardData };
-        await saveSession(sessionId, session);
-        console.log('[stepRouter] SEO card data merged:', session.seoData?.appName);
-      } catch (e) {
-        console.warn('[stepRouter] Failed to parse SEO card payload:', e.message);
-      }
-      // Now proceed as publish or draft
-      if (isSeoPublish) {
-        const payload = {
-          appType:          session.appType,
-          modelId:          session.modelId,
-          costPerRun:       session.modelCost,
-          systemPrompt:     session.promptData?.systemPrompt,
-          userPrompt:       session.promptData?.userPrompt,
-          negativePrompt:   session.promptData?.negativePrompt,
-          acceptImageInput: session.promptData?.acceptImageInput,
-          appName:          session.seoData?.appName,
-          appDescription:   session.seoData?.appDescription,
-          tags:             session.seoData?.tags,
-          publishedAt:      new Date().toISOString()
-        };
-        console.log('\n══ MOCK PUBLISH ══');
-        console.log(JSON.stringify(payload, null, 2));
-        console.log('══════════════════\n');
-        await deleteSession(sessionId);
-        return {
-          reply: `🎉 Your app "${session.seoData?.appName}" is now live! Users will be charged ${payload.costPerRun} coins per generation.`,
-          uiType: "success",
-          uiData: {
-            appName:    session.seoData?.appName,
-            modelId:    session.modelId,
-            modelName:  session.modelName || session.modelId,
-            costPerRun: payload.costPerRun,
-            tags:       session.seoData?.tags,
-            mockUrl:    `https://rentprompts.ai/app/demo-${Date.now()}`
-          },
-          nextStep: 0,
-          coins: session.modelCost,
-          clearSession: true
-        };
-      } else {
-        // SEO_DRAFT — save draft silently
-        session.status = 'draft';
-        await saveSession(sessionId, session);
-        return {
-          reply: `Done! "${session.seoData?.appName}" saved as a draft. Publish anytime from your dashboard.`,
-          uiType: 'success',
-          uiData: { appName: session.seoData?.appName, status: 'Draft' },
-          nextStep: 0,
-          coins: null
-        };
-      }
+    // ── SEO_PUBLISH / SEO_DRAFT are now handled at the TOP of route() before extraction.
+    // This block is a no-op fallback in case step===3 and somehow the top handler missed it.
+    const _isSeoP = message.startsWith('SEO_PUBLISH::') || message.startsWith('SEO_DRAFT::');
+    if (_isSeoP) {
+      // Already handled above — shouldn't reach here, but just in case:
+      return {
+        reply: 'Processing your publish request...',
+        uiType: 'text',
+        uiData: null,
+        nextStep: 3,
+        coins: session.modelCost
+      };
     }
+
+
 
     if (msg3.includes('edit app') || msg3.includes('tweak') || isChangeMessage(text)) {
       const correction = isChangeMessage(text) ? getChangeText(text) : text;

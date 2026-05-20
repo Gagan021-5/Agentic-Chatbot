@@ -96,12 +96,28 @@ function AgentUI(props) {
   return null;
 }
 
+// Prefixes that are internal signals to the backend — never show as raw chat bubbles
+const HIDDEN_PAYLOAD_PREFIXES = [
+  "SEO_PUBLISH::",
+  "SEO_DRAFT::",
+  "SEO_EDIT::",
+  "multi_select_form::",
+  "edit prompt::",
+  "confirm seo::",
+];
+
 function MessageBubble({ message, onSendMessage, onResetSession, onEditMessage, isLoading, sessionId = "" }) {
   const isUser = message.role === "user";
   const [copied, setCopied] = useState(false);
 
+  // Hide structured payload messages entirely — they're backend signals, not user text
+  const rawText = message.text || "";
+  if (isUser && HIDDEN_PAYLOAD_PREFIXES.some(p => rawText.startsWith(p))) {
+    return null;
+  }
+
   // Clean up the displayed text so the user's bubble looks natural
-  let displayText = message.text || "";
+  let displayText = rawText;
   if (isUser && displayText.toLowerCase().startsWith("select ")) {
     displayText = `I choose ${displayText.slice(7).trim()}`;
   }

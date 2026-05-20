@@ -262,7 +262,7 @@ export default function AppPreviewCard({ data, onSendMessage, sessionId, storage
                         : 'bg-white/5 border-white/10 text-gray-500 hover:border-white/20'
                     }`}
                   >
-                    ♂ Male (Marcus)
+                    ♂ Male (Terrell)
                   </button>
                 </div>
               </div>
