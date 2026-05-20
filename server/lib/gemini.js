@@ -330,7 +330,24 @@ QUALITY RULES:
    d) CONSTRAINTS: What NOT to do (hallucinate, go off-topic, be generic)
 3. Use $$snake_case_variable syntax ONLY for the REQUIRED INPUT VARIABLES listed below. Do not invent extra variables.
 4. negativePrompt: For image/video apps, write a detailed negative prompt. For text/audio/vision, set to null.
-5. acceptImageInput: true ONLY for vision and image-input apps (background removal, room design, plant disease).
+5. acceptImageInput: SMART DETECTION — do NOT blindly set true for all image apps.
+   - SET TRUE (user must upload a photo) ONLY when the app TRANSFORMS or ANALYZES an existing image:
+     ✓ Background removal / Background replacer
+     ✓ Room redesign / Interior design from photo
+     ✓ Face swap / Portrait enhancement
+     ✓ Image style transfer / Artistic filter
+     ✓ Plant disease detection from photo
+     ✓ Product photo editing
+     ✓ Any "upload your photo" use case
+   - SET FALSE (pure generation, no upload needed) when the app CREATES from text inputs:
+     ✗ Logo designer / Brand logo generator
+     ✗ Poster / Flyer / Banner creator from text
+     ✗ Avatar generator from description
+     ✗ Landscape / Fantasy / Sci-fi image generator
+     ✗ Album art / Thumbnail creator from description
+     ✗ Any app where user describes what they want (not uploads what they have)
+   RULE: If the user describes what the OUTPUT should look like → FALSE.
+         If the user uploads what they want to TRANSFORM → TRUE.
 6. NO META-PLATFORM DETAILS: NEVER mention the user's budget, coin cost, or model name (e.g., 'Nano Banana', 'Medium (5 - 20 coins)') in the systemPrompt or userPrompt. The prompt is strictly for the end-user using the app, who doesn't know about models or coins.
 7. DOMAIN GROUNDING: If the app is legal/medical/agricultural, explicitly define domain-specific terms in systemPrompt.
 8. DO NOT write generic prompts. Every sentence must be specific to THIS app's purpose.
@@ -378,13 +395,31 @@ ${varList || 'Use the most logical 3-4 variables for this app type and purpose.'
     return result;
   } catch (err) {
     console.error('[Sub-agent 2] Error:', err.message);
-    const acceptImage = session.appType === 'image' || session.appType === 'vision';
+    // Smart fallback: determine if app needs image upload based on purpose keywords
+    const appPurpose = (session.requirements?.appPurpose || session.extraction?.appPurpose || '').toLowerCase();
+    const UPLOAD_KEYWORDS = [
+      'background remov', 'background replac', 'room design', 'interior design',
+      'redesign', 'style transfer', 'face swap', 'portrait', 'enhance photo',
+      'edit photo', 'photo editing', 'image editing', 'remove background',
+      'plant disease', 'crop disease', 'object detect', 'image analys',
+      'my photo', 'my image', 'my room', 'my product', 'photo to', 'image to'
+    ];
+    const GENERATION_KEYWORDS = [
+      'logo', 'poster', 'flyer', 'banner', 'thumbnail creator', 'album art',
+      'icon generator', 'brand logo', 'text to image', 'generate image',
+      'create image', 'fantasy', 'landscape generator', 'ai art generator'
+    ];
+    const needsUpload = UPLOAD_KEYWORDS.some(k => appPurpose.includes(k));
+    const isGeneration = GENERATION_KEYWORDS.some(k => appPurpose.includes(k));
+    const acceptImage =
+      session.appType === 'vision' ||
+      (session.appType === 'image' && needsUpload && !isGeneration);
     const mainVar = vars[0]?.name || 'main_input';
     return {
       reasoning: "Fallback triggered.",
       systemPrompt: `You are a highly specialized AI assistant for ${session.appType || 'content'} generation. Focus exclusively on the app's stated purpose. Provide structured, accurate, and domain-specific outputs only.`,
       userPrompt: `Based on the following inputs, perform the requested task precisely:\n\n$$${mainVar}\n\nProvide a detailed, well-structured response that directly addresses the request. Do not add unrelated information.`,
-      negativePrompt: acceptImage ? 'blurry, low quality, distorted, watermark, text overlay, pixelated, overexposed, underexposed' : null,
+      negativePrompt: (session.appType === 'image' || session.appType === 'vision') ? 'blurry, low quality, distorted, watermark, text overlay, pixelated, overexposed, underexposed' : null,
       acceptImageInput: acceptImage,
       variablesUsed: vars.slice(0, 3).map(v => `$$${typeof v === 'object' ? v.name : v}`),
       variableDescriptions: Object.fromEntries(vars.slice(0, 3).map(v => [`$$${typeof v === 'object' ? v.name : v}`, typeof v === 'object' ? v.placeholder : 'Enter details']))

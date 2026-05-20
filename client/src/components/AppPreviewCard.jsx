@@ -268,11 +268,22 @@ export default function AppPreviewCard({ data, onSendMessage, sessionId, storage
               </div>
             )}
 
-            {(data.appType?.toLowerCase() === 'vision' || data.appType?.toLowerCase() === 'image') && (
+            {/* Image upload — shown ONLY when the app needs user to provide a source image.
+                acceptImageInput is set by the LLM based on app purpose:
+                  TRUE:  background removal, room redesign, portrait editing, style transfer
+                  FALSE: logo generator, poster creator, text-to-image art generator */}
+            {data.acceptImageInput && (
               <div className="flex flex-col gap-1.5 mb-3">
                 <label className="text-xs text-[#a77bf3] font-semibold uppercase tracking-wider ml-1">
-                  {data.appType?.toLowerCase() === 'vision' ? 'Upload Image to Analyze' : 'Upload Source Image'}
+                  {data.appType?.toLowerCase() === 'vision'
+                    ? '📷 Upload Image to Analyze'
+                    : '🖼 Upload Your Source Image'}
                 </label>
+                <p className="text-xs text-gray-500 ml-1 -mt-0.5">
+                  {data.appType?.toLowerCase() === 'vision'
+                    ? 'Upload the image this app will analyze'
+                    : 'Upload the photo you want to transform'}
+                </p>
                 {testImage && (
                   <div className="relative w-full rounded-xl overflow-hidden border border-purple-500/20 mb-2">
                     <img src={testImage} alt="Preview" className="w-full max-h-48 object-contain bg-black/40" />
@@ -303,6 +314,7 @@ export default function AppPreviewCard({ data, onSendMessage, sessionId, storage
                 />
               </div>
             )}
+
 
             <button
               onClick={handleRunTest}
