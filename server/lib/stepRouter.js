@@ -622,7 +622,29 @@ async function showModels(session) {
 async function buildStep0Response(session, text) {
   const ext = session.extraction;
 
+  // ── AMBIGUOUS DOMAIN DETECTION ──────────────────────────────────────────
+  // These keywords are inherently ambiguous — they could be text OR image.
+  // e.g., "birthday app" → text (written wishes) or image (birthday card).
+  // We SKIP local keyword inference for these and let the triage LLM ask the
+  // user explicitly what output format they want.
+  const AMBIGUOUS_DOMAIN_SIGNALS = [
+    'birthday', 'greeting', 'certificate', 'diploma', 'award',
+    'wedding', 'anniversary', 'thank you', 'congratulation',
+    'wish', 'card app', 'card generat'
+  ];
+
+  const purposeLowerForAmbiguity = String(ext?.appPurpose || ext?.oneLineUnderstanding || '').toLowerCase();
+  const isAmbiguousDomain = AMBIGUOUS_DOMAIN_SIGNALS.some(sig => purposeLowerForAmbiguity.includes(sig));
+
+  // For ambiguous domains, ONLY skip local inference if the user hasn't already
+  // given a strong explicit signal for a specific type.
+  const hasExplicitTypeFromUser = Boolean(
+    (ext?.confidence?.appType === 'HIGH') ||
+    session.formatConfirmedByUser
+  );
+
   // 1. IF APP TYPE IS MISSING: Try local keyword inference FIRST before showing chips
+  //    BUT: Skip for ambiguous domains — let triage ask about output format instead.
   if (!session.appType) {
     const LOCAL_TYPE_SIGNALS = {
       image: [
@@ -633,7 +655,8 @@ async function buildStep0Response(session, text) {
         'greeting card', 'birthday card', 'card maker', 'card generat', 'poster',
         'meme', 'photo frame', 'photo filter', 'in the photo', 'on the image',
         'text on image', 'text overlay', 'image with text', 'invitation',
-        'flyer', 'avatar', 'wallpaper', 'sticker', 'with photo', 'with picture'
+        'flyer', 'avatar', 'wallpaper', 'sticker', 'with photo', 'with picture',
+        'birthday card with photo', 'birthday image', 'birthday poster'
       ],
       video: [
         'video generat', 'generate video', 'video creat', 'animate', 'animation',
@@ -663,18 +686,24 @@ async function buildStep0Response(session, text) {
         'letter', 'memo', 'document', 'template', 'form generat', 'bio generat',
         'caption', 'tagline', 'slogan', 'headline', 'ad copy', 'copywriting',
         'product description', 'review generat', 'feedback generat', 'response generat',
-        'text generat', 'write', 'draft', 'compose', 'author'
+        'text generat', 'write', 'draft', 'compose', 'author',
+        'birthday wishes', 'birthday message', 'birthday poem', 'birthday quote'
       ]
     };
 
     const purposeLower = String(ext?.appPurpose || ext?.oneLineUnderstanding || '').toLowerCase();
 
-    for (const [type, signals] of Object.entries(LOCAL_TYPE_SIGNALS)) {
-      if (signals.some(sig => purposeLower.includes(sig))) {
-        session.appType = type;
-        if (!session.extraction) session.extraction = {};
-        session.extraction.appType = type;
-        break;
+    // If ambiguous domain AND user hasn't explicitly confirmed format → skip local inference
+    if (isAmbiguousDomain && !hasExplicitTypeFromUser) {
+      console.log(`[Ambiguous Domain] "${purposeLower.substring(0, 60)}" matches ambiguous signals — skipping local inference, deferring to triage.`);
+    } else {
+      for (const [type, signals] of Object.entries(LOCAL_TYPE_SIGNALS)) {
+        if (signals.some(sig => purposeLower.includes(sig))) {
+          session.appType = type;
+          if (!session.extraction) session.extraction = {};
+          session.extraction.appType = type;
+          break;
+        }
       }
     }
   }
@@ -686,26 +715,32 @@ async function buildStep0Response(session, text) {
     const hasPurpose = ext?.appPurpose && ext.appPurpose.length > 5;
 
     if (hasPurpose) {
-      // AGENTIC APPROACH: Smart default based on purpose keywords.
-      // Detect if the purpose is likely visual (image) or textual.
-      const purposeL = ext.appPurpose.toLowerCase();
-      const imageSignals = ['photo', 'picture', 'image', 'card', 'poster', 'meme', 'frame', 'banner',
-        'flyer', 'invitation', 'greeting', 'visual', 'avatar', 'portrait', 'logo', 'thumbnail',
-        'in the photo', 'on the image', 'with picture', 'wallpaper', 'sticker'];
-      const videoSignals = ['video', 'animation', 'animate', 'reel', 'clip', 'cinematic'];
-      const audioSignals = ['audio', 'voice', 'music', 'speech', 'podcast', 'sound', 'tts'];
-      const visionSignals = ['detect', 'analyze image', 'scan', 'ocr', 'read from image'];
+      // For ambiguous domains: DON'T auto-infer, let triage ask explicitly.
+      if (isAmbiguousDomain && !hasExplicitTypeFromUser) {
+        console.log(`[Smart Infer] Ambiguous domain detected — NOT auto-inferring type. Triage will ask.`);
+        // Don't set session.appType — fall through to triage which will ask about output format
+      } else {
+        // AGENTIC APPROACH: Smart default based on purpose keywords.
+        // Detect if the purpose is likely visual (image) or textual.
+        const purposeL = ext.appPurpose.toLowerCase();
+        const imageSignals = ['photo', 'picture', 'image', 'card', 'poster', 'meme', 'frame', 'banner',
+          'flyer', 'invitation', 'greeting', 'visual', 'avatar', 'portrait', 'logo', 'thumbnail',
+          'in the photo', 'on the image', 'with picture', 'wallpaper', 'sticker'];
+        const videoSignals = ['video', 'animation', 'animate', 'reel', 'clip', 'cinematic'];
+        const audioSignals = ['audio', 'voice', 'music', 'speech', 'podcast', 'sound', 'tts'];
+        const visionSignals = ['detect', 'analyze image', 'scan', 'ocr', 'read from image'];
 
-      let inferredType = 'text'; // default
-      if (imageSignals.some(s => purposeL.includes(s))) inferredType = 'image';
-      else if (videoSignals.some(s => purposeL.includes(s))) inferredType = 'video';
-      else if (audioSignals.some(s => purposeL.includes(s))) inferredType = 'audio';
-      else if (visionSignals.some(s => purposeL.includes(s))) inferredType = 'vision';
+        let inferredType = 'text'; // default
+        if (imageSignals.some(s => purposeL.includes(s))) inferredType = 'image';
+        else if (videoSignals.some(s => purposeL.includes(s))) inferredType = 'video';
+        else if (audioSignals.some(s => purposeL.includes(s))) inferredType = 'audio';
+        else if (visionSignals.some(s => purposeL.includes(s))) inferredType = 'vision';
 
-      session.appType = inferredType;
-      if (!session.extraction) session.extraction = {};
-      session.extraction.appType = inferredType;
-      console.log(`[Smart Infer] No explicit type for "${ext.appPurpose.substring(0, 50)}" — inferred '${inferredType}' from purpose keywords.`);
+        session.appType = inferredType;
+        if (!session.extraction) session.extraction = {};
+        session.extraction.appType = inferredType;
+        console.log(`[Smart Infer] No explicit type for "${ext.appPurpose.substring(0, 50)}" — inferred '${inferredType}' from purpose keywords.`);
+      }
       // Fall through to triage below — it will ask smart domain questions
     } else {
       // Truly zero context — user said something too vague. Show format chips.
@@ -721,6 +756,43 @@ async function buildStep0Response(session, text) {
 
   // 3. AGENTIC TRIAGE (Deep Context Questions)
   if (!session.dynamicContext) {
+
+    // ── AMBIGUOUS DOMAIN FORCE-ASK: If no appType yet and domain is ambiguous, inject format question ──
+    if (!session.appType && isAmbiguousDomain && !session.formatAskedByTriage) {
+      session.formatAskedByTriage = true;
+      session.triageRounds = (session.triageRounds || 0) + 1;
+      await saveSession(session);
+      console.log(`[Ambiguous Domain] Forcing output format question for: "${purposeLowerForAmbiguity.substring(0, 60)}"`);
+      return {
+        reply: `I noticed your app idea could work as either written text or a visual image. What kind of output should this app generate?`,
+        uiType: "chips",
+        uiData: { options: ["Written text (wishes, poems, messages)", "Visual image (card, poster, design)"] },
+        nextStep: 0,
+        coins: null
+      };
+    }
+
+    // ── Handle the format answer from the ambiguous-domain forced question ──
+    if (session.formatAskedByTriage && !session.appType) {
+      const answerLower = lower(text);
+      if (answerLower.includes('written') || answerLower.includes('text') || answerLower.includes('wishes') ||
+          answerLower.includes('poem') || answerLower.includes('message')) {
+        session.appType = 'text';
+        if (!session.extraction) session.extraction = {};
+        session.extraction.appType = 'text';
+        session.formatConfirmedByUser = true;
+        console.log(`[Ambiguous Domain] User confirmed: TEXT output`);
+      } else if (answerLower.includes('visual') || answerLower.includes('image') || answerLower.includes('card') ||
+                 answerLower.includes('poster') || answerLower.includes('design') || answerLower.includes('picture') ||
+                 answerLower.includes('photo')) {
+        session.appType = 'image';
+        if (!session.extraction) session.extraction = {};
+        session.extraction.appType = 'image';
+        session.formatConfirmedByUser = true;
+        console.log(`[Ambiguous Domain] User confirmed: IMAGE output`);
+      }
+      await saveSession(session);
+    }
 
     // 🟢 YES-AFFIRMATION FAST PATH: user said "yes/sure/ok" during triage → skip API, treat as ready
     const affirmations = ['yes', 'sure', 'ok', 'yep', 'yeah', 'correct', 'sounds good', 'exactly',
@@ -1387,6 +1459,15 @@ export async function route(session, message) {
       session.appType = chipType;
       session.extraction = session.extraction || {};
       session.extraction.appType = chipType;
+    }
+    // When we explicitly asked the user about output format, their chip answer
+    // OVERRIDES any LLM-inferred type (even if session.appType was already set).
+    if (chipType && session.formatAskedByTriage && !session.formatConfirmedByUser) {
+      session.appType = chipType;
+      session.extraction = session.extraction || {};
+      session.extraction.appType = chipType;
+      session.formatConfirmedByUser = true;
+      console.log(`[Format Override] User responded to format question with chip: ${chipType}`);
     }
 
     return await buildStep0Response(session, text);

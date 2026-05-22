@@ -402,6 +402,17 @@ DOMAIN INTELLIGENCE — Use these to ask SMART, SPECIFIC questions:
 - INTERIOR DESIGN (image): D1=design task(visualize/suggest/render), D2=what type of space they have, D3=room_type+square_feet+design_palette+objects, D4=rendered image+description, D5=budget constraints+style preferences
 - HEALTH/FITNESS: D1=specific task(workout plan/diet/symptom check), D2=their fitness level+goal, D3=goal+current status+constraints, D4=structured plan, D5=safety disclaimers+medical limits
 
+⚠️ AMBIGUOUS DOMAINS — MUST verify D4 (output format) FIRST:
+These domains are inherently ambiguous — the SAME idea can be text OR image output:
+- BIRTHDAY/GREETING: "birthday app" could mean written wishes (TEXT) or a visual birthday card (IMAGE). ASK D4 first: "Do you want written birthday wishes or a visual birthday card/image?"
+- CERTIFICATE/AWARD: could mean text document or visual certificate image
+- WEDDING: could mean written invitation text or a designed card image
+- CARD APP: could mean text messages or visual cards
+For these domains, D4 is your HIGHEST PRIORITY missing dimension — ask it before anything else.
+If the user already said "card", "poster", "image", "picture", "photo" → it's IMAGE.
+If the user already said "wishes", "poem", "message", "text" → it's TEXT.
+If the user said only the domain word (e.g., just "birthday app") with no format clue → you MUST ask about D4 first.
+
 WHEN TO RETURN "ready" (ALL must be true):
 ✓ At least 4 of the 5 dimensions (D1-D5) have clear answers from the conversation history
 ✓ You know the specific inputs the end-user will provide each run
