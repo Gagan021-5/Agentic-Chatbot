@@ -385,13 +385,18 @@ async function buildDynamicBundleCard(session) {
       if (session.triageRounds <= 3) {
         session.awaitingTriageAnswer = true;
 
-        // If it's verifying the format, provide the chips so they can click!
+        // Format check gets hardcoded format chips; context questions get LLM-generated chips
         const isFormatCheck = triageResult.status === "needs_format";
+        const hasLLMChips = !isFormatCheck && Array.isArray(triageResult.suggested_options) && triageResult.suggested_options.length >= 2;
 
         return {
           reply: triageResult.question,
-          uiType: isFormatCheck ? "chips" : null,
-          uiData: isFormatCheck ? { options: ["Text", "Image", "Audio", "Video"] } : null,
+          uiType: (isFormatCheck || hasLLMChips) ? "chips" : null,
+          uiData: isFormatCheck
+            ? { options: ["Text", "Image", "Audio", "Video"] }
+            : hasLLMChips
+              ? { options: triageResult.suggested_options }
+              : null,
           nextStep: session.step,
           coins: null
         };
@@ -406,10 +411,15 @@ async function buildDynamicBundleCard(session) {
     ) {
       session.awaitingTriageAnswer = true;
       const isFormatCheck = triageResult.status === "needs_format";
+      const hasLLMChips = !isFormatCheck && Array.isArray(triageResult.suggested_options) && triageResult.suggested_options.length >= 2;
       return {
         reply: triageResult.question,
-        uiType: isFormatCheck ? "chips" : null,
-        uiData: isFormatCheck ? { options: ["Text", "Image", "Audio", "Video"] } : null,
+        uiType: (isFormatCheck || hasLLMChips) ? "chips" : null,
+        uiData: isFormatCheck
+          ? { options: ["Text", "Image", "Audio", "Video"] }
+          : hasLLMChips
+            ? { options: triageResult.suggested_options }
+            : null,
         nextStep: session.step,
         coins: null
       };
@@ -419,14 +429,19 @@ async function buildDynamicBundleCard(session) {
     if (triageResult.status === "needs_context" || triageResult.status === "needs_format") {
       session.awaitingTriageAnswer = true;
       const isFormatCheck = triageResult.status === "needs_format";
+      const hasLLMChips = !isFormatCheck && Array.isArray(triageResult.suggested_options) && triageResult.suggested_options.length >= 2;
       const fallbackReply =
         triageResult.question && String(triageResult.question).trim().length >= 10
           ? triageResult.question
           : "What type of output should this app generate for users?";
       return {
         reply: fallbackReply,
-        uiType: isFormatCheck ? "chips" : null,
-        uiData: isFormatCheck ? { options: ["Text", "Image", "Audio", "Video"] } : null,
+        uiType: (isFormatCheck || hasLLMChips) ? "chips" : null,
+        uiData: isFormatCheck
+          ? { options: ["Text", "Image", "Audio", "Video"] }
+          : hasLLMChips
+            ? { options: triageResult.suggested_options }
+            : null,
         nextStep: session.step,
         coins: null
       };
@@ -637,7 +652,14 @@ async function buildStep0Response(session, text) {
         'advocate', 'legal', 'lawyer', 'law', 'blog', 'article', 'content', 'email',
         'lesson plan', 'quiz', 'teacher', 'educat', 'farm advisor', 'crop advisor',
         'chatbot', 'chat assistant', 'writing', 'summarize', 'translate', 'script',
-        'seo', 'description generat', 'report generat', 'story generat'
+        'seo', 'description generat', 'report generat', 'story generat',
+        'resume', 'cover letter', 'proposal', 'invoice', 'contract', 'newsletter',
+        'recipe', 'itinerary', 'planner', 'workout', 'meal plan', 'diet plan',
+        'study guide', 'flashcard', 'essay', 'thesis', 'assignment', 'homework',
+        'letter', 'memo', 'document', 'template', 'form generat', 'bio generat',
+        'caption', 'tagline', 'slogan', 'headline', 'ad copy', 'copywriting',
+        'product description', 'review generat', 'feedback generat', 'response generat',
+        'text generat', 'write', 'draft', 'compose', 'author'
       ]
     };
 
@@ -653,19 +675,28 @@ async function buildStep0Response(session, text) {
     }
   }
 
-  // 2. Still no type after keyword inference? Show chips as last resort
+  // 2. Still no type after keyword inference?
+  // If we have a PURPOSE but no type, let the triage LLM figure it out.
+  // Only show bare format chips when we have ZERO context.
   if (!session.appType) {
-    session.step = 0;
-    await saveSession(session);
+    const hasPurpose = ext?.appPurpose && ext.appPurpose.length > 5;
 
-    let replyText = "That sounds like a great idea! ";
-    if (ext && ext.appPurpose && ext.appPurpose.length > 5) {
-      replyText = `Awesome, an app for ${ext.appPurpose.toLowerCase().replace("i want to make a ", "")} sounds interesting! `;
+    if (hasPurpose) {
+      // AGENTIC APPROACH: Use triage to determine format + ask domain questions simultaneously.
+      // Default to 'text' (most common type) — triage will correct if wrong.
+      session.appType = 'text';
+      if (!session.extraction) session.extraction = {};
+      session.extraction.appType = 'text';
+      console.log(`[Smart Infer] No explicit type for "${ext.appPurpose.substring(0, 50)}" — defaulting to text, triage will validate.`);
+      // Fall through to triage below — it will ask smart domain questions
+      // and include "if you wanted images/audio/video, let me know" in its response
+    } else {
+      // Truly zero context — user said something too vague. Show format chips.
+      session.step = 0;
+      await saveSession(session);
+      const options = detectLanguageMode(session) === "Hindi" ? ["टेक्स्ट", "इमेज", "ऑडियो", "वीडियो", "विज़न"] : ["Text", "Image", "Audio", "Video", "Vision"];
+      return { reply: "What kind of output should your app produce?", uiType: "chips", uiData: { options }, nextStep: 0, coins: null };
     }
-    replyText += "One quick thing — what kind of output should it produce?";
-
-    const options = detectLanguageMode(session) === "Hindi" ? ["टेक्स्ट", "इमेज", "ऑडियो", "वीडियो", "विज़न"] : ["Text", "Image", "Audio", "Video", "Vision"];
-    return { reply: replyText, uiType: "chips", uiData: { options }, nextStep: 0, coins: null };
   }
 
   session.step = 0;
@@ -699,10 +730,13 @@ async function buildStep0Response(session, text) {
           session.triageRounds = (session.triageRounds || 0) + 1;
           session.lastQuestion = question;
           await saveSession(session);
+
+          // Use LLM-generated chips if available — fully dynamic requirement gathering
+          const hasChips = Array.isArray(triageResult.suggested_options) && triageResult.suggested_options.length >= 2;
           return {
             reply: question,
-            uiType: null,
-            uiData: null,
+            uiType: hasChips ? "chips" : null,
+            uiData: hasChips ? { options: triageResult.suggested_options } : null,
             nextStep: 0,
             coins: null
           };
@@ -1239,9 +1273,10 @@ export async function route(session, message) {
     session.userType = session.extraction.userType;
   }
 
-  // 1. SMART INFERENCE: Auto-assign appType so the AI feels intelligent!
-  // If the user says "advocate app", extraction knows it's text. We skip the format question.
-  if (!session.appType && session.extraction.appType && session.extraction.confidence?.appType !== 'LOW') {
+  // 1. SMART INFERENCE: Auto-assign appType — TRUST the LLM.
+  // The extraction LLM is smart enough to know "resume generator" = text.
+  // Never reject its judgment — if it returned an appType, use it.
+  if (!session.appType && session.extraction.appType) {
     session.appType = session.extraction.appType;
   }
 

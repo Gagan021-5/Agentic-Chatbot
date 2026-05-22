@@ -14,7 +14,7 @@ ${LANGUAGE_MIRROR_DIRECTIVE}
 APP TYPE RULES — read every word carefully:
 - "image" app: generates images, photos, portraits, transforms photos, superhero filter, avatar maker, logo maker, any visual output
 - "video" app: creates videos, animations, reels, cinematic clips, animates photos, talking avatars
-- "text" app: generates written content — blogs, emails, captions, scripts, stories, reports, product descriptions, workout PLANS, meal PLANS, diet plans, study guides, itineraries, any document or written plan output
+- "text" app: generates written content — blogs, emails, captions, scripts, stories, reports, product descriptions, resumes, cover letters, proposals, invoices, contracts, workout PLANS, meal PLANS, diet plans, study guides, itineraries, recipes, newsletters, SOPs, any document or written plan output. When in doubt and the output is clearly textual/document, choose "text".
 - "audio" app: voice, music, speech, podcast, sound effects, text to speech, transcription
 - "vision" app: analyzes images, reads text from images, detects objects, medical image analysis
 
@@ -131,141 +131,77 @@ function sanitizeVariableObjects(list, minLen, maxLen, fallback) {
 }
 
 function buildDynamicContextFallback(appType, appPurpose, languageHint) {
+  // Minimal generic fallback — only fires when BOTH Groq AND OpenRouter are completely down.
+  // In normal operation, the LLM generates domain-specific variables dynamically.
   const lang = normalizeLanguageHint(languageHint);
-  const isHindi = lang === "Hindi";
-  const isHinglish = lang === "Hinglish";
-  const p = String(appPurpose || "").toLowerCase();
+  const safeType = String(appType || "text").toLowerCase();
+  const p = String(appPurpose || "").trim();
 
-  if (isHindi) {
+  if (lang === "Hindi") {
     return {
       options: ["उपयोगकर्ता के लिए पर्सनल परिणाम", "स्पष्ट और संरचित आउटपुट", "तेज और विश्वसनीय प्रतिक्रिया", "कस्टम इनपुट आधारित जनरेशन"],
       variables: [
-        { name: "मुख्य इनपुट", placeholder: "अपनी आवश्यकता लिखें...", test_value: "फसल की बीमारी की पहचान" },
-        { name: "संदर्भ", placeholder: "कॉन्टेक्स्ट या पृष्ठभूमि जोड़ें...", test_value: "महाराष्ट्र, खरीफ मौसम" },
-        { name: "पसंदीदा स्टाइल", placeholder: "जैसे: प्रोफेशनल, फ्रेंडली...", test_value: "सरल हिंदी में" }
+        { name: "मुख्य इनपुट", placeholder: "अपनी आवश्यकता लिखें...", test_value: "" },
+        { name: "संदर्भ", placeholder: "कॉन्टेक्स्ट या पृष्ठभूमि जोड़ें...", test_value: "" },
+        { name: "पसंदीदा स्टाइल", placeholder: "जैसे: प्रोफेशनल, फ्रेंडली...", test_value: "" }
       ]
     };
   }
-  if (isHinglish) {
+  if (lang === "Hinglish") {
     return {
-      options: ["Personalized output for user", "Structured and clear result", "Fast and reliable response", "Custom input based generation"],
+      options: ["Personalized output", "Structured result", "Fast response", "Custom input based"],
       variables: [
-        { name: "Main input", placeholder: "Aap kya generate karna chahte ho?", test_value: "professional resume" },
-        { name: "Context", placeholder: "Background ya extra details", test_value: "5 years experience in software" },
-        { name: "Preferred style", placeholder: "Jaise: Formal, Friendly", test_value: "Professional" }
+        { name: "main_input", placeholder: "Aap kya generate karna chahte ho?", test_value: "" },
+        { name: "context", placeholder: "Background ya extra details", test_value: "" },
+        { name: "preferred_style", placeholder: "Jaise: Formal, Friendly", test_value: "" }
       ]
     };
   }
 
-  // ── Smart fallbacks based on both appType AND appPurpose keywords ──
-  const typeSpecific = {
-    // IMAGE type — differentiate by sub-purpose
-    image: (() => {
-      if (p.includes('background remov') || p.includes('bg remov'))
-        return { options: ["Precise edge detection", "Transparent PNG output", "Batch processing support", "Custom background replacement"], variables: [
-          { name: "image_source", placeholder: "Upload or paste image URL", test_value: "portrait photo of a person" },
-          { name: "background_type", placeholder: "transparent / white / custom color / new background", test_value: "transparent" },
-          { name: "output_quality", placeholder: "standard / high / ultra", test_value: "high" }
-        ]};
-      if (p.includes('interior') || p.includes('room') || p.includes('design'))
-        return { options: ["Style consistency", "Photorealistic rendering", "Multi-room support", "Furniture detection"], variables: [
-          { name: "room_type", placeholder: "Living room, bedroom, office...", test_value: "living room" },
-          { name: "design_palette", placeholder: "Modern minimalist, Boho, Industrial...", test_value: "modern minimalist" },
-          { name: "square_feet", placeholder: "e.g., 250", test_value: "300" },
-          { name: "objects", placeholder: "Sofa, table, wardrobe...", test_value: "sofa, coffee table, bookshelf" }
-        ]};
-      if (p.includes('logo') || p.includes('brand'))
-        return { options: ["Brand color enforcement", "Vector-ready output", "Multiple variants", "Style lock"], variables: [
-          { name: "brand_name", placeholder: "Your brand or company name", test_value: "TechNova" },
-          { name: "industry", placeholder: "Tech, food, fashion...", test_value: "technology" },
-          { name: "style", placeholder: "Minimal, bold, playful, corporate...", test_value: "minimal and modern" },
-          { name: "colors", placeholder: "Preferred brand colors", test_value: "blue and white" }
-        ]};
-      // generic image
-      return { options: ["Style consistency", "Composition control", "High-detail output", "Negative prompt support"], variables: [
-        { name: "subject", placeholder: "What should appear in the image?", test_value: "a futuristic city at night" },
-        { name: "style", placeholder: "Anime, realistic, cinematic, watercolor...", test_value: "cinematic realism" },
-        { name: "mood", placeholder: "Colors, lighting, atmosphere", test_value: "dark, moody, neon lights" }
-      ]};
-    })(),
-    text: (() => {
-      if (p.includes('legal') || p.includes('law') || p.includes('advocate'))
-        return { options: ["Indian law coverage (BNS/IPC)", "Section-specific citation", "Layman explanation mode", "Case analysis"], variables: [
-          { name: "legal_query", placeholder: "Describe your legal situation or question", test_value: "My landlord is refusing to return my security deposit" },
-          { name: "jurisdiction", placeholder: "State or country", test_value: "Maharashtra, India" },
-          { name: "party_role", placeholder: "Are you the plaintiff or defendant?", test_value: "Plaintiff (tenant)" }
-        ]};
-      if (p.includes('lesson') || p.includes('teach') || p.includes('educat') || p.includes('quiz'))
-        return { options: ["Grade-level adaptation", "Interactive quiz generation", "Curriculum alignment", "Multiple learning styles"], variables: [
-          { name: "subject", placeholder: "e.g., Mathematics, Science, History", test_value: "Grade 8 Mathematics" },
-          { name: "topic", placeholder: "Specific chapter or concept", test_value: "Pythagoras theorem" },
-          { name: "grade_level", placeholder: "e.g., Grade 8, Class 10, University", test_value: "Grade 8" },
-          { name: "learning_objective", placeholder: "What should students learn?", test_value: "Understand and apply the Pythagorean theorem" }
-        ]};
-      if (p.includes('farm') || p.includes('crop') || p.includes('agricultur'))
-        return { options: ["Region-specific advice", "Season-aware recommendations", "Pest & disease guidance", "Multi-language support"], variables: [
-          { name: "crop_type", placeholder: "e.g., wheat, rice, tomato", test_value: "wheat" },
-          { name: "problem", placeholder: "Describe the issue you're facing", test_value: "yellow spots on leaves, plants drying up" },
-          { name: "region", placeholder: "State and season", test_value: "Punjab, Rabi season" }
-        ]};
-      if (p.includes('blog') || p.includes('content') || p.includes('article') || p.includes('seo'))
-        return { options: ["SEO optimization", "Tone control", "Keyword integration", "CTA generation"], variables: [
-          { name: "topic", placeholder: "What is the blog about?", test_value: "10 benefits of daily meditation" },
-          { name: "target_audience", placeholder: "Who is reading this?", test_value: "working professionals aged 25-40" },
-          { name: "tone", placeholder: "Professional, conversational, motivational...", test_value: "friendly and informative" },
-          { name: "word_count", placeholder: "e.g., 800", test_value: "800" }
-        ]};
-      if (p.includes('dispatch') || p.includes('rescue') || p.includes('emergency') || p.includes('animal') || p.includes('ngo') || p.includes('urban'))
-        return { options: ["Real-time location tracking", "Priority triage scoring", "Multi-responder coordination", "Case status updates"], variables: [
-          { name: "incident_type", placeholder: "Animal rescue, accident, fire, flood...", test_value: "injured stray dog" },
-          { name: "location", placeholder: "Street address or landmark", test_value: "MG Road, Bengaluru" },
-          { name: "urgency_level", placeholder: "Critical / High / Medium / Low", test_value: "High" },
-          { name: "injury_description", placeholder: "Describe the situation", test_value: "Animal is bleeding, unable to move" }
-        ]};
-      if (p.includes('factory') || p.includes('safety') || p.includes('industrial') || p.includes('hazard') || p.includes('manufactur') || p.includes('report'))
-        return { options: ["Incident auto-categorization", "Shift-based logging", "Machine-specific tracking", "Regulatory compliance output"], variables: [
-          { name: "machine_id", placeholder: "Machine ID or name (e.g., CNC-04)", test_value: "CNC-04" },
-          { name: "hazard_type", placeholder: "e.g., electrical, chemical, mechanical", test_value: "mechanical pinch point" },
-          { name: "shift_time", placeholder: "Morning / Afternoon / Night", test_value: "Morning shift" },
-          { name: "incident_description", placeholder: "What happened?", test_value: "Worker hand caught in conveyor belt" }
-        ]};
-      if (p.includes('workout') || p.includes('fitness') || p.includes('exercise') || p.includes('gym') || p.includes('health') || p.includes('diet') || p.includes('meal'))
-        return { options: ["Goal-based personalization", "Progressive overload tracking", "Rest day optimization", "Nutrition sync"], variables: [
-          { name: "fitness_goal", placeholder: "Weight loss, muscle gain, endurance...", test_value: "muscle gain" },
-          { name: "current_level", placeholder: "Beginner / Intermediate / Advanced", test_value: "Intermediate" },
-          { name: "duration_weeks", placeholder: "How many weeks?", test_value: "12" },
-          { name: "available_equipment", placeholder: "Gym, home, no equipment...", test_value: "Full gym access" }
-        ]};
-      if (p.includes('food') || p.includes('nutrit') || p.includes('restaurant') || p.includes('recipe') || p.includes('menu'))
-        return { options: ["Allergen detection", "Calorie calculation", "Dietary compliance check", "Ingredient substitution"], variables: [
-          { name: "food_item", placeholder: "Dish or food product name", test_value: "Butter Chicken with Naan" },
-          { name: "dietary_restrictions", placeholder: "Vegan, gluten-free, diabetic...", test_value: "Diabetic-friendly" },
-          { name: "serving_size", placeholder: "e.g., 1 cup, 200g, 1 plate", test_value: "1 plate" }
-        ]};
-      // generic text
-      return { options: ["Tone control", "Structured output", "Goal-focused generation", "Context awareness"], variables: [
-        { name: "main_input", placeholder: "Describe what you want generated", test_value: "a professional email requesting a meeting" },
-        { name: "audience", placeholder: "Who is this for?", test_value: "HR manager at a tech company" },
-        { name: "tone", placeholder: "Professional, friendly, formal...", test_value: "professional" }
-      ]};
-    })(),
-    video: { options: ["Scene pacing control", "Shot/style consistency", "Platform-ready output", "Voiceover sync"], variables: [
-      { name: "concept", placeholder: "What story or scene to create?", test_value: "a 15-second ad for a new coffee brand" },
-      { name: "visual_style", placeholder: "Cinematic, vlog, animation, ad...", test_value: "cinematic with warm tones" },
-      { name: "platform", placeholder: "YouTube, Instagram Reels, TikTok...", test_value: "Instagram Reels" }
-    ]},
-    audio: { options: ["Voice style selection", "Language support", "Pacing control", "Emotion control"], variables: [
-      { name: "script", placeholder: "Paste the text to convert to speech", test_value: "Welcome to RentPrompts, the AI app marketplace." },
-      { name: "voice_style", placeholder: "Male/Female, energetic/calm, accent...", test_value: "female, warm and professional" },
-      { name: "language", placeholder: "e.g., English, Hindi, Spanish", test_value: "English" }
-    ]},
-    vision: { options: ["Accurate extraction", "Structured JSON response", "Confidence scoring", "Use-case specific analysis"], variables: [
-      { name: "task_type", placeholder: "OCR, object detection, image QA, disease detection...", test_value: "OCR - extract all text from invoice" },
-      { name: "output_format", placeholder: "JSON, plain text, bullet points...", test_value: "structured JSON" },
-      { name: "special_instructions", placeholder: "Any focus areas or constraints?", test_value: "focus on line items and total amount" }
-    ]}
+  // Generic per-type fallbacks (minimal — the LLM handles specifics)
+  const typeDefaults = {
+    image: {
+      options: ["Style control", "High-quality output", "Composition guidance", "Format flexibility"],
+      variables: [
+        { name: "subject", placeholder: "What should appear in the image?", test_value: "" },
+        { name: "style", placeholder: "Visual style or aesthetic", test_value: "" },
+        { name: "details", placeholder: "Any specific requirements", test_value: "" }
+      ]
+    },
+    video: {
+      options: ["Scene control", "Style consistency", "Platform-ready output", "Motion effects"],
+      variables: [
+        { name: "concept", placeholder: "What story or scene to create?", test_value: "" },
+        { name: "visual_style", placeholder: "Cinematic, vlog, animation...", test_value: "" },
+        { name: "platform", placeholder: "YouTube, Instagram, TikTok...", test_value: "" }
+      ]
+    },
+    audio: {
+      options: ["Voice selection", "Language support", "Pacing control", "Emotion control"],
+      variables: [
+        { name: "script", placeholder: "Text to convert to speech", test_value: "" },
+        { name: "voice_style", placeholder: "Male/Female, tone, accent...", test_value: "" },
+        { name: "language", placeholder: "English, Hindi, Spanish...", test_value: "" }
+      ]
+    },
+    vision: {
+      options: ["Accurate extraction", "Structured output", "Confidence scoring", "Use-case analysis"],
+      variables: [
+        { name: "task_type", placeholder: "OCR, object detection, image QA...", test_value: "" },
+        { name: "output_format", placeholder: "JSON, plain text, bullets...", test_value: "" },
+        { name: "special_instructions", placeholder: "Focus areas or constraints", test_value: "" }
+      ]
+    },
+    text: {
+      options: ["Tone control", "Structured output", "Goal-focused generation", "Context awareness"],
+      variables: [
+        { name: "main_input", placeholder: "Describe what you want generated", test_value: "" },
+        { name: "context", placeholder: "Background or additional details", test_value: "" },
+        { name: "output_style", placeholder: "Format, tone, length preferences", test_value: "" }
+      ]
+    }
   };
-  return typeSpecific[appType] || typeSpecific.text;
+  return typeDefaults[safeType] || typeDefaults.text;
 }
 
 function parseDynamicContextPayload(rawContent, appType, appPurpose, languageHint) {
@@ -480,12 +416,24 @@ VARIABLE QUALITY (only in "ready" response):
 - For image/vision apps requiring file upload: include {"name": "source_image", "placeholder": "Upload your image", "test_value": "photo of product"}
 - options = 4 specific, compelling features of THIS exact app (not generic)
 
+SUGGESTED OPTIONS RULE (for needs_context responses):
+When asking a clarifying question, you MUST also generate 3-5 suggested answer options that are:
+- Specific to the user's actual app idea (NOT generic)
+- Contextual to the question being asked
+- Helpful examples that guide the user toward a good answer
+- Written as short, clickable chip labels (under 6 words each)
+For example, if asking about legal app tasks: ["Draft legal notice", "Explain a law section", "Analyze my case", "Get bail guidance"]
+For example, if asking about image style: ["Comic book / Marvel", "Anime / Manga", "Photorealistic", "Oil painting", "User chooses"]
+NEVER use generic options like ["Option A", "Option B"] or ["Yes", "No"].
+If the question genuinely works better as free text (rare), set suggested_options to null.
+
 Return STRICTLY as JSON (no markdown, no explanation outside JSON):
 {
   "status": "needs_context" | "ready",
   "domain_identified": "Specific domain, e.g.: Agricultural - Crop Disease Detection",
   "dimensions_covered": ["D1", "D3"],
   "question": "ONLY if needs_context: one focused question targeting the most important missing dimension. Include 2-3 inline examples to guide the user — write examples as plain text inside parentheses like (e.g., episode title, speaker name, script notes). NEVER wrap examples in single quotes or double quotes.",
+  "suggested_options": ["3-5 contextual answer options as short chip labels, or null if free text is better"],
   "form": {
     "options": ["4 specific features of this exact app"],
     "variables": [{"name": "snake_case_name", "placeholder": "specific helpful hint", "test_value": "realistic domain example"}]
@@ -547,10 +495,18 @@ function parseTriageResponse(rawContent, formatFallback, appPurpose, languageHin
         const fbForm = buildDynamicContextFallback(fallbackType, safePurpose, languageHint);
         return readyShape(domain, fallbackType, fbForm);
       }
+      // Extract LLM-generated suggested options for dynamic chips
+      const suggestedOptions = Array.isArray(parsed.suggested_options)
+        ? parsed.suggested_options
+            .map(o => String(o || "").trim())
+            .filter(o => o.length > 0)
+            .slice(0, 6)
+        : null;
       return {
         status: "needs_context",
         domain,
         question,
+        suggested_options: suggestedOptions && suggestedOptions.length >= 2 ? suggestedOptions : null,
         form: null,
         app_format: null
       };
