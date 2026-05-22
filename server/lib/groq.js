@@ -12,11 +12,19 @@ Your ONLY job: extract what they said. Never invent.
 ${LANGUAGE_MIRROR_DIRECTIVE}
 
 APP TYPE RULES — read every word carefully:
-- "image" app: generates images, photos, portraits, transforms photos, superhero filter, avatar maker, logo maker, any visual output
+- "image" app: generates images, photos, portraits, transforms photos, superhero filter, avatar maker, logo maker, greeting cards, birthday cards, posters, memes, photo frames, invitations, flyers, any app where the OUTPUT is a PICTURE or VISUAL
 - "video" app: creates videos, animations, reels, cinematic clips, animates photos, talking avatars
-- "text" app: generates written content — blogs, emails, captions, scripts, stories, reports, product descriptions, resumes, cover letters, proposals, invoices, contracts, workout PLANS, meal PLANS, diet plans, study guides, itineraries, recipes, newsletters, SOPs, any document or written plan output. When in doubt and the output is clearly textual/document, choose "text".
+- "text" app: generates written content — blogs, emails, captions, scripts, stories, reports, product descriptions, resumes, cover letters, proposals, invoices, contracts, workout PLANS, meal PLANS, diet plans, study guides, itineraries, recipes, newsletters, SOPs, any document or written plan output
 - "audio" app: voice, music, speech, podcast, sound effects, text to speech, transcription
 - "vision" app: analyzes images, reads text from images, detects objects, medical image analysis
+
+CRITICAL IMAGE vs TEXT — this is the #1 mistake to avoid:
+- If the user mentions "photo", "picture", "image", "card" and the OUTPUT is a VISUAL (image with text on it, greeting card, poster, meme) → appType = "image"
+- If the OUTPUT is pure written text (birthday wishes as text, written poems) → appType = "text"
+- "birthday app with photo and text on it" = IMAGE (output is a picture)
+- "birthday wishes generator" = TEXT (output is written words)
+- "meme with text" = IMAGE. "caption generator" = TEXT.
+- When user says "in the photo" or "on the image" or "with picture" → almost always IMAGE
 
 CRITICAL: A "planner" app (workout planner, meal planner, travel planner) = appType "text" BUT appPurpose must describe WHAT it plans, not just say "text generation"
 
@@ -351,7 +359,7 @@ Treat this like helping a friend describe their idea — personal, direct, and s
 ⚠️ ABSOLUTE RULES:
 1. PURPOSE ANCHOR: The original app idea is LOCKED. User answers narrow it — they do NOT change what the app is.
    Example: original = "crop disease detection" → all questions must be about crop disease. Never drift.
-2. APP TYPE LOCK: App type (image/text/audio/video/vision) is already set. NEVER re-ask it.
+2. APP TYPE CORRECTION: The app type was initially set by an earlier system. If the conversation CLEARLY indicates the wrong type (e.g., user described a visual output like a greeting card with photos but type was set to "text"), you MUST correct it by including "corrected_app_type" in your response. Common mistakes: birthday card with photo = image (not text), meme with text overlay = image (not text).
 3. Ask questions ONE AT A TIME. Never ask two questions in one message.
 4. NEVER ask: "what variables do you need?" — that is YOUR job to figure out.
 5. NEVER declare "ready" until you have covered the 5 REQUIRED DIMENSIONS below.
@@ -405,9 +413,18 @@ NEVER return "ready" if:
 ✗ You don't know what format the output should be in
 
 VARIABLE QUALITY (only in "ready" response):
-- Exactly 3-4 variables, snake_case, domain-specific names
+- Exactly 3-4 variables, domain-specific names
 - Each has: name, a descriptive placeholder, a realistic test_value
 - Variables = the EXACT data the end-user types in when running the app
+- ⚠️ VARIABLE NAMING — MOST IMPORTANT RULE:
+  NEVER use generic/developer names. Every variable name must be in plain human language that any user understands.
+  ❌ BANNED names: main_input, context, output_style, details, input_text, user_input, content, query, description, parameters
+  ✅ GOOD names: Use the actual thing the user provides, written naturally:
+    - For birthday card app: "birthday_person_name", "your_photo", "wish_message"
+    - For resume app: "full_name", "work_experience", "job_title_applying_for"
+    - For legal app: "what_happened", "your_city_state", "your_role_in_dispute"
+    - For recipe app: "dish_name", "dietary_restrictions", "serving_count"
+  The name should tell the user EXACTLY what to type without reading the placeholder.
 - ⚠️ USER PERSPECTIVE RULE: NEVER create variables requiring domain expertise the end-user doesn't have
   BAD: section_number (user doesn't know IPC sections), diagnosis_code, article_citation, statute_reference
   GOOD: incident_description ("what happened"), situation_type ("type of dispute"), location, their_role
@@ -431,12 +448,13 @@ Return STRICTLY as JSON (no markdown, no explanation outside JSON):
 {
   "status": "needs_context" | "ready",
   "domain_identified": "Specific domain, e.g.: Agricultural - Crop Disease Detection",
+  "corrected_app_type": "ONLY include this if the initial app type was WRONG. Set to the correct type: text|image|audio|video|vision. Omit if the initial type is correct.",
   "dimensions_covered": ["D1", "D3"],
   "question": "ONLY if needs_context: one focused question targeting the most important missing dimension. Include 2-3 inline examples to guide the user — write examples as plain text inside parentheses like (e.g., episode title, speaker name, script notes). NEVER wrap examples in single quotes or double quotes.",
   "suggested_options": ["3-5 contextual answer options as short chip labels, or null if free text is better"],
   "form": {
     "options": ["4 specific features of this exact app"],
-    "variables": [{"name": "snake_case_name", "placeholder": "specific helpful hint", "test_value": "realistic domain example"}]
+    "variables": [{"name": "human_readable_name", "placeholder": "specific helpful hint", "test_value": "realistic domain example"}]
   }
 }
 `;
@@ -489,6 +507,13 @@ function parseTriageResponse(rawContent, formatFallback, appPurpose, languageHin
     const domain =
       String(parsed.domain_identified || parsed.domain || "").trim() || null;
 
+    // Extract type correction if the LLM detected the wrong type
+    const correctedType = parsed.corrected_app_type
+      && ALLOWED_TRIAGE_APP_FORMATS.includes(String(parsed.corrected_app_type).trim().toLowerCase())
+      ? String(parsed.corrected_app_type).trim().toLowerCase()
+      : null;
+    const effectiveType = correctedType || fallbackType;
+
     if (parsed.status === "needs_context") {
       const question = String(parsed.question || "").trim();
       if (!question || question.length < 10) {
@@ -507,6 +532,7 @@ function parseTriageResponse(rawContent, formatFallback, appPurpose, languageHin
         domain,
         question,
         suggested_options: suggestedOptions && suggestedOptions.length >= 2 ? suggestedOptions : null,
+        corrected_app_type: correctedType,
         form: null,
         app_format: null
       };
@@ -516,9 +542,9 @@ function parseTriageResponse(rawContent, formatFallback, appPurpose, languageHin
       return readyShape(domain, fallbackType, buildDynamicContextFallback(fallbackType, safePurpose, languageHint));
     }
 
-    const fallbackForm = buildDynamicContextFallback(fallbackType, safePurpose, languageHint);
+    const fallbackForm = buildDynamicContextFallback(effectiveType, safePurpose, languageHint);
     const form = parsed.form && typeof parsed.form === "object" ? parsed.form : {};
-    return readyShape(domain, fallbackType, {
+    return readyShape(domain, effectiveType, {
       options: sanitizeStringList(form.options, 4, 4, fallbackForm.options),
       variables: sanitizeVariableObjects(form.variables, 3, 4, fallbackForm.variables)
     });
@@ -544,7 +570,7 @@ async function triageDynamicContext({ appType, appPurpose, languageHint, convers
     : "";
 
   const userTaskPrompt = `ORIGINAL APP IDEA (LOCKED): "${safePurpose}"
-App type is LOCKED to: "${formatFallback}" — do NOT ask the user to choose an app type.
+App type is initially set to: "${formatFallback}". If the user's description clearly indicates a DIFFERENT output type (e.g., they described a visual/image output but type says "text"), correct it by including corrected_app_type in your response. Do NOT ask the user to choose an app type.
 Language mode: ${safeLang}.${answeredContext}
 
 Look at the conversation history. If it already answers the key domain questions (use case, vertical, output format), return "ready" with domain-appropriate variables immediately.

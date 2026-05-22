@@ -629,7 +629,11 @@ async function buildStep0Response(session, text) {
         'background remov', 'remove background', 'bg remov', 'image generat', 'generate image',
         'photo generat', 'interior design', 'room design', 'logo generat', 'logo maker',
         'portrait', 'art generat', 'image creat', 'photo edit', 'image edit',
-        'visual generat', 'thumbnail', 'product photo', 'banner maker', 'illustration'
+        'visual generat', 'thumbnail', 'product photo', 'banner maker', 'illustration',
+        'greeting card', 'birthday card', 'card maker', 'card generat', 'poster',
+        'meme', 'photo frame', 'photo filter', 'in the photo', 'on the image',
+        'text on image', 'text overlay', 'image with text', 'invitation',
+        'flyer', 'avatar', 'wallpaper', 'sticker', 'with photo', 'with picture'
       ],
       video: [
         'video generat', 'generate video', 'video creat', 'animate', 'animation',
@@ -682,14 +686,27 @@ async function buildStep0Response(session, text) {
     const hasPurpose = ext?.appPurpose && ext.appPurpose.length > 5;
 
     if (hasPurpose) {
-      // AGENTIC APPROACH: Use triage to determine format + ask domain questions simultaneously.
-      // Default to 'text' (most common type) — triage will correct if wrong.
-      session.appType = 'text';
+      // AGENTIC APPROACH: Smart default based on purpose keywords.
+      // Detect if the purpose is likely visual (image) or textual.
+      const purposeL = ext.appPurpose.toLowerCase();
+      const imageSignals = ['photo', 'picture', 'image', 'card', 'poster', 'meme', 'frame', 'banner',
+        'flyer', 'invitation', 'greeting', 'visual', 'avatar', 'portrait', 'logo', 'thumbnail',
+        'in the photo', 'on the image', 'with picture', 'wallpaper', 'sticker'];
+      const videoSignals = ['video', 'animation', 'animate', 'reel', 'clip', 'cinematic'];
+      const audioSignals = ['audio', 'voice', 'music', 'speech', 'podcast', 'sound', 'tts'];
+      const visionSignals = ['detect', 'analyze image', 'scan', 'ocr', 'read from image'];
+
+      let inferredType = 'text'; // default
+      if (imageSignals.some(s => purposeL.includes(s))) inferredType = 'image';
+      else if (videoSignals.some(s => purposeL.includes(s))) inferredType = 'video';
+      else if (audioSignals.some(s => purposeL.includes(s))) inferredType = 'audio';
+      else if (visionSignals.some(s => purposeL.includes(s))) inferredType = 'vision';
+
+      session.appType = inferredType;
       if (!session.extraction) session.extraction = {};
-      session.extraction.appType = 'text';
-      console.log(`[Smart Infer] No explicit type for "${ext.appPurpose.substring(0, 50)}" — defaulting to text, triage will validate.`);
+      session.extraction.appType = inferredType;
+      console.log(`[Smart Infer] No explicit type for "${ext.appPurpose.substring(0, 50)}" — inferred '${inferredType}' from purpose keywords.`);
       // Fall through to triage below — it will ask smart domain questions
-      // and include "if you wanted images/audio/video, let me know" in its response
     } else {
       // Truly zero context — user said something too vague. Show format chips.
       session.step = 0;
@@ -741,6 +758,13 @@ async function buildStep0Response(session, text) {
             coins: null
           };
         }
+      }
+
+      // Apply type correction if triage detected a misclassification
+      if (triageResult.corrected_app_type && triageResult.corrected_app_type !== session.appType) {
+        console.log(`[Triage] Type correction: ${session.appType} → ${triageResult.corrected_app_type}`);
+        session.appType = triageResult.corrected_app_type;
+        if (session.extraction) session.extraction.appType = triageResult.corrected_app_type;
       }
 
       // AI satisfied or hit max rounds — save variables for Live Preview
