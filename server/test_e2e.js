@@ -20,20 +20,20 @@ async function testCategory(name, sessionId, initialMsg, formOptions) {
   console.log(`[1] Initial → ui:${r.uiType} | reply:${r.reply?.substring(0, 80)}...`);
 
   // Handle triage if needed
-  if (!r.uiType || r.uiType === "text") {
+  if (!r.uiType || r.uiType === "text" || r.uiType === "chips") {
     if (r.uiType === "chips") {
       // Select first chip
       const chip = r.uiData?.options?.[0] || "Text";
       r = await send(sessionId, chip);
       console.log(`[1b] Chip → ui:${r.uiType} | reply:${r.reply?.substring(0, 80)}...`);
     }
-    if (!r.uiType || r.uiType === "text") {
+    if (!r.uiType || r.uiType === "text" || r.uiType === "chips") {
       // Triage question — answer it
       r = await send(sessionId, formOptions.triageAnswer || "Yes, that works for me");
       console.log(`[1c] Triage → ui:${r.uiType} | reply:${r.reply?.substring(0, 80)}...`);
     }
     // Second triage round if needed
-    if (!r.uiType || r.uiType === "text") {
+    if (!r.uiType || r.uiType === "text" || r.uiType === "chips") {
       r = await send(sessionId, "Yes, exactly what I need");
       console.log(`[1d] Triage2 → ui:${r.uiType} | reply:${r.reply?.substring(0, 80)}...`);
     }
@@ -85,16 +85,30 @@ async function testCategory(name, sessionId, initialMsg, formOptions) {
   console.log(`  ✅ Preview: "${r.uiData.appName}" | ${r.uiData.cost} coins`);
   console.log(`     Vars: ${r.uiData.variablesUsed?.join(", ")}`);
 
-  // Step 5: Publish
-  r = await send(sessionId, "Publish App");
-  console.log(`[5] Publish → ui:${r.uiType}`);
+  // Step 5: Approve
+  r = await send(sessionId, "Approve App");
+  console.log(`[5] Approve → ui:${r.uiType}`);
+
+  if (r.uiType !== "seo_preview") {
+    console.log(`  ❌ FAIL: Expected seo_preview, got ${r.uiType}`);
+    return false;
+  }
+  console.log(`  ✅ SEO Preview shown: "${r.uiData.appName}"`);
+
+  // Step 6: Publish
+  const publishPayload = {
+    appName: r.uiData.appName || "My App",
+    appDescription: r.uiData.appDescription || "My App Description",
+    tags: r.uiData.tags || []
+  };
+  r = await send(sessionId, `SEO_PUBLISH::${JSON.stringify(publishPayload)}`);
+  console.log(`[6] Publish → ui:${r.uiType}`);
 
   if (r.uiType !== "success") {
     console.log(`  ❌ FAIL: Expected success, got ${r.uiType}`);
     return false;
   }
   console.log(`  ✅ PUBLISHED: "${r.uiData.appName}" @ ${r.uiData.costPerRun} coins`);
-  console.log(`     URL: ${r.uiData.mockUrl}`);
   return true;
 }
 

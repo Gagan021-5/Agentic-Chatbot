@@ -115,16 +115,47 @@ function sanitizeStringList(list, minLen, maxLen, fallback) {
   return fallback.slice(0, maxLen);
 }
 
-function sanitizeVariableObjects(list, minLen, maxLen, fallback) {
+function prettifyVariableName(name, appType) {
+  let clean = String(name || "").trim();
+  if (!clean) return "";
+  const lower = clean.toLowerCase();
+  
+  // Map developer jargon directly
+  if (lower === "main_input" || lower === "input_text" || lower === "user_input" || lower === "input") {
+    const type = String(appType || "text").toLowerCase();
+    if (type === "text") return "Topic / Details";
+    if (type === "image") return "Visual Subject";
+    if (type === "audio") return "Script Text";
+    if (type === "video") return "Video Concept";
+    if (type === "vision") return "Image Analysis Goal";
+    return "Topic / Details";
+  }
+  if (lower === "context" || lower === "background") {
+    return "Additional Context";
+  }
+  if (lower === "output_style" || lower === "style") {
+    return "Preferred Style";
+  }
+  if (lower === "details") {
+    return "Specific Requirements";
+  }
+
+  // Replace snake_case and camelCase to human readable title case
+  clean = clean.replace(/_/g, " ");
+  clean = clean.replace(/([a-z])([A-Z])/g, "$1 $2");
+  return clean.split(/\s+/).map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(" ");
+}
+
+function sanitizeVariableObjects(list, minLen, maxLen, fallback, appType) {
   const normalized = Array.isArray(list)
     ? list
       .map((item) => {
         if (typeof item === "string") {
-          return { name: item.trim(), placeholder: "Enter details...", test_value: "" };
+          return { name: prettifyVariableName(item.trim(), appType), placeholder: "Enter details...", test_value: "" };
         }
         if (!item || typeof item !== "object") return null;
         return {
-          name: String(item.name || "").trim(),
+          name: prettifyVariableName(String(item.name || "").trim(), appType),
           placeholder: String(item.placeholder || "Enter details...").trim(),
           test_value: String(item.test_value || "").trim()
         };
@@ -139,76 +170,121 @@ function sanitizeVariableObjects(list, minLen, maxLen, fallback) {
 }
 
 function buildDynamicContextFallback(appType, appPurpose, languageHint) {
-  // Minimal generic fallback — only fires when BOTH Groq AND OpenRouter are completely down.
-  // In normal operation, the LLM generates domain-specific variables dynamically.
   const lang = normalizeLanguageHint(languageHint);
   const safeType = String(appType || "text").toLowerCase();
   const p = String(appPurpose || "").trim();
+  const purposeL = p.toLowerCase();
 
-  if (lang === "Hindi") {
-    return {
-      options: ["उपयोगकर्ता के लिए पर्सनल परिणाम", "स्पष्ट और संरचित आउटपुट", "तेज और विश्वसनीय प्रतिक्रिया", "कस्टम इनपुट आधारित जनरेशन"],
-      variables: [
-        { name: "मुख्य इनपुट", placeholder: "अपनी आवश्यकता लिखें...", test_value: "" },
-        { name: "संदर्भ", placeholder: "कॉन्टेक्स्ट या पृष्ठभूमि जोड़ें...", test_value: "" },
-        { name: "पसंदीदा स्टाइल", placeholder: "जैसे: प्रोफेशनल, फ्रेंडली...", test_value: "" }
-      ]
-    };
-  }
-  if (lang === "Hinglish") {
-    return {
-      options: ["Personalized output", "Structured result", "Fast response", "Custom input based"],
-      variables: [
-        { name: "main_input", placeholder: "Aap kya generate karna chahte ho?", test_value: "" },
-        { name: "context", placeholder: "Background ya extra details", test_value: "" },
-        { name: "preferred_style", placeholder: "Jaise: Formal, Friendly", test_value: "" }
-      ]
-    };
+  // Smart domain-specific variables based on app purpose keywords
+  let domainVars = null;
+  let domainOptions = null;
+
+  if (purposeL.includes("recipe") || purposeL.includes("cooking") || purposeL.includes("dish") || purposeL.includes("food")) {
+    domainOptions = ["Nutritional guidelines", "Dietary preference compliance", "Clear step-by-step instructions", "Cooking time optimizations"];
+    domainVars = [
+      { name: "Recipe Name", placeholder: "e.g., Paneer Butter Masala, Keto Salad", test_value: "Paneer Butter Masala" },
+      { name: "Available Ingredients", placeholder: "e.g., paneer, tomatoes, cream, spices", test_value: "paneer, tomatoes, cream, spices" },
+      { name: "Dietary Restrictions", placeholder: "e.g., vegetarian, low-carb, nut-free", test_value: "vegetarian" }
+    ];
+  } else if (purposeL.includes("cover letter") || purposeL.includes("resume") || purposeL.includes("job application")) {
+    domainOptions = ["Tailored tone formatting", "ASO/Keywords highlighting", "Structured professional summary", "Value-proposition alignment"];
+    domainVars = [
+      { name: "Job Title", placeholder: "e.g., Software Engineer, Product Designer", test_value: "Software Engineer" },
+      { name: "Company Name", placeholder: "e.g., Google, Stripe, Local Startup", test_value: "Google" },
+      { name: "Key Experience Highlights", placeholder: "e.g., 3 years of React dev, built SaaS metrics dashboard", test_value: "3 years of React dev, built SaaS metrics dashboard" }
+    ];
+  } else if (purposeL.includes("room design") || purposeL.includes("interior") || purposeL.includes("decorate") || purposeL.includes("furniture") || purposeL.includes("room designer")) {
+    domainOptions = ["Visual theme alignment", "Budget-focused recommendations", "Space layout optimization", "High-fidelity rendering"];
+    domainVars = [
+      { name: "Room Type", placeholder: "e.g., bedroom, living room, study room", test_value: "bedroom" },
+      { name: "Design Style", placeholder: "e.g., modern minimalist, luxury, cozy japandi", test_value: "modern minimalist" },
+      { name: "Key Space Goal", placeholder: "e.g., double bed, study desk, high storage", test_value: "study desk, high storage" }
+    ];
+  } else if (purposeL.includes("birthday") || purposeL.includes("greeting") || purposeL.includes("wish") || purposeL.includes("card")) {
+    domainOptions = ["Heartfelt customized messaging", "Tone-matched output", "Platform-appropriate length", "Memorable quotes inclusion"];
+    domainVars = [
+      { name: "Recipient Name", placeholder: "e.g., Amit, Sarah, Mom", test_value: "Amit" },
+      { name: "Occasion Details", placeholder: "e.g., 30th birthday, wedding anniversary", test_value: "30th birthday" },
+      { name: "Special Memories", placeholder: "e.g., our college trip to Goa, always helps with advice", test_value: "our college trip to Goa" }
+    ];
+  } else if (purposeL.includes("workout") || purposeL.includes("fitness") || purposeL.includes("gym") || purposeL.includes("exercise") || purposeL.includes("fit")) {
+    domainOptions = ["Personalized reps and sets", "Safety constraints check", "Equipment-optimized plans", "Difficulty progression"];
+    domainVars = [
+      { name: "Fitness Goal", placeholder: "e.g., weight loss, muscle building, stamina", test_value: "muscle building" },
+      { name: "Available Equipment", placeholder: "e.g., dumbbells, resistance bands, bodyweight only", test_value: "dumbbells" },
+      { name: "Time Duration", placeholder: "e.g., 30 minutes, 1 hour", test_value: "45 minutes" }
+    ];
+  } else if (purposeL.includes("logo") || purposeL.includes("branding") || purposeL.includes("brand design")) {
+    domainOptions = ["Brand values alignment", "Color palette compliance", "Clean geometry", "ASO optimization"];
+    domainVars = [
+      { name: "Brand Name", placeholder: "e.g., Zenith FinTech, GreenBites Cafe", test_value: "Zenith FinTech" },
+      { name: "Industry Niche", placeholder: "e.g., financial services, healthy food delivery", test_value: "financial services" },
+      { name: "Preferred Colors & Style", placeholder: "e.g., blue and white, clean modern, bold", test_value: "blue and white, clean modern" }
+    ];
+  } else if (purposeL.includes("legal") || purposeL.includes("law") || purposeL.includes("contract") || purposeL.includes("advocate") || purposeL.includes("ipc")) {
+    domainOptions = ["Jurisdiction accuracy check", "Plain-language explanations", "Standard legal draft sections", "AI citation reference"];
+    domainVars = [
+      { name: "Incident Description", placeholder: "Explain in simple terms what happened...", test_value: "landlord refusing to return deposit after lease ended" },
+      { name: "Location State or City", placeholder: "e.g., New Delhi, India, or California, USA", test_value: "New Delhi, India" },
+      { name: "Your Desired Goal", placeholder: "e.g., recover full deposit, draft eviction response", test_value: "recover full deposit" }
+    ];
+  } else if (purposeL.includes("podcast") || purposeL.includes("narration") || purposeL.includes("audio content") || purposeL.includes("convert to audio")) {
+    domainOptions = ["Voice tone guidelines", "Enthusiastic pacing rules", "No-jargon explanations", "Clean script structures"];
+    domainVars = [
+      { name: "Audio Topic", placeholder: "e.g., Ancient Civilizations, Climate Change", test_value: "Ancient Civilizations" },
+      { name: "Preferred Format", placeholder: "e.g., lecture, informal podcast, audio story", test_value: "lecture" },
+      { name: "Tone & Style", placeholder: "e.g., enthusiastic, humorous, clear and formal", test_value: "clear and enthusiastic" }
+    ];
   }
 
-  // Generic per-type fallbacks (minimal — the LLM handles specifics)
+  if (domainVars) {
+    return { options: domainOptions, variables: domainVars };
+  }
+
+  // Prettified default fallbacks
   const typeDefaults = {
     image: {
       options: ["Style control", "High-quality output", "Composition guidance", "Format flexibility"],
       variables: [
-        { name: "subject", placeholder: "What should appear in the image?", test_value: "" },
-        { name: "style", placeholder: "Visual style or aesthetic", test_value: "" },
-        { name: "details", placeholder: "Any specific requirements", test_value: "" }
+        { name: "Visual Subject", placeholder: "What should appear in the image?", test_value: "A majestic lion on a rock" },
+        { name: "Visual Style", placeholder: "Visual style or aesthetic (e.g. photorealistic, anime)", test_value: "photorealistic" },
+        { name: "Specific Requirements", placeholder: "Any special colors, lighting, or details", test_value: "golden hour lighting" }
       ]
     },
     video: {
       options: ["Scene control", "Style consistency", "Platform-ready output", "Motion effects"],
       variables: [
-        { name: "concept", placeholder: "What story or scene to create?", test_value: "" },
-        { name: "visual_style", placeholder: "Cinematic, vlog, animation...", test_value: "" },
-        { name: "platform", placeholder: "YouTube, Instagram, TikTok...", test_value: "" }
+        { name: "Video Concept", placeholder: "What story or scene to create?", test_value: "A spaceship launching into a nebula" },
+        { name: "Visual Style", placeholder: "Cinematic, vlog, animation...", test_value: "Cinematic sci-fi" },
+        { name: "Target Platform", placeholder: "YouTube, Instagram, TikTok...", test_value: "YouTube" }
       ]
     },
     audio: {
       options: ["Voice selection", "Language support", "Pacing control", "Emotion control"],
       variables: [
-        { name: "script", placeholder: "Text to convert to speech", test_value: "" },
-        { name: "voice_style", placeholder: "Male/Female, tone, accent...", test_value: "" },
-        { name: "language", placeholder: "English, Hindi, Spanish...", test_value: "" }
+        { name: "Script Content", placeholder: "Text or script to convert to speech", test_value: "Welcome back to another episode of our history podcast." },
+        { name: "Voice Tone", placeholder: "Male/Female, energetic, calm, accent...", test_value: "Male, clear and energetic" },
+        { name: "Audio Language", placeholder: "English, Hindi, Spanish...", test_value: "English" }
       ]
     },
     vision: {
       options: ["Accurate extraction", "Structured output", "Confidence scoring", "Use-case analysis"],
       variables: [
-        { name: "task_type", placeholder: "OCR, object detection, image QA...", test_value: "" },
-        { name: "output_format", placeholder: "JSON, plain text, bullets...", test_value: "" },
-        { name: "special_instructions", placeholder: "Focus areas or constraints", test_value: "" }
+        { name: "Source Image", placeholder: "Upload your image", test_value: "photo of product" },
+        { name: "Image Analysis Goal", placeholder: "What details should the AI detect in the image?", test_value: "detect any scratches or defects" },
+        { name: "Output Format", placeholder: "JSON, plain text, bullets...", test_value: "JSON report" }
       ]
     },
     text: {
       options: ["Tone control", "Structured output", "Goal-focused generation", "Context awareness"],
       variables: [
-        { name: "main_input", placeholder: "Describe what you want generated", test_value: "" },
-        { name: "context", placeholder: "Background or additional details", test_value: "" },
-        { name: "output_style", placeholder: "Format, tone, length preferences", test_value: "" }
+        { name: "Topic / Details", placeholder: "Describe what you want the AI to write about", test_value: "The importance of learning to cook at home" },
+        { name: "Additional Context", placeholder: "Background details or target audience", test_value: "targeted at college students" },
+        { name: "Preferred Style", placeholder: "Format, tone, length preferences", test_value: "3-paragraph email, casual tone" }
       ]
     }
   };
+
   return typeDefaults[safeType] || typeDefaults.text;
 }
 
@@ -218,7 +294,7 @@ function parseDynamicContextPayload(rawContent, appType, appPurpose, languageHin
     const parsed = JSON.parse(String(rawContent || "{}").replace(/```json/gi, "").replace(/```/g, "").trim());
     return {
       options: sanitizeStringList(parsed.options, 4, 4, fallback.options),
-      variables: sanitizeVariableObjects(parsed.variables, 3, 4, fallback.variables)
+      variables: sanitizeVariableObjects(parsed.variables, 3, 4, fallback.variables, appType)
     };
   } catch {
     return fallback;
@@ -578,10 +654,10 @@ function parseTriageResponse(rawContent, formatFallback, appPurpose, languageHin
     const form = parsed.form && typeof parsed.form === "object" ? parsed.form : {};
     return readyShape(domain, effectiveType, {
       options: sanitizeStringList(form.options, 4, 4, fallbackForm.options),
-      variables: sanitizeVariableObjects(form.variables, 3, 4, fallbackForm.variables)
+      variables: sanitizeVariableObjects(form.variables, 3, 4, fallbackForm.variables, effectiveType)
     });
   } catch {
-    return readyShape(null, fallbackType, buildDynamicContextFallback(fallbackType, languageHint));
+    return readyShape(null, fallbackType, buildDynamicContextFallback(fallbackType, "", languageHint));
   }
 }
 

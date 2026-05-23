@@ -5,6 +5,7 @@ import { generatePromptTemplate, generateSEO, applyPromptInstruction, buildPromp
 import { buildBudgetTiers, getModelCost } from "./costCalculator.js";
 import { isOffTopic, OFF_TOPIC_RESPONSE } from "./requirementRouter.js";
 import { saveSession, deleteSession } from "./redis.js";
+import { getAgenticIntent } from "./intentEngine.js";
 
 const COST_WARNING_THRESHOLD = 100;
 
@@ -856,15 +857,35 @@ async function buildStep0Response(session, text) {
     } // end else (not affirmation)
   } // end if (!session.dynamicContext)
 
-  // 3. BUDGET QUESTION (Only asked AFTER it fully understands the app)
-  if (!session.extraction?.budget && !session.deepAnswers?.budgetPreference) {
-    session.currentDeepField = "budgetPreference";
-    session.awaitingDeepAnswer = true;
-    await saveSession(session);
+  // 3. BUDGET QUESTION (Only asked AFTER it fully understands the app and the form has been confirmed)
+  const isFormConfirmed = Boolean(session.formConfirmed);
+  if (isFormConfirmed) {
+    if (!session.extraction?.budget && !session.deepAnswers?.budgetPreference) {
+      session.currentDeepField = "budgetPreference";
+      session.awaitingDeepAnswer = true;
+      await saveSession(session);
+      return {
+        reply: "## 💰 Almost There — Budget Selection\n\nI've gathered all the details I need to architect your app! Just one last thing — **what's your target budget per generation?**\n\nThis helps me recommend the perfect AI model for your use case.",
+        uiType: "chips",
+        uiData: { options: ["Free models only (0 coins)", "Low (< 5 coins)", "Medium (5 - 20 coins)", "Premium (> 20 coins)"] },
+        nextStep: 0,
+        coins: null
+      };
+    }
+  } else {
+    // Return the multi_select_form first!
     return {
-      reply: "## 💰 Almost There — Budget Selection\n\nI've gathered all the details I need to architect your app! Just one last thing — **what's your target budget per generation?**\n\nThis helps me recommend the perfect AI model for your use case.",
-      uiType: "chips",
-      uiData: { options: ["Free models only (0 coins)", "Low (< 5 coins)", "Medium (5 - 20 coins)", "Premium (> 20 coins)"] },
+      reply: localizedText(
+        session,
+        "## 📋 Customize Your App Configuration\n\nI've generated a draft of key features and input fields based on our conversation.\n\nVerify or adjust the options below, then click **Confirm options**!",
+        "## 📋 आपके ऐप का सेटअप\n\nमैंने हमारी बातचीत के आधार पर प्रमुख विशेषताओं और इनपुट फ़ील्ड्स का एक ड्राफ्ट तैयार किया है।\n\nकृपया नीचे दिए गए विकल्पों की जांच करें, फिर **Confirm options** पर क्लिक करें!",
+        "## 📋 App Configuration Customise Karein\n\nMaine humari conversation ke basis par key features aur input fields ka ek draft generate kiya hai.\n\nNeeche diye options ko check/adjust karein, fir **Confirm options** par click karein!"
+      ),
+      uiType: "multi_select_form",
+      uiData: {
+        options: session.dynamicContext.options || [],
+        variables: session.dynamicContext.variables || []
+      },
       nextStep: 0,
       coins: null
     };
@@ -874,160 +895,7 @@ async function buildStep0Response(session, text) {
   return await showModels(session);
 }
 
-/* ────────────────────────────────────────────
-   EDGE CASE GUARDS
-   ──────────────────────────────────────────── */
-function checkEdgeCases(message, session) {
-  const text = normalize(message);
-  const msg = lower(text);
 
-  // Skip edge case guards for structured UI payloads (form submissions, model selections, etc.)
-  if (
-    text.startsWith("multi_select_form::") ||
-    text.startsWith("edit prompt::") ||
-    text.startsWith("confirm seo::") ||
-    text.startsWith("SEO_PUBLISH::") ||
-    text.startsWith("SEO_DRAFT::") ||
-    text.startsWith("SEO_EDIT::")
-  ) {
-    return null;
-  }
-
-  if (isOffTopic(text, session)) return OFF_TOPIC_RESPONSE;
-
-  // JAILBREAK / PROMPT INJECTION GUARD
-  const jailbreaks = ['ignore all previous', 'system prompt', 'developer mode', 'you are now', 'disregard instructions'];
-  if (jailbreaks.some(j => msg.includes(j))) {
-    return {
-      reply: "I am strictly programmed to help you build and configure apps for the RentPrompts marketplace. Let's get back on track. What kind of app would you like to build?",
-      uiType: "chips",
-      uiData: { options: ['Image app', 'Video app', 'Text app'] },
-      nextStep: session.step,
-      coins: null
-    };
-  }
-
-  // NSFW / POLICY VIOLATION GUARD
-  const nsfw = ['nsfw', 'porn', 'deepfake', 'nude', 'violence', 'illegal', 'hack'];
-  if (nsfw.some(n => msg.includes(n))) {
-    return {
-      reply: "I can only help build apps that comply with RentPrompts' safety and content guidelines. Please suggest a different idea.",
-      uiType: "text",
-      uiData: null,
-      nextStep: session.step,
-      coins: null
-    };
-  }
-
-  // MID-FLIGHT PIVOT GUARD
-  const pivots = ['actually i want', 'change to', 'instead let', 'can we build a'];
-  if (pivots.some(p => msg.includes(p)) && session.step > 0) {
-    return {
-      reply: "No problem, we can pivot! Let's reset the setup. What is the new app idea?",
-      uiType: "text",
-      uiData: null,
-      nextStep: 0,
-      coins: null,
-      clearSession: true
-    };
-  }
-
-  const trimmedText = text.trim();
-  
-  // 1. Pure Greeting Interceptor
-  // Only fires at step 0 with no history — prevents "hey" inside a real word/sentence from triggering
-  const isGreeting = /^(hi|hello|hey|hy|hola|greetings)[\s!\.]*$/i.test(trimmedText);
-
-  if (isGreeting && session.step === 0 && (session.history || []).length < 3) {
-    return {
-      reply:
-        "Hey there! 👋 I'm your **RentPrompts App Architect** — I help you design, configure, and publish AI-powered apps in minutes.\n\n**Just describe your app idea** and I'll handle the rest — from picking the right AI model to crafting the perfect prompt.\n\nWhat would you like to build today?",
-      uiType: null,
-      uiData: null,
-      nextStep: session.step,
-      coins: null
-    };
-  }
-
-  // 2. Abuse / gibberish guard
-  const symbolCount = (trimmedText.match(/[^a-zA-Z0-9\s]/g) || []).length;
-  
-  const isGibberish = 
-    trimmedText.length < 2 || // Too short
-    /(asdf|qwer|zxcv|hjkl|asdasd)/i.test(trimmedText) || // Expanded keyboard smash
-    /[a-zA-Z0-9]{20,}/.test(trimmedText) || // Huge 20+ char block with no spaces
-    (symbolCount > trimmedText.length / 2 && trimmedText.length > 5) || // Over 50% symbols
-    /[bcdfghjklmnpqrstvwxz]{5,}/i.test(trimmedText) || // NEW: 5+ consonants in a row (catches 'abcszs')
-    /(.)\1{4,}/i.test(trimmedText) || // 5+ of the exact same character
-    (!trimmedText.includes(' ') && trimmedText.length > 8 && /[0-9@#\$\%\^\&\*]/.test(trimmedText)); // NEW: 8+ chars, no spaces, mixed with numbers/symbols (catches 'asdasd@#q31')
-
-  // Only run gibberish detection at step 0 (no established session)
-  // Mid-conversation, unusual short inputs like "ipc" or domain jargon should never be rejected
-  if (isGibberish && session.step === 0) {
-    return {
-      // Changed the reply to be exactly what you want when nonsense is typed
-      reply: `Hmm, I didn't quite catch that! 🤔 Let me help — **what type of output** should your AI app generate?`,
-      uiType: 'chips',
-      uiData: { options: ['Text', 'Image', 'Audio', 'Video', 'Vision'] },
-      nextStep: session.step,
-      coins: null
-    };
-  }
-
-  if (!text || text === '') {
-    return {
-      reply: `I'm all ears! 🎧 Go ahead — **describe what you'd like to build** and I'll start architecting it for you.`,
-      uiType: 'text',
-      uiData: null,
-      nextStep: session.step,
-      coins: null
-    };
-  }
-
-  if (msg.includes('help') && text.trim().split(' ').length <= 3) {
-    return {
-      reply: `## 🚀 What Can I Build For You?\n\nHere's every type of AI app I can help you create:\n\n- 🖼️ **Image apps** — logos, posters, photo editing, avatars\n- 🎥 **Video apps** — reels, animations, talking avatars\n- 📝 **Text apps** — blogs, legal docs, planners, scripts\n- 🔊 **Audio apps** — voiceovers, podcasts, text-to-speech\n- 👁️ **Vision apps** — image analysis, OCR, object detection\n\nWhich type interests you?`,
-      uiType: 'chips',
-      uiData: { options: ['Image app', 'Video app', 'Text app', 'Audio app', 'Vision app', 'Help me choose'] },
-      nextStep: 0,
-      coins: null
-    };
-  }
-
-  if (msg.includes('start over') || msg.includes('restart') || msg.includes('reset') || msg.includes('new app') || msg.includes('different app')) {
-    return {
-      reply: `No problem! 🔄 Let's start fresh.\n\n**What kind of AI app would you like to build?** Just describe your idea and I'll take it from there.`,
-      uiType: 'chips',
-      uiData: { options: ['Image app', 'Video app', 'Text app', 'Audio app', 'Vision app'] },
-      nextStep: 0,
-      coins: null,
-      clearSession: true
-    };
-  }
-
-  if ((msg.includes('how much') || msg.includes('price') || msg.includes('cost') || msg.includes('joules')) && session.step < 4) {
-    return {
-      reply: `Great question! 💡 The cost depends on which AI model we select.\n\n**Price range:** FREE → 318 coins per run\n\nBut first, let me understand your app idea so I can recommend the best value model. **What kind of app are you building?**`,
-      uiType: session.appType ? 'text' : 'chips',
-      uiData: session.appType ? null : { options: ['Image app', 'Video app', 'Text app', 'Audio app', 'Vision app'] },
-      nextStep: session.step,
-      coins: null
-    };
-  }
-
-  const competitors = ['openai', 'chatgpt', 'midjourney', 'dalle', 'stable diffusion', 'runway', 'sora', 'adobe', 'canva', 'figma'];
-  if (competitors.some(c => msg.includes(c))) {
-    return {
-      reply: `I work specifically with the AI models available on RentPrompts marketplace.\n\nWant me to show you what's available?`,
-      uiType: 'chips',
-      uiData: { options: ['Yes show me models', 'Tell me more about RentPrompts', 'Start building my app'] },
-      nextStep: session.step,
-      coins: null
-    };
-  }
-
-  return null; 
-}
 
 /* ════════════════════════════════════════════
    MAIN ROUTER
@@ -1037,6 +905,41 @@ export async function route(session, message) {
   const rawText = String(message || "").substring(0, 1000);
   const text = normalize(rawText);
   const msg = lower(text);
+
+  // ─── 0. MULTI SELECT FORM SUBMISSION — MUST be first, before keyword matching or intent engines ───
+  const isMultiSelectForm = text.toLowerCase().startsWith("multi_select_form::");
+  if (isMultiSelectForm) {
+    const payload = parseMultiSelectPayload(message);
+    if (payload) {
+      if (!session.dynamicContext) session.dynamicContext = {};
+      session.dynamicContext.options = payload.selectedOptions || [];
+      session.dynamicContext.variables = (payload.variables || []).map(v => ({
+        name: v.name,
+        placeholder: v.placeholder || "Enter details...",
+        test_value: v.value || ""
+      }));
+      session.formConfirmed = true;
+
+      if (!session.extraction) session.extraction = {};
+      session.extraction.keyFeatures = payload.selectedOptions || [];
+
+      const budget = session.deepAnswers?.budgetPreference || session.extraction?.budget;
+      if (budget) {
+        return await showModels(session);
+      }
+
+      session.currentDeepField = "budgetPreference";
+      session.awaitingDeepAnswer = true;
+      await saveSession(session);
+      return {
+        reply: "## 💰 Almost There — Budget Selection\n\nI've gathered all the details I need to architect your app! Just one last thing — **what's your target budget per generation?**\n\nThis helps me recommend the perfect AI model for your use case.",
+        uiType: "chips",
+        uiData: { options: ["Free models only (0 coins)", "Low (< 5 coins)", "Medium (5 - 20 coins)", "Premium (> 20 coins)"] },
+        nextStep: 0,
+        coins: null
+      };
+    }
+  }
 
   // ─── 0. SEO PUBLISH / DRAFT — MUST be first, before ANY extraction or keyword matching ───
   // These payloads come from the SEOPreviewCard UI and contain JSON. They MUST NOT be
@@ -1114,6 +1017,40 @@ export async function route(session, message) {
     };
   }
 
+  // ══════════════════════════════════════════════════════════════════════════
+  // AGENTIC INTENT ENGINE — LLM-powered intent classification
+  // Replaces regex-based keyword matching for natural language understanding.
+  // Fast-paths (button clicks, chips) are handled inside getAgenticIntent.
+  // ══════════════════════════════════════════════════════════════════════════
+  const intent = await getAgenticIntent(text, session);
+  console.log(`[Router] Intent: ${intent.action} (${intent._source}) | confidence: ${intent.confidence}`);
+
+  // ── AGENTIC GUARD: Handle edge cases via LLM intent (replaces checkEdgeCases regex) ──
+  if (intent.action === "greeting" && session.step === 0 && (session.history || []).length < 3) {
+    return {
+      reply: "Hey there! 👋 I'm your **RentPrompts App Architect** — I help you design, configure, and publish AI-powered apps in minutes.\n\n**Just describe your app idea** and I'll handle the rest — from picking the right AI model to crafting the perfect prompt.\n\nWhat would you like to build today?",
+      uiType: null, uiData: null, nextStep: session.step, coins: null
+    };
+  }
+
+  if (intent.action === "off_topic" && intent.confidence !== "low") {
+    return OFF_TOPIC_RESPONSE;
+  }
+
+  if (intent.action === "policy_violation") {
+    return {
+      reply: "I can only help build apps that comply with RentPrompts' safety and content guidelines. Please suggest a different idea.",
+      uiType: "text", uiData: null, nextStep: session.step, coins: null
+    };
+  }
+
+  if (intent.action === "gibberish" && session.step === 0) {
+    return {
+      reply: `Hmm, I didn't quite catch that! 🤔 Let me help — **what type of output** should your AI app generate?`,
+      uiType: 'chips', uiData: { options: ['Text', 'Image', 'Audio', 'Video', 'Vision'] }, nextStep: session.step, coins: null
+    };
+  }
+
   // ─── 2a. CHANGE-PREFIX FAST PATH (step 2 or 3) ───────────────────────────
   // If the user explicitly prefixes with "Change:" while at the preview or publish step,
   // treat it as a direct app edit — UNLESS it's a completely different app idea (major pivot).
@@ -1179,31 +1116,8 @@ export async function route(session, message) {
   }
 
   // ─── 2. UNIVERSAL PIVOT & EDIT INTERCEPTOR ───
-  const editTriggers = ['change ', 'update ', 'switch ', 'actually', 'instead', 'tweak', 'edit '];
-  const isEditTrigger = editTriggers.some((t) => msg.includes(t)) || session.awaitingPromptTweak;
-
-  const formatRegex = /(image|video|audio|text|vision)\s+(app|generator|tool|creator)\b/i;
-  const isNewFormatMentioned = formatRegex.test(msg);
-
-  // TRIAGE GUARD: If the user is answering a triage/clarification question at step 0,
-  // do NOT treat their reply as a major pivot — they're giving us the info we asked for.
-  const isAnsweringTriage = session.step === 0 &&
-    (session.awaitingTriageAnswer === true || (session.triageRounds || 0) > 0) &&
-    !isNewFormatMentioned; // Only allow format correction (e.g. "actually image") to still pivot
-
-  const isMajorPivot =
-    !isAnsweringTriage && (
-      isNewFormatMentioned ||
-      msg.includes('app type') ||
-      msg.includes('domain') ||
-      msg.includes('instead') ||
-      msg.includes('new app') ||
-      msg.includes('different app') ||
-      /^(i want (to )?(build|make|create)|let'?s (build|make|create)|build an?|make an?|create an?)/i.test(msg) ||
-      // Catch "i want [noun] app" — e.g. "i want room designer app", "i want recipe app"
-      /\bi want\b.{2,40}\bapp\b/i.test(msg) ||
-      (session.awaitingPromptTweak && msg.includes('app'))
-    );
+  const isEditTrigger = intent.action === "edit_app" || intent.action === "select_model" || session.awaitingPromptTweak;
+  const isMajorPivot = intent.is_major_pivot || intent.action === "pivot_app";
 
   if (
     (isEditTrigger || isMajorPivot) &&
@@ -1211,7 +1125,7 @@ export async function route(session, message) {
     !text.toLowerCase().startsWith("multi_select")
   ) {
     // A. Model Change Request
-    if (msg.includes('model') || msg.includes('ai engine') || msg.includes('different ai')) {
+    if (intent.action === "select_model" || msg.includes('model') || msg.includes('ai engine') || msg.includes('different ai')) {
       if (session.step === 0 && !session.dynamicContext) {
         return {
           reply: `We'll pick the perfect AI model in just a moment! But first, let's finish scoping out the app.\n\n${session.lastQuestion || "What specific details should the app analyze?"}`,
@@ -1222,13 +1136,13 @@ export async function route(session, message) {
       }
       session.awaitingPromptTweak = false;
 
-      // SMART BUDGET DETECTION
-      const budgetMatch = msg.match(/(free|low|medium|premium)/i);
+      // SMART BUDGET DETECTION via LLM Intent
+      const budgetTier = intent.budget_tier || (msg.match(/(free|low|medium|premium)/i)?.[1]?.toLowerCase());
       
-      if (budgetMatch) {
+      if (budgetTier) {
           if (!session.extraction) session.extraction = {};
-          session.extraction.budget = budgetMatch[1].toLowerCase();
-          if (session.deepAnswers) session.deepAnswers.budgetPreference = budgetMatch[1].toLowerCase();
+          session.extraction.budget = budgetTier;
+          if (session.deepAnswers) session.deepAnswers.budgetPreference = budgetTier;
           await saveSession(session);
           return await showModels(session);
       } else {
@@ -1252,34 +1166,28 @@ export async function route(session, message) {
     }
 
     // B. Major Pivot (Changing App Type or Domain entirely)
-    const tweakKeywords = ['prompt', 'instruction', 'description', 'tone', 'make it', 'add a', 'remove', 'change the', 'rewrite'];
-    const isMinorTweak = tweakKeywords.some((kw) => msg.includes(kw)) && !isMajorPivot && session.step > 0;
+    const isMinorTweak = intent.action === "edit_app" && !isMajorPivot && session.step > 0;
 
     if (isMajorPivot && !isMinorTweak) {
-      let newType = parseChipAppType(text);
+      let newType = intent.app_type || parseChipAppType(text);
       if (!newType) {
         const match = msg.match(/(image|video|audio|text|vision)/i);
         if (match) newType = match[1].toLowerCase();
       }
 
       // ── FORMAT-ONLY PIVOT: User is changing the OUTPUT TYPE of the SAME app ──
-      // e.g., "change this to an audio app" / "make it generate audio instead"
       // Keep ALL context (purpose, triage answers, model), just swap appType + regenerate.
-      // Do NOT wipe history — the user described their app already, no need to re-ask.
       const isFormatOnlyPivot =
         newType &&                                      // a valid new format was found
         newType !== session.appType &&                  // it's actually different
         session.extraction?.appPurpose &&               // we already know the app purpose
         session.extraction.appPurpose.trim().length > 10 && // purpose is meaningful
-        !msg.includes('new app') &&
-        !msg.includes('different app') &&
-        !/^(i want (to )?(build|make|create)|let'?s (build|make|create)|build an?|make an?|create an?)/i.test(msg);
+        !isMajorPivot;
 
       if (isFormatOnlyPivot) {
         // Just swap the app type and regenerate — no triage restart!
         session.appType = newType;
         if (session.extraction) session.extraction.appType = newType;
-        // Reset dynamic context so the preview variables rebuild for the new type
         session.dynamicContext = null;
         session.modelId = null;
         session.modelCost = null;
@@ -1288,20 +1196,17 @@ export async function route(session, message) {
         session.awaitingPromptTweak = false;
         session.awaitingDeepAnswer = false;
         session.currentDeepField = null;
-        // Keep: session.history, session.extraction.appPurpose, session.deepAnswers
         await saveSession(session);
 
-        // Skip straight to model selection if we already have budget
         const hasBudget = session.deepAnswers?.budgetPreference || session.extraction?.budget;
         if (hasBudget) {
           return await showModels(session);
         }
-        // Otherwise just ask for budget (skip triage — purpose is already known)
         session.currentDeepField = 'budgetPreference';
         session.awaitingDeepAnswer = true;
         await saveSession(session);
         return {
-          reply: `Got it! Switching to an **${newType}** app — your incident briefing context is preserved.\n\nWhat budget per generation works for you?`,
+          reply: `Got it! Switching to an **${newType}** app — your context is preserved.\n\nWhat budget per generation works for you?`,
           uiType: 'chips',
           uiData: { options: ['Free models only (0 coins)', 'Low (< 5 coins)', 'Medium (5 - 20 coins)', 'Premium (> 20 coins)'] },
           nextStep: 0,
@@ -1341,7 +1246,6 @@ export async function route(session, message) {
     // C. Minor Tweak at the Preview Step
     if (session.step === 2) {
       session.awaitingPromptTweak = false;
-      // Apply the edit to session context FIRST (kills ghost memory), then regenerate
       applyEditToSession(session, message);
       try {
         const [newPromptData, newSeoData] = await Promise.all([
@@ -1351,7 +1255,6 @@ export async function route(session, message) {
         session.promptData = newPromptData;
         session.seoData = newSeoData;
       } catch (e) {
-        // Fallback: just patch the existing prompt text
         console.warn('[Edit] Regen failed, keeping patched promptData:', e.message);
         session.promptData = applyPromptInstruction(session.promptData, message);
       }
@@ -1399,9 +1302,6 @@ export async function route(session, message) {
     session.userType = session.extraction.userType;
   }
 
-  // 1. SMART INFERENCE: Auto-assign appType — TRUST the LLM.
-  // The extraction LLM is smart enough to know "resume generator" = text.
-  // Never reject its judgment — if it returned an appType, use it.
   if (!session.appType && session.extraction.appType) {
     session.appType = session.extraction.appType;
   }
@@ -1422,29 +1322,30 @@ export async function route(session, message) {
     };
   }
 
-  const edgeCaseResponse = checkEdgeCases(message, session);
-  if (edgeCaseResponse) {
-    if (edgeCaseResponse.clearSession) {
-      await deleteSession(session.sessionId);
-    }
-    return edgeCaseResponse;
+  // Edge cases handled by LLM intent above. Let's do simple keyword checks for others:
+  if (msg.includes('start over') || msg.includes('restart') || msg.includes('reset') || msg.includes('new app') || msg.includes('different app')) {
+    return {
+      reply: `No problem! 🔄 Let's start fresh.\n\n**What kind of AI app would you like to build?** Just describe your idea and I'll take it from there.`,
+      uiType: 'chips',
+      uiData: { options: ['Image app', 'Video app', 'Text app', 'Audio app', 'Vision app'] },
+      nextStep: 0,
+      coins: null,
+      clearSession: true
+    };
+  }
+
+  if (msg.includes('help') && text.trim().split(' ').length <= 3) {
+    return {
+      reply: `## 🚀 What Can I Build For You?\n\nHere's every type of AI app I can help you create:\n\n- 🖼️ **Image apps** — logos, posters, photo editing, avatars\n- 🎥 **Video apps** — reels, animations, talking avatars\n- 📝 **Text apps** — blogs, legal docs, planners, scripts\n- 🔊 **Audio apps** — voiceovers, podcasts, text-to-speech\n- 👁️ **Vision apps** — image analysis, OCR, object detection\n\nWhich type interests you?`,
+      uiType: 'chips',
+      uiData: { options: ['Image app', 'Video app', 'Text app', 'Audio app', 'Vision app', 'Help me choose'] },
+      nextStep: 0,
+      coins: null
+    };
   }
 
   // ─── STEP 0: First message — detect app type ────────
   if (session.step === 0) {
-    const greetings = ['hi', 'hello', 'hey', 'hii', 'helo', 'good morning', 'good evening', 'yo', 'sup', 'namaste', 'hola'];
-    const isGreeting = greetings.some(g => lower(text) === g || lower(text).startsWith(g + ' '));
-
-    if (isGreeting) {
-      await saveSession(session);
-      return {
-        reply: "Hey! I'm the RentPrompts App Creation Agent. What kind of AI app would you like to build today?",
-        uiType: null,
-        uiData: null,
-        nextStep: 0,
-        coins: null
-      };
-    }
 
     const isNotSure = lower(text).includes('not sure') || lower(text).includes('help me');
     if (isNotSure) {
