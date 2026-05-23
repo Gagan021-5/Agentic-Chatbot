@@ -631,21 +631,22 @@ app.post('/api/test-preview', async (req, res) => {
           wantsMale = speakerIsMale && !speakerIsFemale;
         }
 
-        // Murf voice IDs — FALCON model catalog only (Marcus is Gen2-only, not on FALCON)
-        // en-US-natalie = Female (works on FALCON), en-US-terrell = Male (deep, authoritative)
+        // Murf voice IDs — use simple actor names for broadest compatibility
         const MURF_VOICES = {
-          female: 'en-US-natalie',
-          male:   'en-US-terrell'   // Terrell: Calm, Conversational, Inspirational, Narration, Promo
+          female: 'natalie',
+          male:   'terrell'
         };
         const voiceId     = wantsMale ? MURF_VOICES.male : MURF_VOICES.female;
         const genderLabel = wantsMale ? 'Male (Terrell)' : 'Female (Natalie)';
-        console.log(`[Murf] Voice: ${genderLabel} → voice_id: ${voiceId} (source: ${explicitGender || 'inferred'})`);
+        console.log(`[Murf] Voice: ${genderLabel} → voiceId: ${voiceId} (source: ${explicitGender || 'inferred'})`);
 
         // Murf free plan: max ~3000 chars per request
         const ttsText = scriptContent.slice(0, 3000);
 
         try {
-          const murfRes = await fetch("https://global.api.murf.ai/v1/speech/stream", {
+          // Use the REST /v1/speech/generate endpoint (non-streaming) with base64 response
+          // The streaming /v1/speech/stream endpoint migrated to WebSocket-only and returns 500 on HTTP POST
+          const murfRes = await fetch("https://api.murf.ai/v1/speech/generate", {
             method: "POST",
             headers: {
               "api-key": murfKey,
@@ -653,19 +654,59 @@ app.post('/api/test-preview', async (req, res) => {
             },
             body: JSON.stringify({
               text: ttsText,
-              voice_id: voiceId,
-              style: "Conversational",
-              sample_rate: 24000
-              // no 'model' or 'format' fields — let Murf use defaults to avoid 406
-            })
+              voiceId: voiceId,
+              model: "GEN2",
+              locale: "en-US",
+              format: "MP3",
+              encodeAsBase64: true
+            }),
+            signal: AbortSignal.timeout(30000)
           });
 
           const contentType = murfRes.headers.get("content-type") || "";
-          if (!murfRes.ok || contentType.includes("application/json")) {
+
+          if (!murfRes.ok) {
             const errText = await murfRes.text();
             console.error("[Murf] TTS error:", murfRes.status, errText);
             previewResult = { type: "audio", url: null, data: scriptContent.slice(0, 4500) };
+          } else if (contentType.includes("application/json")) {
+            // REST endpoint returns JSON with audioFile (URL) or encodedAudio (base64)
+            const murfJson = await murfRes.json();
+            const audioBase64 = murfJson.encodedAudio || murfJson.audioFile || null;
+
+            if (audioBase64 && audioBase64.startsWith("data:")) {
+              // Already a full data URI
+              previewResult = {
+                type: "audio",
+                url: audioBase64,
+                data: scriptContent.slice(0, 4500),
+                voiceLabel: genderLabel
+              };
+              console.log(`[Murf] Audio generated (data URI)`);
+            } else if (audioBase64 && !audioBase64.startsWith("http")) {
+              // Raw base64 string — wrap as data URI
+              previewResult = {
+                type: "audio",
+                url: `data:audio/mpeg;base64,${audioBase64}`,
+                data: scriptContent.slice(0, 4500),
+                voiceLabel: genderLabel
+              };
+              console.log(`[Murf] Audio generated (base64, ${audioBase64.length} chars)`);
+            } else if (audioBase64 && audioBase64.startsWith("http")) {
+              // URL to hosted audio file
+              previewResult = {
+                type: "audio",
+                url: audioBase64,
+                data: scriptContent.slice(0, 4500),
+                voiceLabel: genderLabel
+              };
+              console.log(`[Murf] Audio generated (URL): ${audioBase64.slice(0, 80)}`);
+            } else {
+              console.warn("[Murf] No audio in response:", JSON.stringify(murfJson).slice(0, 200));
+              previewResult = { type: "audio", url: null, data: scriptContent.slice(0, 4500) };
+            }
           } else {
+            // Binary audio response (unlikely for /generate but handle gracefully)
             const audioBuffer = await murfRes.arrayBuffer();
             if (!audioBuffer.byteLength) {
               console.error("[Murf] Empty audio response");

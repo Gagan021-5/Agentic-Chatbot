@@ -43,25 +43,119 @@ function Avatar({ role }) {
   );
 }
 
-function renderText(text) {
-  return text.split("\n").map((line, i) => {
-    const parts = line.split(/(\*\*.*?\*\*)/g);
+function renderInline(text) {
+  // Split on **bold**, *italic*, and `code` patterns
+  const parts = text.split(/(\*\*.*?\*\*|\*.*?\*|`[^`]+`)/g);
+  return parts.map((part, j) => {
+    if (part.startsWith("**") && part.endsWith("**")) {
+      return <strong key={j} className="font-bold text-white">{part.slice(2, -2)}</strong>;
+    }
+    if (part.startsWith("*") && part.endsWith("*") && part.length > 2) {
+      return <em key={j} className="italic text-white/80">{part.slice(1, -1)}</em>;
+    }
+    if (part.startsWith("`") && part.endsWith("`")) {
+      return <code key={j} className="rounded bg-white/10 px-1.5 py-0.5 text-[12px] font-mono text-purple-300">{part.slice(1, -1)}</code>;
+    }
+    return part;
+  });
+}
 
-    return (
-      <p key={`${i}-${line.slice(0, 12)}`} className={i === 0 ? "" : "mt-3"}>
-        {parts.map((part, j) => {
-          if (part.startsWith("**") && part.endsWith("**")) {
-            return (
-              <strong key={j} className="font-bold text-white">
-                {part.slice(2, -2)}
-              </strong>
-            );
-          }
-          return part;
-        })}
+function renderText(text) {
+  const lines = text.split("\n");
+  const elements = [];
+  let listBuffer = [];
+  let listType = null; // 'ul' or 'ol'
+
+  function flushList() {
+    if (listBuffer.length === 0) return;
+    if (listType === 'ol') {
+      elements.push(
+        <ol key={`ol-${elements.length}`} className="mt-2 ml-4 list-decimal space-y-1 text-gray-300">
+          {listBuffer.map((item, li) => <li key={li} className="pl-1">{renderInline(item)}</li>)}
+        </ol>
+      );
+    } else {
+      elements.push(
+        <ul key={`ul-${elements.length}`} className="mt-2 ml-4 space-y-1 text-gray-300">
+          {listBuffer.map((item, li) => (
+            <li key={li} className="flex items-start gap-2">
+              <span className="mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full bg-rent-purple/60" />
+              <span>{renderInline(item)}</span>
+            </li>
+          ))}
+        </ul>
+      );
+    }
+    listBuffer = [];
+    listType = null;
+  }
+
+  lines.forEach((line, i) => {
+    const trimmed = line.trim();
+
+    // Horizontal rule / divider
+    if (/^-{3,}$/.test(trimmed) || /^_{3,}$/.test(trimmed)) {
+      flushList();
+      elements.push(<hr key={`hr-${i}`} className="my-3 border-white/10" />);
+      return;
+    }
+
+    // Heading: ## or ###
+    if (trimmed.startsWith("### ")) {
+      flushList();
+      elements.push(
+        <h4 key={`h4-${i}`} className="mt-3 mb-1 text-[13px] font-bold uppercase tracking-wide text-white/50 sm:text-[13.5px]">
+          {renderInline(trimmed.slice(4))}
+        </h4>
+      );
+      return;
+    }
+    if (trimmed.startsWith("## ")) {
+      flushList();
+      elements.push(
+        <h3 key={`h3-${i}`} className="mt-3 mb-1 text-[14px] font-bold text-white sm:text-[15px]">
+          {renderInline(trimmed.slice(3))}
+        </h3>
+      );
+      return;
+    }
+
+    // Bullet list: - item, • item, * item (but not bold **)
+    const bulletMatch = trimmed.match(/^[-•*]\s+(.+)/);
+    if (bulletMatch && !trimmed.startsWith("**")) {
+      if (listType !== 'ul') flushList();
+      listType = 'ul';
+      listBuffer.push(bulletMatch[1]);
+      return;
+    }
+
+    // Numbered list: 1. item, 2) item
+    const numMatch = trimmed.match(/^\d+[.)]\s+(.+)/);
+    if (numMatch) {
+      if (listType !== 'ol') flushList();
+      listType = 'ol';
+      listBuffer.push(numMatch[1]);
+      return;
+    }
+
+    // Empty line
+    if (!trimmed) {
+      flushList();
+      elements.push(<div key={`sp-${i}`} className="h-2" />);
+      return;
+    }
+
+    // Regular paragraph
+    flushList();
+    elements.push(
+      <p key={`p-${i}`} className={elements.length === 0 ? "" : "mt-2"}>
+        {renderInline(trimmed)}
       </p>
     );
   });
+
+  flushList();
+  return elements;
 }
 
 function AgentUI(props) {

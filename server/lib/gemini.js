@@ -323,11 +323,21 @@ ${LANGUAGE_MIRROR_DIRECTIVE}
 
 QUALITY RULES:
 1. systemPrompt: Define a tight AI persona. Include: role, domain expertise, tone, output format rules, and constraints. 3-5 sentences.
-2. userPrompt: Must be HIGHLY DETAILED (200-400 words). Structure it as:
-   a) CONTEXT BLOCK: Set the scenario using the $$variables
-   b) PROCESSING LOGIC: Step-by-step instructions on how to analyze/generate
-   c) OUTPUT FORMAT: Exactly how the response should look (headings, bullets, JSON, etc.)
-   d) CONSTRAINTS: What NOT to do (hallucinate, go off-topic, be generic)
+2. userPrompt — FORMAT DEPENDS ON APP TYPE:
+   ▸ For TEXT and AUDIO apps: Must be HIGHLY DETAILED (200-400 words). Structure it as:
+     a) A first-person scenario using the $$variables ("I want...", "My topic is...")
+     b) Step-by-step processing logic
+     c) Output format specification (headings, bullets, structure)
+     d) Constraints (what NOT to do)
+     DO NOT use markdown headers (##) inside the prompt — write it as flowing prose with labeled sections.
+   ▸ For IMAGE and VIDEO apps: Must be a CONCISE VISUAL DESCRIPTION (50-120 words). Write it as:
+     - A single flowing visual prompt describing the desired output
+     - Incorporate $$variables naturally: "A $$style $$subject with $$details"
+     - Include art direction: lighting, camera angle, color palette, mood
+     - End with quality keywords: "professional photography, 8K, ultra-detailed"
+     - DO NOT use ## headers, numbered steps, or "Processing Logic" — image generators don't read structured prompts
+     ❌ WRONG for image: "## Context\nI want to generate an image...\n## Processing Logic\n1. Identify the subject..."
+     ✅ RIGHT for image: "A $$style room design featuring $$subject, with $$details. Warm ambient lighting, architectural photography, 8K resolution."
 3. Use $$snake_case_variable syntax ONLY for the REQUIRED INPUT VARIABLES listed below. Do not invent extra variables.
 4. negativePrompt: For image/video apps, write a detailed negative prompt. For text/audio/vision, set to null.
 5. acceptImageInput: SMART DETECTION — do NOT blindly set true for all image apps.
@@ -366,6 +376,16 @@ QUALITY RULES:
     - For legal apps: The AI must cite actual IPC/BNS section text and real-world examples. If unsure, it must say so — never invent section content.
     - For medical apps: The AI must note when symptoms don't match stated diagnosis and recommend professional consultation.
     - The CONSTRAINTS block in userPrompt must explicitly say: "Do NOT hallucinate section numbers, case outcomes, or legal precedents. If the input is ambiguous or contradictory, state that clearly."
+12. FIRST-PERSON PERSPECTIVE (CRITICAL — #1 mistake to avoid):
+    The userPrompt is written FROM the end-user's point of view. The person running the app IS the real user — they are describing what THEY want.
+    - ALWAYS use first person: "I want...", "I need...", "My topic is...", "I am looking for..."
+    - NEVER use second person: "You want...", "You need...", "Your topic is..."
+    - NEVER use third person: "The user wants...", "The user needs..."
+    ❌ WRONG: "You want to generate educational audio content on a specific topic."
+    ✅ RIGHT: "I want to generate educational audio content on $$topic."
+    ❌ WRONG: "You have a preferred format in mind."
+    ✅ RIGHT: "My preferred format is $$format."
+    The systemPrompt (AI persona) can use "you" to address the user, but the userPrompt must ALWAYS be first-person.
 
 Return ONLY valid JSON:
 {
@@ -428,26 +448,50 @@ ${varList || 'Use the most logical 3-4 variables for this app type and purpose.'
 }
 
 export async function generateSEO(session) {
-  const systemPrompt = `You are an SEO Expert for an AI app marketplace.
-Generate marketplace metadata that describes what the app DOES for its users.
+  const systemPrompt = `You are an expert Product Marketer and App Store Optimization (ASO) specialist for a premium AI app marketplace.
+Your job: generate irresistible, high-converting marketplace metadata that makes users WANT to try the app instantly.
 ${LANGUAGE_MIRROR_DIRECTIVE}
 
-Rules:
-- App name: SHORT, catchy, describes the USE CASE (not the model name). Under 55 characters.
-  GOOD examples: "Podcast Script to Voice", "Legal Contract Analyzer", "Crop Disease Detector"
-  BAD examples: "lyriaudio", "lyria-3-pro app", "GeminiText" — NEVER use model names as app names.
-- Description: 1 sentence explaining what the user can DO with the app. Under 155 characters.
-  Focus on the user's task, NOT the model. Do NOT mention model names like "lyria", "gemini", "groq".
-  Example: "Convert your podcast scripts into natural-sounding audio with a professional AI voice."
-- Tags: exactly 10 tags, lowercase, hyphens not spaces. Based on the app's use case and domain.
-- Category must be one of: creative, business, education, healthcare, entertainment, productivity, social, other
+STRICT RULES — follow every single one:
+
+1. APP NAME (2-4 words MAXIMUM):
+   - Must be catchy, memorable, and sound like a premium SaaS product.
+   - Use power words: Forge, Studio, Craft, Spark, Genius, Pulse, Flow, Snap, Boost, Vault, Hive, Lens, Dash, Scope.
+   - Format options (pick whichever sounds best):
+     a) "BrandName: AI Subtitle" — e.g., "BrandForge: AI Logo Creator"
+     b) "ActionNoun + Domain" — e.g., "ScriptSpark AI"
+     c) "Catchy Compound" — e.g., "CropGuard Pro"
+   - NEVER use generic names like "Logo Maker", "Text Generator", "Image Tool", "Content App".
+   - NEVER include model names (lyria, gemini, groq, llama, GPT).
+   - Maximum 55 characters including subtitle.
+
+2. DESCRIPTION (under 150 characters, STRICT):
+   - Write engaging, benefit-driven copy — NOT a feature list.
+   - Lead with the VALUE to the user, not what the app "does".
+   - Highlight the "AI-powered" or "AI" aspect naturally.
+   - Use action verbs: Transform, Generate, Create, Craft, Design, Analyze, Unlock.
+   - GOOD: "Transform any idea into a stunning brand logo in seconds with AI."
+   - GOOD: "AI-powered legal guidance — describe your situation, get clear answers instantly."
+   - BAD: "Creates logos in PNG format." (too dry)
+   - BAD: "This app generates text content using AI." (too generic)
+   - NEVER mention model names, coin costs, or platform internals.
+
+3. TAGS (EXACTLY 7 tags):
+   - Highly searched, relevant, action-oriented SEO tags.
+   - Use hyphens, lowercase, no spaces.
+   - Focus on what users SEARCH for: user intent, use case, and benefit.
+   - GOOD tags: #brand-design, #ai-logo, #content-creator, #smart-writing, #photo-magic
+   - BAD tags: #png-output, #text-generation, #api-call, #ai-model (too technical / too generic)
+   - Mix of: 2 broad discovery tags + 3 niche use-case tags + 2 benefit/action tags.
+
+4. CATEGORY: one of: creative, business, education, healthcare, entertainment, productivity, social, other
 
 Return ONLY valid JSON with this exact schema:
 {
-  "appName": "string max 55 chars",
-  "appDescription": "string max 155 chars",
-  "tags": ["tag1", "tag2", "tag3", "tag4", "tag5", "tag6", "tag7", "tag8", "tag9", "tag10"],
-  "category": "creative | business | education | productivity | other"
+  "appName": "string, 2-4 words, max 55 chars",
+  "appDescription": "string, benefit-driven, max 150 chars",
+  "tags": ["tag1", "tag2", "tag3", "tag4", "tag5", "tag6", "tag7"],
+  "category": "creative | business | education | healthcare | entertainment | productivity | social | other"
 }`;
 
   const appPurpose = session.extraction?.appPurpose
@@ -460,14 +504,14 @@ Return ONLY valid JSON with this exact schema:
     .join(' | ')
     .slice(0, 600);
 
-  const userContent = `
-Generate SEO metadata for this AI app:
+  const userContent = `Generate premium, high-converting marketplace metadata for this AI app:
 - What the app does: ${appPurpose}
 - App type: ${session.appType}
 - User answers during setup: ${JSON.stringify(deepAnswers)}
 - Conversation context: ${triageHistory}
-- Model used (DO NOT use as app name): ${session.modelId || 'unknown'}
-  `;
+- Model used (DO NOT use as app name — this is internal only): ${session.modelId || 'unknown'}
+
+Remember: App name must sound like a premium SaaS product (2-4 words). Description must sell the benefit to the user in under 150 characters. Exactly 7 action-oriented tags.`;
 
 
   try {
@@ -476,13 +520,34 @@ Generate SEO metadata for this AI app:
     return result;
   } catch (err) {
     console.error('[Sub-agent 3] Error:', err.message);
+    // Premium-quality fallback — still sounds marketable even without the LLM
+    const purposeClean = (appPurpose || '').trim();
+    const typeLabel = session.appType || 'creative';
+    const nameMap = {
+      image: 'PixelForge AI',
+      text: 'CopyFlow AI',
+      audio: 'VoiceCraft AI',
+      video: 'ReelSpark AI',
+      vision: 'InsightLens AI'
+    };
+    const descMap = {
+      image: `Create stunning AI-powered visuals${purposeClean ? ` — ${purposeClean}` : ''} in seconds.`,
+      text: `Craft polished, professional content${purposeClean ? ` — ${purposeClean}` : ''} with AI.`,
+      audio: `Transform text into natural, professional audio${purposeClean ? ` — ${purposeClean}` : ''} instantly.`,
+      video: `Produce scroll-stopping AI videos${purposeClean ? ` — ${purposeClean}` : ''} effortlessly.`,
+      vision: `Analyze and extract insights from images${purposeClean ? ` — ${purposeClean}` : ''} with AI.`
+    };
+    const tagMap = {
+      image: ['ai-design', 'visual-creator', 'brand-design', 'image-craft', 'creative-ai', 'instant-design', 'smart-visuals'],
+      text: ['ai-writing', 'content-creator', 'smart-copy', 'professional-writing', 'instant-content', 'creative-ai', 'productivity-boost'],
+      audio: ['ai-voice', 'text-to-speech', 'audio-creator', 'voice-studio', 'podcast-tool', 'smart-audio', 'creative-ai'],
+      video: ['ai-video', 'reel-maker', 'video-creator', 'motion-design', 'content-studio', 'creative-ai', 'instant-video'],
+      vision: ['ai-vision', 'image-analysis', 'smart-scan', 'visual-ai', 'insight-tool', 'data-extraction', 'intelligent-scan']
+    };
     return {
-      appName: `AI ${appPurpose || session.appType || 'Content'} Tool`,
-      appDescription: `${appPurpose || `Generate ${session.appType} content with AI`}. Fast, easy, professional results.`.slice(0, 155),
-      tags: ['ai-generated', 'content-creation', 'automation',
-             'ai-tool', 'no-code', 'productivity',
-             session.appType || 'creative', 'rentprompts',
-             'generative-ai', 'easy-to-use'],
+      appName: nameMap[typeLabel] || 'SparkAI Studio',
+      appDescription: (descMap[typeLabel] || `Unlock AI-powered ${typeLabel} creation — fast, polished, professional results.`).slice(0, 150),
+      tags: tagMap[typeLabel] || ['ai-powered', 'smart-tool', 'instant-results', 'creative-ai', 'productivity', 'no-code', 'professional'],
       category: 'creative'
     };
   }

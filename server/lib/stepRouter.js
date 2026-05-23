@@ -221,6 +221,16 @@ function getChangeText(msg) {
 /* ────────────────────────────────────────────
    MODEL / COST HELPERS
    ──────────────────────────────────────────── */
+
+/** Hard guard: Only image and vision apps can ever accept image input.
+ *  Audio, text, and video apps should NEVER show an upload UI,
+ *  regardless of what the LLM returned. */
+function sanitizeAcceptImageInput(rawValue, appType) {
+  const type = String(appType || '').toLowerCase();
+  if (type === 'image' || type === 'vision') return Boolean(rawValue);
+  return false;
+}
+
 function findModel(appType, modelId) {
   return (MODELS[appType] || []).find(m => m.id === modelId) || null;
 }
@@ -480,9 +490,9 @@ async function buildDynamicBundleCard(session) {
   return {
     reply: localizedText(
       session,
-      `Perfect. I've scoped out the architecture for your ${displayFormat} app.\n\nNote: If you actually wanted this to generate Images, Audio, or Video instead, just let me know.\n\nPlease confirm these settings.`,
-      `बहुत बढ़िया। मैंने इस ऐप को ${displayFormat} प्रारूप में स्कोप किया है।\n\nध्यान दें: अगर आप Image, Audio या Video आउटपुट चाहते हैं तो बता सकते हैं।\n\nकृपया ये सेटिंग्स कन्फर्म करें।`,
-      `Perfect! Maine ise ${displayFormat} app samajh ke scope kiya hai.\n\nNote: Agar tumhe Images, Audio ya Video chahiye ho, bas bata dena.\n\nPlease ab settings confirm karo.`
+      `## ✅ App Architecture Ready\n\nI've analyzed your requirements and scoped out a **${displayFormat}** app.\n\nHere's what I've configured for you — review the features and input fields below, then hit confirm to proceed.\n\n**💡 Tip:** If you actually wanted this to generate a different output type (Images, Audio, Video), just let me know and I'll adjust instantly.`,
+      `## ✅ ऐप आर्किटेक्चर तैयार\n\nमैंने आपकी ज़रूरतों का विश्लेषण किया और **${displayFormat}** ऐप स्कोप किया है।\n\nनीचे फीचर्स और इनपुट फील्ड्स देखें, फिर कन्फर्म करें।\n\n**💡 टिप:** अगर आप Image, Audio या Video आउटपुट चाहते हैं तो बता दें।`,
+      `## ✅ App Architecture Ready\n\nMaine tumhare requirements analyze karke **${displayFormat}** app scope kiya hai.\n\nNeeche features aur input fields check karo, phir confirm karo.\n\n**💡 Tip:** Agar Images, Audio ya Video chahiye ho, bas bata dena!`
     ),
     uiType: "multi_select_form",
     uiData: {
@@ -611,7 +621,7 @@ async function showModels(session) {
   await saveSession(session);
   
   return {
-    reply: `Here are the top 3 models for your ${session.appType} app. Click a model card below to select it:`,
+    reply: `## 🤖 AI Model Selection\n\nI've ranked the **top 3 models** for your **${session.appType}** app based on your requirements and budget.\n\nEach card shows the model's strengths, speed, and cost per run — **click any card** to select it.`,
     uiType: 'models',
     uiData: { appType: session.appType, models },
     nextStep: 1,
@@ -852,7 +862,7 @@ async function buildStep0Response(session, text) {
     session.awaitingDeepAnswer = true;
     await saveSession(session);
     return {
-      reply: "Got all the details I need! One last thing before I design the architecture — what is your target budget per generation?",
+      reply: "## 💰 Almost There — Budget Selection\n\nI've gathered all the details I need to architect your app! Just one last thing — **what's your target budget per generation?**\n\nThis helps me recommend the perfect AI model for your use case.",
       uiType: "chips",
       uiData: { options: ["Free models only (0 coins)", "Low (< 5 coins)", "Medium (5 - 20 coins)", "Premium (> 20 coins)"] },
       nextStep: 0,
@@ -931,7 +941,7 @@ function checkEdgeCases(message, session) {
   if (isGreeting && session.step === 0 && (session.history || []).length < 3) {
     return {
       reply:
-        "Hey! I'm the RentPrompts App Creation Agent. What kind of AI app would you like to build today? You can just describe what you want it to do.",
+        "Hey there! 👋 I'm your **RentPrompts App Architect** — I help you design, configure, and publish AI-powered apps in minutes.\n\n**Just describe your app idea** and I'll handle the rest — from picking the right AI model to crafting the perfect prompt.\n\nWhat would you like to build today?",
       uiType: null,
       uiData: null,
       nextStep: session.step,
@@ -956,7 +966,7 @@ function checkEdgeCases(message, session) {
   if (isGibberish && session.step === 0) {
     return {
       // Changed the reply to be exactly what you want when nonsense is typed
-      reply: `Sorry, I didn't quite get what you want to build today. What type of output does your app need?`,
+      reply: `Hmm, I didn't quite catch that! 🤔 Let me help — **what type of output** should your AI app generate?`,
       uiType: 'chips',
       uiData: { options: ['Text', 'Image', 'Audio', 'Video', 'Vision'] },
       nextStep: session.step,
@@ -966,7 +976,7 @@ function checkEdgeCases(message, session) {
 
   if (!text || text === '') {
     return {
-      reply: `Go ahead — describe what you'd like to build!`,
+      reply: `I'm all ears! 🎧 Go ahead — **describe what you'd like to build** and I'll start architecting it for you.`,
       uiType: 'text',
       uiData: null,
       nextStep: session.step,
@@ -976,7 +986,7 @@ function checkEdgeCases(message, session) {
 
   if (msg.includes('help') && text.trim().split(' ').length <= 3) {
     return {
-      reply: `Sure! Here's what I can help you build:\n\n🖼️ Image apps\n🎥 Video apps\n📝 Text apps\n🔊 Audio apps\n👁️ Vision apps\n\nWhich type interests you?`,
+      reply: `## 🚀 What Can I Build For You?\n\nHere's every type of AI app I can help you create:\n\n- 🖼️ **Image apps** — logos, posters, photo editing, avatars\n- 🎥 **Video apps** — reels, animations, talking avatars\n- 📝 **Text apps** — blogs, legal docs, planners, scripts\n- 🔊 **Audio apps** — voiceovers, podcasts, text-to-speech\n- 👁️ **Vision apps** — image analysis, OCR, object detection\n\nWhich type interests you?`,
       uiType: 'chips',
       uiData: { options: ['Image app', 'Video app', 'Text app', 'Audio app', 'Vision app', 'Help me choose'] },
       nextStep: 0,
@@ -986,7 +996,7 @@ function checkEdgeCases(message, session) {
 
   if (msg.includes('start over') || msg.includes('restart') || msg.includes('reset') || msg.includes('new app') || msg.includes('different app')) {
     return {
-      reply: `No problem! Let's start fresh. What kind of AI app would you like to build?`,
+      reply: `No problem! 🔄 Let's start fresh.\n\n**What kind of AI app would you like to build?** Just describe your idea and I'll take it from there.`,
       uiType: 'chips',
       uiData: { options: ['Image app', 'Video app', 'Text app', 'Audio app', 'Vision app'] },
       nextStep: 0,
@@ -997,7 +1007,7 @@ function checkEdgeCases(message, session) {
 
   if ((msg.includes('how much') || msg.includes('price') || msg.includes('cost') || msg.includes('joules')) && session.step < 4) {
     return {
-      reply: `Great question! The cost depends on which AI model we choose. Prices range from FREE to 318 coins per run.\n\nLet me first understand what you need. What kind of app are you building?`,
+      reply: `Great question! 💡 The cost depends on which AI model we select.\n\n**Price range:** FREE → 318 coins per run\n\nBut first, let me understand your app idea so I can recommend the best value model. **What kind of app are you building?**`,
       uiType: session.appType ? 'text' : 'chips',
       uiData: session.appType ? null : { options: ['Image app', 'Video app', 'Text app', 'Audio app', 'Vision app'] },
       nextStep: session.step,
@@ -1052,7 +1062,7 @@ export async function route(session, message) {
         systemPrompt:     session.promptData?.systemPrompt,
         userPrompt:       session.promptData?.userPrompt,
         negativePrompt:   session.promptData?.negativePrompt,
-        acceptImageInput: session.promptData?.acceptImageInput,
+        acceptImageInput: sanitizeAcceptImageInput(session.promptData?.acceptImageInput, session.appType),
         appName:          session.seoData?.appName,
         appDescription:   session.seoData?.appDescription,
         tags:             session.seoData?.tags,
@@ -1063,7 +1073,7 @@ export async function route(session, message) {
       console.log('══════════════════\n');
       await deleteSession(session.sessionId);
       return {
-        reply: `🎉 Your app "${session.seoData?.appName}" is now live! Users will be charged ${payload.costPerRun} coins per generation.`,
+        reply: `## 🎉 Published Successfully!\n\nYour app **"${session.seoData?.appName}"** is now live on the marketplace!\n\n- **Cost per run:** ${payload.costPerRun} coins\n- **Status:** ✅ Live\n\nUsers can now discover and use your app. Great work! 🚀`,
         uiType: "success",
         uiData: {
           appName:    session.seoData?.appName,
@@ -1082,7 +1092,7 @@ export async function route(session, message) {
       session.status = 'draft';
       await saveSession(session);
       return {
-        reply: `Done! "${session.seoData?.appName}" saved as a draft. Publish anytime from your dashboard.`,
+        reply: `## 📋 Draft Saved\n\n**"${session.seoData?.appName}"** has been securely saved as a draft.\n\nYou can resume editing or publish it anytime from your **RentPrompts dashboard**.`,
         uiType: 'success',
         uiData: { appName: session.seoData?.appName, status: 'Draft' },
         nextStep: 0,
@@ -1096,7 +1106,7 @@ export async function route(session, message) {
     session.awaitingPromptTweak = true;
     await saveSession(session);
     return {
-      reply: "I'm listening! You can describe a completely new app idea, ask to change the model, or just tweak the current instructions.",
+      reply: "I'm listening! ✏️ Here's what you can do:\n\n- **Tweak the prompt** — tell me what to change\n- **Switch the AI model** — pick a different engine\n- **Start fresh** — describe a completely new app idea\n\nWhat would you like to adjust?",
       uiType: "text",
       uiData: null,
       nextStep: session.step,
@@ -1106,47 +1116,65 @@ export async function route(session, message) {
 
   // ─── 2a. CHANGE-PREFIX FAST PATH (step 2 or 3) ───────────────────────────
   // If the user explicitly prefixes with "Change:" while at the preview or publish step,
-  // NEVER run pivot detection — treat it as a direct app edit and return a fresh preview card.
+  // treat it as a direct app edit — UNLESS it's a completely different app idea (major pivot).
   if (
     (session.step === 2 || session.step === 3) &&
     /^change\s*:/i.test(msg)
   ) {
     const correction = text.replace(/^change\s*:/i, '').trim();
     if (correction.length > 1) {
-      applyEditToSession(session, correction);
-      let promptData = session.promptData;
-      let seoData = session.seoData;
-      try {
-        [promptData, seoData] = await Promise.all([
-          generatePromptTemplate(session),
-          generateSEO(session)
-        ]);
-        session.promptData = promptData;
-        session.seoData = seoData;
-      } catch (e) {
-        console.warn('[Change-prefix fast path] Regen failed:', e.message);
-        session.promptData = applyPromptInstruction(session.promptData || {}, correction);
+      const corrLower = correction.toLowerCase();
+
+      // ── PIVOT GUARD: Detect if this "change" is actually a COMPLETELY different app ──
+      // If the correction mentions a different app type, or describes an entirely new app idea,
+      // DON'T treat it as a minor edit — fall through to the Universal Pivot Interceptor.
+      const mentionsDifferentType = /(image|video|audio|text|vision)\s+(app|generator|tool|creator)\b/i.test(corrLower) &&
+        !corrLower.includes(session.appType);
+      const isNewAppIdea = /\b(i want|build|create|make)\b.*\b(app|tool|generator)\b/i.test(corrLower) ||
+        /\b(room designer|logo maker|background remov|recipe|resume|birthday|meme|podcast)\b/i.test(corrLower);
+      const mentionsNewDomain = isNewAppIdea && !corrLower.includes(session.extraction?.appPurpose?.toLowerCase()?.slice(0, 15) || '____');
+
+      if (mentionsDifferentType || mentionsNewDomain) {
+        // This is a major pivot disguised as a "Change:" — let it fall through
+        // to the Universal Pivot Interceptor below by NOT returning here.
+        console.log(`[Change-prefix] Detected major pivot in "Change:" message — routing to pivot handler. correction="${correction.slice(0, 60)}"`);
+      } else {
+        // Genuine minor edit — apply it directly
+        applyEditToSession(session, correction);
+        let promptData = session.promptData;
+        let seoData = session.seoData;
+        try {
+          [promptData, seoData] = await Promise.all([
+            generatePromptTemplate(session),
+            generateSEO(session)
+          ]);
+          session.promptData = promptData;
+          session.seoData = seoData;
+        } catch (e) {
+          console.warn('[Change-prefix fast path] Regen failed:', e.message);
+          session.promptData = applyPromptInstruction(session.promptData || {}, correction);
+        }
+        session.step = 2;
+        session.awaitingPromptTweak = false;
+        await saveSession(session);
+        return {
+          reply: `## ✅ App Updated\n\nI've applied your change: **"${correction}"**\n\nHere's the refreshed preview below — give it a test run and hit **Approve** when you're happy with the results!`,
+          uiType: 'app_preview',
+          uiData: {
+            appName: session.seoData?.appName || 'Your App',
+            appType: session.appType || session.extraction?.appType || 'text',
+            appDescription: session.seoData?.appDescription || '',
+            cost: session.modelCost,
+            systemPrompt: session.promptData?.systemPrompt || '',
+            userPrompt: session.promptData?.userPrompt || '',
+            variablesUsed: session.promptData?.variablesUsed || [],
+            acceptImageInput: sanitizeAcceptImageInput(session.promptData?.acceptImageInput, session.appType),
+            options: ['Approve App', 'Edit App']
+          },
+          nextStep: 2,
+          coins: session.modelCost
+        };
       }
-      session.step = 2;
-      session.awaitingPromptTweak = false;
-      await saveSession(session);
-      return {
-        reply: `Done! I've updated the app: "${correction}".\n\nHere's the refreshed preview — test it out and approve when you're happy!`,
-        uiType: 'app_preview',
-        uiData: {
-          appName: session.seoData?.appName || 'Your App',
-          appType: session.appType || session.extraction?.appType || 'text',
-          appDescription: session.seoData?.appDescription || '',
-          cost: session.modelCost,
-          systemPrompt: session.promptData?.systemPrompt || '',
-          userPrompt: session.promptData?.userPrompt || '',
-          variablesUsed: session.promptData?.variablesUsed || [],
-          acceptImageInput: session.promptData?.acceptImageInput || false,
-          options: ['Approve App', 'Edit App']
-        },
-        nextStep: 2,
-        coins: session.modelCost
-      };
     }
   }
 
@@ -1172,6 +1200,8 @@ export async function route(session, message) {
       msg.includes('new app') ||
       msg.includes('different app') ||
       /^(i want (to )?(build|make|create)|let'?s (build|make|create)|build an?|make an?|create an?)/i.test(msg) ||
+      // Catch "i want [noun] app" — e.g. "i want room designer app", "i want recipe app"
+      /\bi want\b.{2,40}\bapp\b/i.test(msg) ||
       (session.awaitingPromptTweak && msg.includes('app'))
     );
 
@@ -1337,7 +1367,7 @@ export async function route(session, message) {
           systemPrompt: session.promptData.systemPrompt,
           userPrompt: session.promptData.userPrompt,
           variablesUsed: session.promptData.variablesUsed,
-          acceptImageInput: session.promptData.acceptImageInput,
+          acceptImageInput: sanitizeAcceptImageInput(session.promptData.acceptImageInput, session.appType),
           options: ['Approve App', 'Edit App']
         },
         nextStep: 2,
@@ -1523,7 +1553,7 @@ export async function route(session, message) {
         session.step = 2;
         await saveSession(session);
 
-        const summaryText = `Awesome! I've configured the AI logic for your app.\n\nCheck the **Live Preview** card below to test it out. If it works perfectly, click "Approve App" to finalize your app's details!`;
+        const summaryText = `## 🎯 App Preview Ready\n\nI've configured the full AI logic for your app using **${selectedModel.name}**.\n\nCheck the **Live Preview** card below — give it a test run with sample inputs. If it works perfectly, click **Approve App** to finalize!`;
 
         return {
           reply: summaryText,
@@ -1536,7 +1566,7 @@ export async function route(session, message) {
             systemPrompt: promptData.systemPrompt,
             userPrompt: promptData.userPrompt,
             variablesUsed: promptData.variablesUsed,
-            acceptImageInput: promptData.acceptImageInput,
+            acceptImageInput: sanitizeAcceptImageInput(promptData.acceptImageInput, session.appType),
             options: ['Approve App', 'Edit App']
           },
           nextStep: 2,
@@ -1545,7 +1575,7 @@ export async function route(session, message) {
       } catch (error) {
         console.error("Error generating app config:", error);
         return {
-          reply: "I hit a snag generating the config. Please try selecting the model again.",
+          reply: "Oops! ⚠️ I hit a snag while generating the config. **Please try selecting the model again** — it should work on the second attempt.",
           uiType: 'text',
           uiData: null,
           nextStep: 1,
@@ -1555,7 +1585,7 @@ export async function route(session, message) {
     }
 
     return {
-      reply: "Please click one of the model cards above to select the engine for your app.",
+      reply: "Please **click one of the model cards** above to select the AI engine for your app. 👆",
       uiType: "text",
       uiData: null,
       nextStep: 1,
@@ -1574,7 +1604,7 @@ export async function route(session, message) {
       const seoData = session.seoData || {};
 
       return {
-        reply: `🎉 Your app is configured! Review the details below — you can edit the name, description, or tags before publishing.`,
+        reply: `## 🎉 App Configured — Final Review\n\nEverything is set! Review your **app name, description, and tags** below.\n\nYou can edit any field before publishing — make it shine! ✨`,
         uiType: "seo_preview",
         uiData: {
           appName: seoData.appName || 'Your App',
@@ -1618,7 +1648,7 @@ export async function route(session, message) {
             systemPrompt: session.promptData.systemPrompt,
             userPrompt: session.promptData.userPrompt,
             variablesUsed: session.promptData.variablesUsed,
-            acceptImageInput: session.promptData.acceptImageInput,
+            acceptImageInput: sanitizeAcceptImageInput(session.promptData.acceptImageInput, session.appType),
             options: ['Approve App', 'Edit App']
           },
           nextStep: 2,
@@ -1699,7 +1729,7 @@ export async function route(session, message) {
           systemPrompt: session.promptData.systemPrompt,
           userPrompt: session.promptData.userPrompt,
           variablesUsed: session.promptData.variablesUsed,
-          acceptImageInput: session.promptData.acceptImageInput,
+          acceptImageInput: sanitizeAcceptImageInput(session.promptData.acceptImageInput, session.appType),
           options: ['Approve App', 'Edit App']
         },
         nextStep: 2,

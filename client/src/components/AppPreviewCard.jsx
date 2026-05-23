@@ -271,8 +271,9 @@ export default function AppPreviewCard({ data, onSendMessage, sessionId, storage
             {/* Image upload — shown ONLY when the app needs user to provide a source image.
                 acceptImageInput is set by the LLM based on app purpose:
                   TRUE:  background removal, room redesign, portrait editing, style transfer
-                  FALSE: logo generator, poster creator, text-to-image art generator */}
-            {data.acceptImageInput && (
+                  FALSE: logo generator, poster creator, text-to-image art generator
+                HARD GUARD: Only image and vision apps can ever show upload — audio/text/video NEVER need it. */}
+            {data.acceptImageInput && ['image', 'vision'].includes(data.appType?.toLowerCase()) && (
               <div className="flex flex-col gap-1.5 mb-3">
                 <label className="text-xs text-[#a77bf3] font-semibold uppercase tracking-wider ml-1">
                   {data.appType?.toLowerCase() === 'vision'
