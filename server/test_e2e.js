@@ -19,23 +19,17 @@ async function testCategory(name, sessionId, initialMsg, formOptions) {
   let r = await send(sessionId, initialMsg);
   console.log(`[1] Initial → ui:${r.uiType} | reply:${r.reply?.substring(0, 80)}...`);
 
-  // Handle triage if needed
-  if (!r.uiType || r.uiType === "text" || r.uiType === "chips") {
+  // Handle triage dynamically
+  let triageCount = 0;
+  while ((!r.uiType || r.uiType === "text" || r.uiType === "chips") && triageCount < 6) {
+    triageCount++;
     if (r.uiType === "chips") {
-      // Select first chip
-      const chip = r.uiData?.options?.[0] || "Text";
+      const chip = r.uiData?.options?.[0] || "Yes, that works for me";
       r = await send(sessionId, chip);
-      console.log(`[1b] Chip → ui:${r.uiType} | reply:${r.reply?.substring(0, 80)}...`);
-    }
-    if (!r.uiType || r.uiType === "text" || r.uiType === "chips") {
-      // Triage question — answer it
-      r = await send(sessionId, formOptions.triageAnswer || "Yes, that works for me");
-      console.log(`[1c] Triage → ui:${r.uiType} | reply:${r.reply?.substring(0, 80)}...`);
-    }
-    // Second triage round if needed
-    if (!r.uiType || r.uiType === "text" || r.uiType === "chips") {
-      r = await send(sessionId, "Yes, exactly what I need");
-      console.log(`[1d] Triage2 → ui:${r.uiType} | reply:${r.reply?.substring(0, 80)}...`);
+      console.log(`[1-triage-${triageCount}] Chip/Triage → ui:${r.uiType} | reply:${r.reply?.substring(0, 80)}...`);
+    } else {
+      r = await send(sessionId, formOptions.triageAnswer || "Yes, exactly what I need");
+      console.log(`[1-triage-${triageCount}] Text/Triage → ui:${r.uiType} | reply:${r.reply?.substring(0, 80)}...`);
     }
   }
 

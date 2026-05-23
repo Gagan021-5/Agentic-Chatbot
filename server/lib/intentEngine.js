@@ -362,7 +362,7 @@ function buildFallbackIntent(message, session) {
     is_major_pivot = true;
   }
   // Edit signals
-  else if (/\b(change|update|tweak|edit|modify|make it|rewrite)\b/i.test(msg) && (session?.step || 0) >= 2) {
+  else if (/\b(change|update|tweak|edit|modify|rewrite|add|remove|delete)\b/i.test(msg)) {
     action = "edit_app";
   }
   // New app

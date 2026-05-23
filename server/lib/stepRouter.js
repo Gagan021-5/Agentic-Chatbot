@@ -1278,7 +1278,28 @@ export async function route(session, message) {
       };
     }
 
-    // D. General mid-flight tweak acknowledgement
+    // D. Minor Tweak at the Config/Triage Step (Step 0)
+    if (session.step === 0 && intent.action === "edit_app") {
+      applyEditToSession(session, text);
+
+      // Reset form confirmation so they see the refreshed config form
+      session.formConfirmed = false;
+      session.dynamicContext = null;
+      session.triageRounds = 0;
+      session.awaitingDeepAnswer = false;
+      session.currentDeepField = null;
+      if (session.deepAnswers) {
+        delete session.deepAnswers.budgetPreference;
+      }
+      if (session.extraction) {
+        delete session.extraction.budget;
+      }
+      await saveSession(session);
+
+      return await buildStep0Response(session, text);
+    }
+
+    // E. General mid-flight tweak acknowledgement
     if (session.step > 0) {
       return {
         reply: `Noted! I've updated your app's requirements to include: "${text}". Let's continue.`,

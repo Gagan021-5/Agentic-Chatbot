@@ -170,76 +170,7 @@ function sanitizeVariableObjects(list, minLen, maxLen, fallback, appType) {
 }
 
 function buildDynamicContextFallback(appType, appPurpose, languageHint) {
-  const lang = normalizeLanguageHint(languageHint);
   const safeType = String(appType || "text").toLowerCase();
-  const p = String(appPurpose || "").trim();
-  const purposeL = p.toLowerCase();
-
-  // Smart domain-specific variables based on app purpose keywords
-  let domainVars = null;
-  let domainOptions = null;
-
-  if (purposeL.includes("recipe") || purposeL.includes("cooking") || purposeL.includes("dish") || purposeL.includes("food")) {
-    domainOptions = ["Nutritional guidelines", "Dietary preference compliance", "Clear step-by-step instructions", "Cooking time optimizations"];
-    domainVars = [
-      { name: "Recipe Name", placeholder: "e.g., Paneer Butter Masala, Keto Salad", test_value: "Paneer Butter Masala" },
-      { name: "Available Ingredients", placeholder: "e.g., paneer, tomatoes, cream, spices", test_value: "paneer, tomatoes, cream, spices" },
-      { name: "Dietary Restrictions", placeholder: "e.g., vegetarian, low-carb, nut-free", test_value: "vegetarian" }
-    ];
-  } else if (purposeL.includes("cover letter") || purposeL.includes("resume") || purposeL.includes("job application")) {
-    domainOptions = ["Tailored tone formatting", "ASO/Keywords highlighting", "Structured professional summary", "Value-proposition alignment"];
-    domainVars = [
-      { name: "Job Title", placeholder: "e.g., Software Engineer, Product Designer", test_value: "Software Engineer" },
-      { name: "Company Name", placeholder: "e.g., Google, Stripe, Local Startup", test_value: "Google" },
-      { name: "Key Experience Highlights", placeholder: "e.g., 3 years of React dev, built SaaS metrics dashboard", test_value: "3 years of React dev, built SaaS metrics dashboard" }
-    ];
-  } else if (purposeL.includes("room design") || purposeL.includes("interior") || purposeL.includes("decorate") || purposeL.includes("furniture") || purposeL.includes("room designer")) {
-    domainOptions = ["Visual theme alignment", "Budget-focused recommendations", "Space layout optimization", "High-fidelity rendering"];
-    domainVars = [
-      { name: "Room Type", placeholder: "e.g., bedroom, living room, study room", test_value: "bedroom" },
-      { name: "Design Style", placeholder: "e.g., modern minimalist, luxury, cozy japandi", test_value: "modern minimalist" },
-      { name: "Key Space Goal", placeholder: "e.g., double bed, study desk, high storage", test_value: "study desk, high storage" }
-    ];
-  } else if (purposeL.includes("birthday") || purposeL.includes("greeting") || purposeL.includes("wish") || purposeL.includes("card")) {
-    domainOptions = ["Heartfelt customized messaging", "Tone-matched output", "Platform-appropriate length", "Memorable quotes inclusion"];
-    domainVars = [
-      { name: "Recipient Name", placeholder: "e.g., Amit, Sarah, Mom", test_value: "Amit" },
-      { name: "Occasion Details", placeholder: "e.g., 30th birthday, wedding anniversary", test_value: "30th birthday" },
-      { name: "Special Memories", placeholder: "e.g., our college trip to Goa, always helps with advice", test_value: "our college trip to Goa" }
-    ];
-  } else if (purposeL.includes("workout") || purposeL.includes("fitness") || purposeL.includes("gym") || purposeL.includes("exercise") || purposeL.includes("fit")) {
-    domainOptions = ["Personalized reps and sets", "Safety constraints check", "Equipment-optimized plans", "Difficulty progression"];
-    domainVars = [
-      { name: "Fitness Goal", placeholder: "e.g., weight loss, muscle building, stamina", test_value: "muscle building" },
-      { name: "Available Equipment", placeholder: "e.g., dumbbells, resistance bands, bodyweight only", test_value: "dumbbells" },
-      { name: "Time Duration", placeholder: "e.g., 30 minutes, 1 hour", test_value: "45 minutes" }
-    ];
-  } else if (purposeL.includes("logo") || purposeL.includes("branding") || purposeL.includes("brand design")) {
-    domainOptions = ["Brand values alignment", "Color palette compliance", "Clean geometry", "ASO optimization"];
-    domainVars = [
-      { name: "Brand Name", placeholder: "e.g., Zenith FinTech, GreenBites Cafe", test_value: "Zenith FinTech" },
-      { name: "Industry Niche", placeholder: "e.g., financial services, healthy food delivery", test_value: "financial services" },
-      { name: "Preferred Colors & Style", placeholder: "e.g., blue and white, clean modern, bold", test_value: "blue and white, clean modern" }
-    ];
-  } else if (purposeL.includes("legal") || purposeL.includes("law") || purposeL.includes("contract") || purposeL.includes("advocate") || purposeL.includes("ipc")) {
-    domainOptions = ["Jurisdiction accuracy check", "Plain-language explanations", "Standard legal draft sections", "AI citation reference"];
-    domainVars = [
-      { name: "Incident Description", placeholder: "Explain in simple terms what happened...", test_value: "landlord refusing to return deposit after lease ended" },
-      { name: "Location State or City", placeholder: "e.g., New Delhi, India, or California, USA", test_value: "New Delhi, India" },
-      { name: "Your Desired Goal", placeholder: "e.g., recover full deposit, draft eviction response", test_value: "recover full deposit" }
-    ];
-  } else if (purposeL.includes("podcast") || purposeL.includes("narration") || purposeL.includes("audio content") || purposeL.includes("convert to audio")) {
-    domainOptions = ["Voice tone guidelines", "Enthusiastic pacing rules", "No-jargon explanations", "Clean script structures"];
-    domainVars = [
-      { name: "Audio Topic", placeholder: "e.g., Ancient Civilizations, Climate Change", test_value: "Ancient Civilizations" },
-      { name: "Preferred Format", placeholder: "e.g., lecture, informal podcast, audio story", test_value: "lecture" },
-      { name: "Tone & Style", placeholder: "e.g., enthusiastic, humorous, clear and formal", test_value: "clear and enthusiastic" }
-    ];
-  }
-
-  if (domainVars) {
-    return { options: domainOptions, variables: domainVars };
-  }
 
   // Prettified default fallbacks
   const typeDefaults = {
@@ -294,7 +225,7 @@ function parseDynamicContextPayload(rawContent, appType, appPurpose, languageHin
     const parsed = JSON.parse(String(rawContent || "{}").replace(/```json/gi, "").replace(/```/g, "").trim());
     return {
       options: sanitizeStringList(parsed.options, 4, 4, fallback.options),
-      variables: sanitizeVariableObjects(parsed.variables, 3, 4, fallback.variables, appType)
+      variables: sanitizeVariableObjects(parsed.variables, 3, 8, fallback.variables, appType)
     };
   } catch {
     return fallback;
@@ -309,7 +240,7 @@ async function extractRequirements(message, history) {
 
   try {
     const completion = await groq.chat.completions.create({
-      model: "llama-3.3-70b-versatile",
+      model: "llama-3.1-8b-instant",
       response_format: { type: "json_object" },
       messages: [
         {
@@ -357,13 +288,13 @@ Output must be strict JSON with this exact shape:
 No markdown. No prose.`;
   const userPrompt = `The user wants to build a ${safeType} app for: ${safePurpose}.
 Language mode: ${safeLang}.
-Generate 4 highly relevant specific features and 3-4 input variables needed for the app.
+Generate 4 highly relevant specific features and 4-8 input variables needed for the app.
 For each variable include name and helpful placeholder.`;
 
   try {
     if (groq) {
       const completion = await groq.chat.completions.create({
-        model: "llama-3.3-70b-versatile",
+        model: "llama-3.1-8b-instant",
         response_format: { type: "json_object" },
         messages: [
           { role: "system", content: systemPrompt },
@@ -520,7 +451,7 @@ NEVER return "ready" if:
 ✗ You don't know what format the output should be in
 
 VARIABLE QUALITY (only in "ready" response):
-- Exactly 3-4 variables, domain-specific names
+- Exactly 3-8 variables, domain-specific names
 - Each has: name, a descriptive placeholder, a realistic test_value
 - Variables = the EXACT data the end-user types in when running the app
 - ⚠️ VARIABLE NAMING — MOST IMPORTANT RULE:
@@ -654,7 +585,7 @@ function parseTriageResponse(rawContent, formatFallback, appPurpose, languageHin
     const form = parsed.form && typeof parsed.form === "object" ? parsed.form : {};
     return readyShape(domain, effectiveType, {
       options: sanitizeStringList(form.options, 4, 4, fallbackForm.options),
-      variables: sanitizeVariableObjects(form.variables, 3, 4, fallbackForm.variables, effectiveType)
+      variables: sanitizeVariableObjects(form.variables, 3, 8, fallbackForm.variables, effectiveType)
     });
   } catch {
     return readyShape(null, fallbackType, buildDynamicContextFallback(fallbackType, "", languageHint));
@@ -695,7 +626,7 @@ Do NOT ask generic questions. Do NOT re-ask what has already been answered above
   try {
     if (groq) {
       const completion = await groq.chat.completions.create({
-        model: "llama-3.3-70b-versatile",
+        model: "llama-3.1-8b-instant",
         response_format: { type: "json_object" },
         messages: triageMessages
       });
