@@ -1,5 +1,5 @@
-const fs = require('fs');
-const path = require('path');
+import fs from "fs";
+import path from "path";
 let file = path.join(__dirname, '..', 'server', 'lib', 'stepRouter.js');
 let content = fs.readFileSync(file, 'utf8');
 

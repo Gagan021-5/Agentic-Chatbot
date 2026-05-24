@@ -480,8 +480,9 @@ STRICT RULES — follow every single one:
    - Highly searched, relevant, action-oriented SEO tags.
    - Use hyphens, lowercase, no spaces.
    - Focus on what users SEARCH for: user intent, use case, and benefit.
-   - GOOD tags: #brand-design, #ai-logo, #content-creator, #smart-writing, #photo-magic
-   - BAD tags: #png-output, #text-generation, #api-call, #ai-model (too technical / too generic)
+   - DO NOT prefix tags with the '#' symbol. Return them as plain lowercase string literals.
+   - GOOD tags: "brand-design", "ai-logo", "content-creator", "smart-writing", "photo-magic"
+   - BAD tags: "#brand-design", "png-output", "text-generation", "api-call"
    - Mix of: 2 broad discovery tags + 3 niche use-case tags + 2 benefit/action tags.
 
 4. CATEGORY: one of: creative, business, education, healthcare, entertainment, productivity, social, other

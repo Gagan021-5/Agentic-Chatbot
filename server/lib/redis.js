@@ -79,9 +79,13 @@ async function getSession(sessionId) {
   if (!redis) {
     return getMemory(sessionId);
   }
-
-  const session = await redis.get(getKey(sessionId));
-  return session || null;
+  try {
+    const session = await redis.get(getKey(sessionId));
+    return session || null;
+  } catch (err) {
+    console.warn(`[Redis] getSession failed (falling back to memory): ${err.message}`);
+    return getMemory(sessionId);
+  }
 }
 
 async function saveSession(session) {
@@ -89,10 +93,14 @@ async function saveSession(session) {
     setMemory(session.sessionId, session);
     return;
   }
-
-  await redis.set(getKey(session.sessionId), session, {
-    ex: SESSION_TTL_SECONDS
-  });
+  try {
+    await redis.set(getKey(session.sessionId), session, {
+      ex: SESSION_TTL_SECONDS
+    });
+  } catch (err) {
+    console.warn(`[Redis] saveSession failed (falling back to memory): ${err.message}`);
+    setMemory(session.sessionId, session);
+  }
 }
 
 async function deleteSession(sessionId) {
@@ -100,8 +108,12 @@ async function deleteSession(sessionId) {
     memoryStore.delete(getKey(sessionId));
     return;
   }
-
-  await redis.del(getKey(sessionId));
+  try {
+    await redis.del(getKey(sessionId));
+  } catch (err) {
+    console.warn(`[Redis] deleteSession failed (falling back to memory): ${err.message}`);
+    memoryStore.delete(getKey(sessionId));
+  }
 }
 
 export {

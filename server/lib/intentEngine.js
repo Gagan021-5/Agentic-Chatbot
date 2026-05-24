@@ -313,9 +313,15 @@ export async function getAgenticIntent(message, session) {
     const toolCall = completion.choices?.[0]?.message?.tool_calls?.[0];
     if (toolCall?.function?.arguments) {
       const parsed = JSON.parse(toolCall.function.arguments);
-      console.log(`[IntentEngine] Action: ${parsed.action} | AppType: ${parsed.app_type} | Pivot: ${parsed.is_major_pivot} | Budget: ${parsed.budget_tier} | Confidence: ${parsed.confidence}`);
+      let action = parsed.action || "answer_question";
+      if (action === "edit_app" && session?.step === 0 && (session?.awaitingTriageAnswer || (session?.triageRounds || 0) > 0)) {
+        if (!/^(change|edit|tweak|update|restart|start over|reset)/i.test(text)) {
+          action = "answer_question";
+        }
+      }
+      console.log(`[IntentEngine] Action: ${action} (was: ${parsed.action}) | AppType: ${parsed.app_type} | Pivot: ${parsed.is_major_pivot} | Budget: ${parsed.budget_tier} | Confidence: ${parsed.confidence}`);
       return {
-        action: parsed.action || "answer_question",
+        action,
         app_type: parsed.app_type || null,
         budget_tier: parsed.budget_tier || null,
         is_major_pivot: Boolean(parsed.is_major_pivot),
@@ -384,6 +390,12 @@ function buildFallbackIntent(message, session) {
   };
   for (const [type, regex] of Object.entries(typeSignals)) {
     if (regex.test(msg)) { app_type = type; break; }
+  }
+
+  if (action === "edit_app" && session?.step === 0 && (session?.awaitingTriageAnswer || (session?.triageRounds || 0) > 0)) {
+    if (!/^(change|edit|tweak|update|restart|start over|reset)/i.test(msg)) {
+      action = "answer_question";
+    }
   }
 
   return {

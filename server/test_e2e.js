@@ -1,5 +1,5 @@
 // Full E2E test for all 4 app categories
-const BASE = "http://localhost:3001/api/agent/chat";
+const BASE = "http://localhost:3002/api/agent/chat";
 
 async function send(sessionId, message) {
   const res = await fetch(BASE, {
@@ -24,6 +24,7 @@ async function testCategory(name, sessionId, initialMsg, formOptions) {
   while ((!r.uiType || r.uiType === "text" || r.uiType === "chips") && triageCount < 6) {
     triageCount++;
     if (r.uiType === "chips") {
+      console.log(`[1-triage-${triageCount}] Received Chips Options:`, r.uiData?.options);
       const chip = r.uiData?.options?.[0] || "Yes, that works for me";
       r = await send(sessionId, chip);
       console.log(`[1-triage-${triageCount}] Chip/Triage → ui:${r.uiType} | reply:${r.reply?.substring(0, 80)}...`);

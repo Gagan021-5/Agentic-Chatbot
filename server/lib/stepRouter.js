@@ -851,7 +851,15 @@ async function buildStep0Response(session, text) {
       }
 
       // AI satisfied or hit max rounds — save variables for Live Preview
-      session.dynamicContext = triageResult.form;
+      if (triageResult.form) {
+        session.dynamicContext = triageResult.form;
+      } else {
+        session.dynamicContext = await generateDynamicContext({
+          appType: session.appType || session.extraction?.appType || "text",
+          appPurpose: session.extraction?.appPurpose || "",
+          languageHint: detectLanguageMode(session)
+        });
+      }
       session.triageRounds = 0;
       await saveSession(session);
     } // end else (not affirmation)
