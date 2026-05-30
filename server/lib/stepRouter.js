@@ -600,8 +600,9 @@ async function showModels(session) {
   ].join(' ');
   // UPDATE: Pull budget from deep answers first, fallback to extraction
   const budget = session.deepAnswers?.budgetPreference || session.extraction?.budget;
-  
-  const models = rankModels(MODELS[session.appType] || [], fullText, budget);
+  // Fix: Safe baseline collection fallback prevents crashes on unmapped app types
+  const modelCollection = MODELS[session.appType] || MODELS.text || [];
+  const models = rankModels(modelCollection, fullText, budget);
   
   session.step = 1; 
   session.awaitingConfirmation = false;
@@ -1081,18 +1082,21 @@ async function execEditApp(session, text, decision) {
     return buildStep0Response(session, text);
   }
 
-  // Preview / SEO step edit
   session.awaitingPromptTweak = false;
   applyEditToSession(session, instruction);
   try {
     const [newPromptData, newSeoData] = await Promise.all([generatePromptTemplate(session), generateSEO(session)]);
     session.promptData = newPromptData; session.seoData = newSeoData;
   } catch (e) {
-    console.warn("[execEditApp] Regen failed:", e.message);
+    console.warn("[execEditApp] Regen failed, applying safe fallback instruction:", e.message);
     session.promptData = applyPromptInstruction(session.promptData || {}, instruction);
   }
   session.step = 2;
   await saveSession(session);
+  
+  // Hardened type safety evaluation for UI stability
+  const safeImageInput = session.promptData ? sanitizeAcceptImageInput(session.promptData.acceptImageInput, session.appType) : false;
+
   return {
     reply: `## ✅ App Updated\n\nApplied: **"${instruction}"**\n\nHere's the refreshed preview — approve when ready!`,
     uiType: "app_preview",
@@ -1101,10 +1105,10 @@ async function execEditApp(session, text, decision) {
       appType: session.appType || "text",
       appDescription: session.seoData?.appDescription || "",
       cost: session.modelCost,
-      systemPrompt: session.promptData.systemPrompt,
-      userPrompt: session.promptData.userPrompt,
-      variablesUsed: session.promptData.variablesUsed,
-      acceptImageInput: sanitizeAcceptImageInput(session.promptData.acceptImageInput, session.appType),
+      systemPrompt: session.promptData?.systemPrompt || "",
+      userPrompt: session.promptData?.userPrompt || "",
+      variablesUsed: session.promptData?.variablesUsed || [],
+      acceptImageInput: safeImageInput,
       options: ["Approve App", "Edit App"]
     },
     nextStep: 2,

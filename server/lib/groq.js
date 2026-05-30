@@ -283,6 +283,7 @@ When generating 'variables', you MUST include a 'placeholder' key.
 - If the variable name contains 'Place' or 'Location', placeholder MUST be 'City, Country'.
 - For everything else, use a relevant example.
 NEVER use 'Enter details...' as a placeholder for date, time, or location fields.
+- 🚨 CRITICAL SCHEMA STRUCTURING CONSTRAINT: Every extracted variable name MUST be translated into explicit human language. You are strictly prohibited from generating variables named 'input', 'text', 'data', 'variables', 'param', or 'main_input'. If the application parses legal domains, map to fields like 'incident_details' or 'dispute_context'. If editing visual elements, map strictly to fields like 'target_aesthetic' or 'canvas_dimensions'.
 Output must be strict JSON with this exact shape:
 {"options":["4 concise feature options"],"variables":[{"name":"Date of Birth","placeholder":"DD/MM/YYYY"},{"name":"Location","placeholder":"City, Country"}]}
 No markdown. No prose.`;
@@ -394,6 +395,7 @@ After domain is confirmed, extract 3–6 variables:
 - Must be independent inputs
 - Must directly affect output
 - NEVER include model names, internal parameters, legal codes, or system settings
+- 🚨 CRITICAL SCHEMA STRUCTURING CONSTRAINT: Every extracted variable name MUST be translated into explicit human language. You are strictly prohibited from generating variables named 'input', 'text', 'data', 'variables', 'param', or 'main_input'. If the application parses legal domains, map to fields like 'incident_details' or 'dispute_context'. If editing visual elements, map strictly to fields like 'target_aesthetic' or 'canvas_dimensions'.
 
 ⚠️ QUESTION RULE:
 Only ask:
