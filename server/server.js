@@ -643,6 +643,9 @@ app.post('/api/test-preview', async (req, res) => {
         // Murf free plan: max ~3000 chars per request
         const ttsText = scriptContent.slice(0, 3000);
 
+        const voiceRate = variables?.voice_speed != null ? Number(variables.voice_speed) : 1.0;
+        const voicePitch = variables?.voice_pitch != null ? Number(variables.voice_pitch) : 0;
+
         try {
           // Use the REST /v1/speech/generate endpoint (non-streaming) with base64 response
           // The streaming /v1/speech/stream endpoint migrated to WebSocket-only and returns 500 on HTTP POST
@@ -655,10 +658,12 @@ app.post('/api/test-preview', async (req, res) => {
             body: JSON.stringify({
               text: ttsText,
               voiceId: voiceId,
-              model: "GEN2",
+              modelVersion: "GEN2",
               locale: "en-US",
               format: "MP3",
-              encodeAsBase64: true
+              encodeAsBase64: true,
+              rate: voiceRate,
+              pitch: voicePitch
             }),
             signal: AbortSignal.timeout(30000)
           });

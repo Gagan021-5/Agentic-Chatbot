@@ -322,7 +322,7 @@ Your job: generate a HIGHLY SPECIFIC, DOMAIN-AWARE prompt configuration for the 
 ${LANGUAGE_MIRROR_DIRECTIVE}
 
 QUALITY RULES:
-1. systemPrompt: Define a tight AI persona. Include: role, domain expertise, tone, output format rules, and constraints. 3-5 sentences.
+1. systemPrompt: Define a tight AI persona. Include: role, domain expertise, tone, output format rules, and constraints. 3-5 sentences. It MUST be written in the second-person ("You are...") rather than first-person ("I am...").
 2. userPrompt — FORMAT DEPENDS ON APP TYPE:
    ▸ For TEXT and AUDIO apps: Must be HIGHLY DETAILED (200-400 words). Structure it as:
      a) A first-person scenario using the $$variables ("I want...", "My topic is...")
@@ -385,7 +385,7 @@ QUALITY RULES:
     ✅ RIGHT: "I want to generate educational audio content on $$topic."
     ❌ WRONG: "You have a preferred format in mind."
     ✅ RIGHT: "My preferred format is $$format."
-    The systemPrompt (AI persona) can use "you" to address the user, but the userPrompt must ALWAYS be first-person.
+    The systemPrompt (AI persona) MUST address the AI in the second-person ("You are...") rather than first-person ("I am..."). The userPrompt must ALWAYS be first-person ("I want...", "My sign is...").
 
 Return ONLY valid JSON:
 {

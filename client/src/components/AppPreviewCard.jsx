@@ -16,8 +16,8 @@ export default function AppPreviewCard({ data, onSendMessage, sessionId, storage
     return rawVars.reduce((acc, variable) => {
       const varName = typeof variable === "object" ? variable.name : String(variable || "").replace(/^\$\$/, "");
 
-      // FIX: Start entirely empty! Let the user type their own case details.
-      acc[varName] = "";
+      // Pre-fill with the extracted context-based test_value when available, otherwise start empty
+      acc[varName] = (typeof variable === "object" && variable.test_value) ? variable.test_value : "";
       return acc;
     }, {});
   });

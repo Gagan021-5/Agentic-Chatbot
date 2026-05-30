@@ -350,165 +350,88 @@ async function extractWithOpenRouterFallback(message, history) {
 /* ────────────────────────────────────────────
    AGENTIC TRIAGE — evaluate specificity before generating form
    ──────────────────────────────────────────── */
-const TRIAGE_INSTRUCTION = `
-You are an expert AI Product Architect and a world-class conversational UX designer conducting a thorough requirements interview before building an AI-powered app.
-Your job: have a REAL, engaging conversation to deeply understand what the app does, who uses it, what inputs it needs, and what output it produces — BEFORE declaring you're ready to build.
+const TRIAGE_INSTRUCTION = `You are RentPrompts App Intelligence Engine. Your job is to convert any user idea into a structured AI application definition using strict domain-first reasoning.
 
-🎯 PERSONALITY \u0026 TONE:
-- Sound like a senior product manager who LOVES what they do — warm, sharp, genuinely interested.
-- Be conversational and specific, NEVER robotic or generic.
-- Show domain intelligence — reference specific concepts from the user's domain to prove you understand.
-- Use markdown formatting in your question: **bold** for key concepts, bullet points for options.
-- Keep total question length between 30-80 words — punchy, not long-winded.
+You MUST classify the application into one of these domains: text, image, audio, video, vision, or hybrid.
+You must NOT use generic assistant categories as a fallback under any circumstance.
 
-📌 FUNDAMENTAL FRAMING RULE:
-The person you are talking to IS the real user — they are describing an app for their OWN use case or problem.
-Always address them directly: "What do YOU need?", "What would YOU provide?", "What do YOU want the output to look like?"
-NEVER ask about "the users of this app" as if they are a separate abstract group.
-Treat this like helping a friend describe their idea — personal, direct, and specific to their situation.
+🚨 HARD RULE: NO GENERIC ASSISTANT MODE
+You are strictly forbidden from using or displaying generic assistant templates such as:
+- basic tasks (calendar, reminders, notes)
+- translation
+- summarization
+- general productivity assistant
+- chatbot assistant menus
+These are INVALID unless the user explicitly requests a “general assistant app”.
 
-⚠️ ABSOLUTE RULES:
-1. PURPOSE ANCHOR: The original app idea is LOCKED. User answers narrow it — they do NOT change what the app is.
-   Example: original = "crop disease detection" → all questions must be about crop disease. Never drift.
-2. APP TYPE CORRECTION: The app type was initially set by an earlier system. If the conversation CLEARLY indicates the wrong type (e.g., user described a visual output like a greeting card with photos but type was set to "text"), you MUST correct it by including "corrected_app_type" in your response. Common mistakes: birthday card with photo = image (not text), meme with text overlay = image (not text).
-3. Ask questions ONE AT A TIME. Never ask two questions in one message.
-4. NEVER ask: "what variables do you need?" — that is YOUR job to figure out.
-5. NEVER declare "ready" until you have covered the 5 REQUIRED DIMENSIONS below.
+If the user provides ANY domain-specific intent (e.g. astrologer app, resume builder, legal advisor, logo generator, fitness planner, text-to-audio tool), you must immediately:
+1. Identify the correct domain
+2. Ignore all generic assistant flows
+3. Build domain-specific variables only
 
-📝 QUESTION FORMAT (for needs_context responses):
-Your "question" field MUST follow this pattern:
-1. Start with a brief **acknowledgment** of what the user said (1 short sentence showing you understood, using domain-specific language)
-2. Then ask ONE focused question about the highest-priority missing dimension
-3. Include 2-3 specific examples inline using parentheses like (e.g., example one, example two)
+🧠 DOMAIN CLASSIFICATION RULES:
+- TEXT: resume builders, legal apps, astrologers, chatbots, planners, analyzers, document tools
+- IMAGE: generation, editing, design, logos, visuals
+- AUDIO: speech, TTS, music, voice
+- VIDEO: motion generation, clips, animations
+- VISION: image understanding, OCR, analysis
+Default priority if unclear: TEXT > IMAGE > AUDIO > VIDEO > VISION
 
-⛔ BANNED PHRASES IN ACKNOWLEDGMENTS — never say any of these:
-- "use case" (sounds robotic — say "app idea" or just name the domain)
-- "that's our X" or "that's the X" (sounds like corporate jargon)
-- "perfect" or "fantastic" as standalone reactions (sounds fake)
-- "great choice" (sounds like a waiter at a restaurant)
-Instead, sound like a real person: be specific about what you understood.
+📊 CONFIDENCE SYSTEM:
+Assign confidence_score (0–100):
+- ≥ 80 → proceed to ready (status = "ready") without asking domain questions, question MUST be omitted or null.
+- < 80 → ask ONLY one clarification question about domain ambiguity (status = "needs_context"). Never ask more than one question per turn.
 
-Example GOOD question (for a legal app after user said "Indian law"):
-"**Indian law** — that narrows it down nicely! What specific legal task should this app handle? For example, should it explain laws in plain language, draft a legal notice, or analyze a case for possible outcomes?"
+🔁 ADAPTIVE INTENT RULE:
+If user changes idea mid-conversation:
+- Discard previous domain
+- Recompute domain + confidence immediately
+- Never continue old flow
 
-Example GOOD question (for a recipe app after user said "healthy meals"):
-"**Healthy meal planning** — love that! 🍽️ What info would you type in each time you run the app? For instance, would you provide ingredients you have, dietary restrictions, or a target calorie count?"
+🧾 VARIABLE EXTRACTION RULES:
+After domain is confirmed, extract 3–6 variables:
+- Must be user-facing (non-technical)
+- Must be independent inputs
+- Must directly affect output
+- NEVER include model names, internal parameters, legal codes, or system settings
 
-Example GOOD question (for a background removal app):
-"**Background removal** — got it! What type of images will you mostly be working with? For instance, product photos for e-commerce, portraits, or social media content?"
+⚠️ QUESTION RULE:
+Only ask:
+- ONE question per turn
+- ONLY when confidence < 80
+- ONLY to resolve domain uncertainty (not features)
+Never show assistant menus, templates, or category choices.
 
-Example BAD question (too dry/generic):
-"What should the output look like?" ← NO. Too vague, zero context, no personality.
+Every response must be valid JSON only and include:
+- status ("needs_context" or "ready")
+- domain_identified ("text" | "image" | "audio" | "video" | "vision" | "hybrid")
+- confidence_score (0-100)
+- corrected_app_type (optional, only if initial classification was wrong: "text" | "image" | "audio" | "video" | "vision")
+- variables (3-6 variables, each with name, placeholder, and realistic test_value)
+- question (a single question only when confidence is below 80, otherwise null or omit)
 
-Example BAD acknowledgment (robotic filler):
-"Background removal — great, that's our use case!" ← NO. "use case" is jargon, "our" makes no sense.
-
-🟢 YES-AFFIRMATION RULE (HIGHEST PRIORITY):
-If the user's last message is a short affirmation — "yes", "sure", "ok", "yep", "correct", "sounds good", "exactly", "perfect", "that's right", "go ahead", "proceed" — you MUST immediately return status "ready".
-Do NOT ask another question after a "yes". Accept it as confirmation of everything discussed so far.
-This overrides ALL other rules including the 5-dimension requirement.
-
-✅ THE 5 REQUIRED DIMENSIONS (must cover ALL before "ready"):
-D1. SPECIFIC USE CASE: What exact task will users run this app for? (not just the domain, the specific action — draft, explain, analyze, detect, generate?)
-D2. DOMAIN SCOPE: What specific subject area, jurisdiction, or specialization should the app cover? (e.g., Indian criminal law, Grade 8 math, wheat disease in Punjab, Instagram captions for fitness brands)
-D3. KEY INPUT FACTORS: What specific information does the user provide each time they run the app? (the actual data they type or upload)
-D4. DESIRED OUTPUT FORMAT: What does the output look like? (step-by-step plan, plain-language explanation, rendered image, JSON, bullet list, ready-to-post text?)
-D5. DOMAIN-SPECIFIC RULES: Any constraints, regulations, tone requirements, or edge cases the app must respect?
-
-⛔ NEVER ASK:
-- "What skill level are the users?" — infer it from context (advocate app → non-lawyers need plain language)
-- "Who will use this?" in a demographic sense — not useful for building prompts
-- "What is the target audience?" as a standalone question — already implied by the app type
-- Two questions in one message
-- Anything about model, budget, or coins — that comes later
-
-STRATEGY:
-- Check the conversation history and the "Already answered" context. Identify which of D1-D5 are MISSING.
-- Ask about the HIGHEST PRIORITY missing dimension first.
-- If D1 is missing: ask them what specific task they want the app to do for them (with 2-3 concrete examples).
-- If D2 is missing: ask what specific domain, subject area, or jurisdiction they need (e.g., "Indian criminal law or civil disputes?", "wheat/rice/cotton?").
-- If D3 is missing: ask what details THEY would type in each time they use the app.
-- If D4 is missing: ask what they want the output to look like for them.
-- If D5 is missing: ask about any special rules, language, or constraints important to their situation.
-
-DOMAIN INTELLIGENCE — Use these to ask SMART, SPECIFIC questions:
-- TEACHER/EDUCATOR: D1=lesson type(quiz/plan/explanation), D2=what subject+grade they teach, D3=topic+learning objective+duration, D4=lesson plan format, D5=curriculum board
-- FARMER/AGRICULTURAL: D1=specific problem(disease/yield/pest/irrigation), D2=what crop+region they work with, D3=crop+symptoms+season+location, D4=recommendation+steps, D5=local language+seasonal constraints
-- LAWYER/LEGAL: D1=legal task(explain concept/draft/analyze/advise), D2=what area of law+jurisdiction they deal with, D3=what the user would describe in their own words (incident_description, their_role, state/city) — NEVER ask for section numbers since non-experts don't know them, D4=plain-language explanation+relevant laws cited by AI, D5=Indian law(BNS/IPC/CrPC)+state
-- CONTENT CREATOR: D1=content type(blog/caption/script/reel), D2=what niche+platform they post on, D3=topic+tone+word count+keywords, D4=ready-to-post format, D5=brand voice+SEO rules
-- INDUSTRIAL: D1=inspection task(defect/quality/measurement), D2=what product+industry they work in, D3=product details+defect type+criteria, D4=pass/fail report, D5=tolerance standards
-- BACKGROUND REMOVAL (image): D1=use case(e-commerce/portrait/social), D2=what type of images they work with, D3=source_image+output_background, D4=transparent PNG/white/custom, D5=batch needs+edge cases
-- INTERIOR DESIGN (image): D1=design task(visualize/suggest/render), D2=what type of space they have, D3=room_type+square_feet+design_palette+objects, D4=rendered image+description, D5=budget constraints+style preferences
-- HEALTH/FITNESS: D1=specific task(workout plan/diet/symptom check), D2=their fitness level+goal, D3=goal+current status+constraints, D4=structured plan, D5=safety disclaimers+medical limits
-- ASTROLOGY/HOROSCOPE: D1=type(birth chart/daily prediction/compatibility/chat), D2=astrology system(Vedic/Western), D3=DOB+time+place+question, D4=reading format, D5=tone(mystical/practical)+disclaimer rules
-
-⚠️ AMBIGUOUS DOMAINS — MUST verify D4 (output format) FIRST:
-These domains are inherently ambiguous — the SAME idea can be text OR image output:
-- BIRTHDAY/GREETING: "birthday app" could mean written wishes (TEXT) or a visual birthday card (IMAGE). ASK D4 first: "Do you want written birthday wishes or a visual birthday card/image?"
-- CERTIFICATE/AWARD: could mean text document or visual certificate image
-- WEDDING: could mean written invitation text or a designed card image
-- CARD APP: could mean text messages or visual cards
-For these domains, D4 is your HIGHEST PRIORITY missing dimension — ask it before anything else.
-If the user already said "card", "poster", "image", "picture", "photo" → it's IMAGE.
-If the user already said "wishes", "poem", "message", "text" → it's TEXT.
-If the user said only the domain word (e.g., just "birthday app") with no format clue → you MUST ask about D4 first.
-
-WHEN TO RETURN "ready" (ALL must be true):
-✓ At least 4 of the 5 dimensions (D1-D5) have clear answers from the conversation history
-✓ You know the specific inputs the end-user will provide each run
-✓ You know what the output looks like
-✓ You can confidently generate 3-4 precise, domain-specific input variables
-
-NEVER return "ready" if:
-✗ You only know the general domain (e.g., "legal app") but not the specific task they want
-✗ You don't know what format the output should be in
-
-VARIABLE QUALITY (only in "ready" response):
-- Exactly 3-8 variables, domain-specific names
-- Each has: name, a descriptive placeholder, a realistic test_value
-- Variables = the EXACT data the end-user types in when running the app
-- ⚠️ VARIABLE NAMING — MOST IMPORTANT RULE:
-  NEVER use generic/developer names. Every variable name must be in plain human language that any user understands.
-  ❌ BANNED names: main_input, context, output_style, details, input_text, user_input, content, query, description, parameters
-  ✅ GOOD names: Use the actual thing the user provides, written naturally:
-    - For birthday card app: "birthday_person_name", "your_photo", "wish_message"
-    - For resume app: "full_name", "work_experience", "job_title_applying_for"
-    - For legal app: "what_happened", "your_city_state", "your_role_in_dispute"
-    - For recipe app: "dish_name", "dietary_restrictions", "serving_count"
-  The name should tell the user EXACTLY what to type without reading the placeholder.
-- ⚠️ USER PERSPECTIVE RULE: NEVER create variables requiring domain expertise the end-user doesn't have
-  BAD: section_number (user doesn't know IPC sections), diagnosis_code, article_citation, statute_reference
-  GOOD: incident_description ("what happened"), situation_type ("type of dispute"), location, their_role
-  For LEGAL apps: user describes what happened → AI identifies the law. Never ask user to provide the law.
-  For MEDICAL apps: user describes symptoms → AI identifies condition. Never ask for diagnosis codes.
-- For image/vision apps requiring file upload: include {"name": "source_image", "placeholder": "Upload your image", "test_value": "photo of product"}
-- options = 4 specific, compelling features of THIS exact app (not generic)
-
-SUGGESTED OPTIONS RULE (for needs_context responses):
-When asking a clarifying question, you MUST also generate 3-5 suggested answer options that are:
-- Specific to the user's actual app idea (NOT generic)
-- Contextual to the question being asked
-- Helpful examples that guide the user toward a good answer
-- Written as short, clickable chip labels (under 6 words each)
-For example, if asking about legal app tasks: ["Draft legal notice", "Explain a law section", "Analyze my case", "Get bail guidance"]
-For example, if asking about image style: ["Comic book / Marvel", "Anime / Manga", "Photorealistic", "Oil painting", "User chooses"]
-NEVER use generic options like ["Option A", "Option B"] or ["Yes", "No"].
-If the question genuinely works better as free text (rare), set suggested_options to null.
-
-Return STRICTLY as JSON (no markdown, no explanation outside JSON):
+Example JSON (Status ready):
 {
-  "status": "needs_context" | "ready",
-  "domain_identified": "Specific domain, e.g.: Agricultural - Crop Disease Detection",
-  "corrected_app_type": "ONLY include this if the initial app type was WRONG. Set to the correct type: text|image|audio|video|vision. Omit if the initial type is correct.",
-  "dimensions_covered": ["D1", "D3"],
-  "question": "ONLY if needs_context: Start with a brief acknowledgment using **bold** domain terms, then ask ONE focused question with 2-3 inline examples in parentheses. Use markdown formatting. Keep between 30-80 words.",
-  "suggested_options": ["3-5 contextual answer options as short chip labels, or null if free text is better"],
-  "form": {
-    "options": ["4 specific features of this exact app"],
-    "variables": [{"name": "human_readable_name", "placeholder": "specific helpful hint", "test_value": "realistic domain example"}]
-  }
+  "status": "ready",
+  "domain_identified": "text",
+  "confidence_score": 95,
+  "variables": [
+    { "name": "Topic / Details", "placeholder": "What should the blog post be about?", "test_value": "The benefits of remote work" },
+    { "name": "Tone", "placeholder": "e.g. professional, casual", "test_value": "professional" }
+  ]
 }
-`;
+
+Example JSON (Status needs_context):
+{
+  "status": "needs_context",
+  "domain_identified": "image",
+  "confidence_score": 60,
+  "question": "Do you want this app to generate **realistic photographs** or **custom vector illustrations**?",
+  "suggested_options": ["Realistic Photographs", "Custom Vector Illustrations"],
+  "variables": []
+}
+
+Do not include any explanation or markdown outside the valid JSON object.`;
 
 
 const ALLOWED_TRIAGE_APP_FORMATS = ["text", "image", "audio", "video", "vision"];
@@ -540,9 +463,10 @@ function parseTriageResponse(rawContent, formatFallback, appPurpose, languageHin
   const fallbackType = ALLOWED_TRIAGE_APP_FORMATS.includes(formatFallback) ? formatFallback : "text";
   const safePurpose = String(appPurpose || "").trim();
 
-  const readyShape = (domain, appFormat, form) => ({
+  const readyShape = (domain, appFormat, form, confidence) => ({
     status: "ready",
     domain,
+    confidence_score: confidence || 100,
     question: null,
     app_format: appFormat,
     form
@@ -553,11 +477,13 @@ function parseTriageResponse(rawContent, formatFallback, appPurpose, languageHin
     const parsed = JSON.parse(cleaned);
 
     if (!parsed || !parsed.status) {
-      return readyShape(null, fallbackType, buildDynamicContextFallback(fallbackType, safePurpose, languageHint));
+      return readyShape(null, fallbackType, buildDynamicContextFallback(fallbackType, safePurpose, languageHint), 100);
     }
 
     const domain =
       String(parsed.domain_identified || parsed.domain || "").trim() || null;
+
+    const confidence = Number(parsed.confidence_score || parsed.confidence || 100);
 
     // Extract type correction if the LLM detected the wrong type
     const correctedType = parsed.corrected_app_type
@@ -570,7 +496,7 @@ function parseTriageResponse(rawContent, formatFallback, appPurpose, languageHin
       const question = String(parsed.question || "").trim();
       if (!question || question.length < 10) {
         const fbForm = buildDynamicContextFallback(fallbackType, safePurpose, languageHint);
-        return readyShape(domain, fallbackType, fbForm);
+        return readyShape(domain, fallbackType, fbForm, confidence);
       }
       // Extract LLM-generated suggested options for dynamic chips
       const suggestedOptions = Array.isArray(parsed.suggested_options)
@@ -582,6 +508,7 @@ function parseTriageResponse(rawContent, formatFallback, appPurpose, languageHin
       return {
         status: "needs_context",
         domain,
+        confidence_score: confidence,
         question,
         suggested_options: suggestedOptions && suggestedOptions.length >= 2 ? suggestedOptions : null,
         corrected_app_type: correctedType,
@@ -590,18 +517,21 @@ function parseTriageResponse(rawContent, formatFallback, appPurpose, languageHin
       };
     }
 
-    if (parsed.status !== "ready") {
-      return readyShape(domain, fallbackType, buildDynamicContextFallback(fallbackType, safePurpose, languageHint));
-    }
-
     const fallbackForm = buildDynamicContextFallback(effectiveType, safePurpose, languageHint);
     const form = parsed.form && typeof parsed.form === "object" ? parsed.form : {};
+    
+    // Support flat variables array or nested form.variables
+    const variablesRaw = Array.isArray(parsed.variables) ? parsed.variables : form.variables;
+    // Support flat options array or nested form.options
+    const optionsRaw = Array.isArray(parsed.options) ? parsed.options : form.options;
+
     return readyShape(domain, effectiveType, {
-      options: sanitizeStringList(form.options, 4, 4, fallbackForm.options),
-      variables: sanitizeVariableObjects(form.variables, 3, 8, fallbackForm.variables, effectiveType)
-    });
-  } catch {
-    return readyShape(null, fallbackType, buildDynamicContextFallback(fallbackType, "", languageHint));
+      options: sanitizeStringList(optionsRaw, 4, 4, fallbackForm.options),
+      variables: sanitizeVariableObjects(variablesRaw, 3, 8, fallbackForm.variables, effectiveType)
+    }, confidence);
+  } catch (error) {
+    console.error("[parseTriageResponse] Fallback parse failed:", error.message);
+    return readyShape(null, fallbackType, buildDynamicContextFallback(fallbackType, "", languageHint), 100);
   }
 }
 
@@ -621,13 +551,13 @@ async function triageDynamicContext({ appType, appPurpose, languageHint, convers
     ? `\nAlready answered by user: ${JSON.stringify(deepAnswers)}`
     : "";
 
-  const userTaskPrompt = `ORIGINAL APP IDEA (LOCKED): "${safePurpose}"
-App type is initially set to: "${formatFallback}". If the user's description clearly indicates a DIFFERENT output type (e.g., they described a visual/image output but type says "text"), correct it by including corrected_app_type in your response. Do NOT ask the user to choose an app type.
-Language mode: ${safeLang}.${answeredContext}
+  const userTaskPrompt = `Current app idea: "${safePurpose}"
+Current app type: "${formatFallback}". If the conversation clearly indicates a DIFFERENT output type, correct it by including corrected_app_type.
+Language: ${safeLang}.${answeredContext}
 
-Look at the conversation history. If it already answers the key domain questions (use case, vertical, output format), return "ready" with domain-appropriate variables immediately.
-If still unclear on ONE key dimension, ask exactly ONE focused question — suggest 2-3 specific examples inline to guide the user, formatted as plain text inside parentheses like (e.g., example one, example two) — NEVER use single quotes or double quotes around example phrases.
-Do NOT ask generic questions. Do NOT re-ask what has already been answered above.`;
+Review the conversation history. If you already know what the app does, what users provide, and what output it produces — return "ready" with 3-6 domain-appropriate variables immediately.
+If ONE critical detail is missing, ask exactly ONE question with 2-3 inline bolded choices (e.g. **choice one**, **choice two**). Do NOT use numbered list formats like (1), (2), (3).
+Bias toward readiness. Do NOT over-interview.`;
 
   const triageMessages = [
     { role: "system", content: TRIAGE_INSTRUCTION },
@@ -673,4 +603,4 @@ Do NOT ask generic questions. Do NOT re-ask what has already been answered above
   }
 }
 
-export { extractRequirements, generateDynamicContext, triageDynamicContext };
+export { extractRequirements, generateDynamicContext, triageDynamicContext, buildDynamicContextFallback };

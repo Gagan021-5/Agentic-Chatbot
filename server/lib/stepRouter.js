@@ -1,6 +1,6 @@
-﻿import MODELS from "./models.js";
+import MODELS from "./models.js";
 import mockData from "./mockData.js";
-import { extractRequirements, generateDynamicContext, triageDynamicContext } from "./groq.js";
+import { extractRequirements, generateDynamicContext, triageDynamicContext, buildDynamicContextFallback } from "./groq.js";
 import { generatePromptTemplate, generateSEO, applyPromptInstruction, buildPromptTemplateFromSession } from "./gemini.js";
 import { buildBudgetTiers, getModelCost } from "./costCalculator.js";
 import { isOffTopic, OFF_TOPIC_RESPONSE } from "./requirementRouter.js";
@@ -172,7 +172,7 @@ function parseChipAppType(msg) {
   return null;
 }
 
-/** User is correcting assumed format after scoping â€” clear form so triage runs again with full history. */
+/** User is correcting assumed format after scoping — clear form so triage runs again with full history. */
 function shouldRerunTriageAfterFormatCorrection(session, userMessage) {
   if (!session?.dynamicContext || session.step !== 0) return false;
   const t = normalize(userMessage || "");
@@ -266,7 +266,7 @@ function tonePrefix(extraction) {
   if (!extraction) return "";
   if (extraction.userTone === "urgent") return "No worries, let's set this up quickly! ";
   if (extraction.userTone === "unsure") return "Happy to help figure this out together! ";
-  if (extraction.detectedLanguage === "Hindi") return "Samajh gaya â€” ";
+  if (extraction.detectedLanguage === "Hindi") return "Samajh gaya — ";
   return "";
 }
 
@@ -342,17 +342,17 @@ function mergeExtraction(existing, latest, message) {
   };
 }
 
-/* â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+/* ──────────────────────────────────────────────────────────────────────────
    BUILD FULL HISTORY STRING for ranking
-   â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
+   ────────────────────────────────────────────────────────────────────────── */
 function getFullUserText(session) {
   if (!session.history) return "";
   return session.history.filter(h => h.role === "user").map(h => h.content).join(" ");
 }
 
-/* â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-   DEEP QUESTIONS â€” app-specific
-   â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
+/* ──────────────────────────────────────────────────────────────────────────
+   DEEP QUESTIONS — app-specific
+   ────────────────────────────────────────────────────────────────────────── */
 async function buildDynamicBundleCard(session) {
   const purpose = session.extraction?.appPurpose || "";
   if (!purpose || purpose.trim().length < 12) return null;
@@ -374,55 +374,41 @@ async function buildDynamicBundleCard(session) {
     await saveSession(session);
   }
 
-  // â”€â”€â”€ AGENTIC TRIAGE: Evaluate specificity before generating form â”€â”€â”€
+  // ─── AGENTIC TRIAGE: Evaluate specificity before generating form ───
   // Skip triage if we already have a ready dynamic context (user answered a clarification)
   if (!session.dynamicContext) {
-    const triageResult = await triageDynamicContext({
+    let triageResult = await triageDynamicContext({
       appType: session.appType || null,
       appPurpose: purpose,
       languageHint: detectLanguageMode(session),
       conversationHistory: session.history || []
     });
 
-    // â”€â”€â”€ NEEDS CONTEXT OR VERIFICATION: Ask a clarifying question â”€â”€â”€
+    // Enforce question limits (max 3 total questions across the entire conversation)
+    if ((session.triageRounds || 0) >= 3 && (triageResult.status === "needs_context" || triageResult.status === "needs_format")) {
+      console.log(`[Triage] Limit of 3 questions reached. Forcing status to ready.`);
+      triageResult = {
+        status: "ready",
+        domain: triageResult.domain || session.domainIdentified || null,
+        app_format: triageResult.corrected_app_type || session.appType || "text",
+        form: null
+      };
+    }
+
+    // ─── NEEDS CONTEXT OR VERIFICATION: Ask a clarifying question ───
     if ((triageResult.status === "needs_context" || triageResult.status === "needs_format") && triageResult.question) {
       session.triageRounds = (session.triageRounds || 0) + 1;
       if (triageResult.domain) session.domainIdentified = triageResult.domain;
 
       console.log(
-        `[Triage] Round ${session.triageRounds} â€” Status: ${triageResult.status} â€” Asking: ${triageResult.question.substring(0, 80)}`
+        `[Triage] Round ${session.triageRounds} — Status: ${triageResult.status} — Asking: ${triageResult.question.substring(0, 80)}`
       );
 
-      if (session.triageRounds <= 3) {
-        session.awaitingTriageAnswer = true;
-
-        // Format check gets hardcoded format chips; context questions get LLM-generated chips
-        const isFormatCheck = triageResult.status === "needs_format";
-        const hasLLMChips = !isFormatCheck && Array.isArray(triageResult.suggested_options) && triageResult.suggested_options.length >= 2;
-
-        return {
-          reply: triageResult.question,
-          uiType: (isFormatCheck || hasLLMChips) ? "chips" : null,
-          uiData: isFormatCheck
-            ? { options: ["Text", "Image", "Audio", "Video"] }
-            : hasLLMChips
-              ? { options: triageResult.suggested_options }
-              : null,
-          nextStep: session.step,
-          coins: null
-        };
-      }
-    }
-
-    // Same triage outcome but round cap exceeded â€” still never skip straight to an unconfirmed form
-    if (
-      (triageResult.status === "needs_context" || triageResult.status === "needs_format") &&
-      triageResult.question &&
-      session.triageRounds > 3
-    ) {
       session.awaitingTriageAnswer = true;
+
       const isFormatCheck = triageResult.status === "needs_format";
       const hasLLMChips = !isFormatCheck && Array.isArray(triageResult.suggested_options) && triageResult.suggested_options.length >= 2;
+
       return {
         reply: triageResult.question,
         uiType: (isFormatCheck || hasLLMChips) ? "chips" : null,
@@ -491,9 +477,9 @@ async function buildDynamicBundleCard(session) {
   return {
     reply: localizedText(
       session,
-      `## âœ… App Architecture Ready\n\nI've analyzed your requirements and scoped out a **${displayFormat}** app.\n\nHere's what I've configured for you â€” review the features and input fields below, then hit confirm to proceed.\n\n**ðŸ’¡ Tip:** If you actually wanted this to generate a different output type (Images, Audio, Video), just let me know and I'll adjust instantly.`,
-      `## âœ… à¤à¤ª à¤†à¤°à¥à¤•à¤¿à¤Ÿà¥‡à¤•à¥à¤šà¤° à¤¤à¥ˆà¤¯à¤¾à¤°\n\nà¤®à¥ˆà¤‚à¤¨à¥‡ à¤†à¤ªà¤•à¥€ à¤œà¤¼à¤°à¥‚à¤°à¤¤à¥‹à¤‚ à¤•à¤¾ à¤µà¤¿à¤¶à¥à¤²à¥‡à¤·à¤£ à¤•à¤¿à¤¯à¤¾ à¤”à¤° **${displayFormat}** à¤à¤ª à¤¸à¥à¤•à¥‹à¤ª à¤•à¤¿à¤¯à¤¾ à¤¹à¥ˆà¥¤\n\nà¤¨à¥€à¤šà¥‡ à¤«à¥€à¤šà¤°à¥à¤¸ à¤”à¤° à¤‡à¤¨à¤ªà¥à¤Ÿ à¤«à¥€à¤²à¥à¤¡à¥à¤¸ à¤¦à¥‡à¤–à¥‡à¤‚, à¤«à¤¿à¤° à¤•à¤¨à¥à¤«à¤°à¥à¤® à¤•à¤°à¥‡à¤‚à¥¤\n\n**ðŸ’¡ à¤Ÿà¤¿à¤ª:** à¤…à¤—à¤° à¤†à¤ª Image, Audio à¤¯à¤¾ Video à¤†à¤‰à¤Ÿà¤ªà¥à¤Ÿ à¤šà¤¾à¤¹à¤¤à¥‡ à¤¹à¥ˆà¤‚ à¤¤à¥‹ à¤¬à¤¤à¤¾ à¤¦à¥‡à¤‚à¥¤`,
-      `## âœ… App Architecture Ready\n\nMaine tumhare requirements analyze karke **${displayFormat}** app scope kiya hai.\n\nNeeche features aur input fields check karo, phir confirm karo.\n\n**ðŸ’¡ Tip:** Agar Images, Audio ya Video chahiye ho, bas bata dena!`
+      `## ✅ App Architecture Ready\n\nI've analyzed your requirements and scoped out a **${displayFormat}** app.\n\nHere's what I've configured for you — review the features and input fields below, then hit confirm to proceed.\n\n**💡 Tip:** If you actually wanted this to generate a different output type (Images, Audio, Video), just let me know and I'll adjust instantly.`,
+      `## ✅ ऐप आर्किटेक्चर तैयार\n\nमैंने आपकी ज़रूरतों का विश्लेषण किया और **${displayFormat}** ऐप स्कोप किया है।\n\nनीचे फीचर्स और इनपुट फील्ड्स देखें, फिर कन्फर्म करें।\n\n**💡 टिप:** अगर आप Image, Audio या Video आउटपुट चाहते हैं तो बता दें।`,
+      `## ✅ App Architecture Ready\n\nMaine tumhare requirements analyze karke **${displayFormat}** app scope kiya hai.\n\nNeeche features aur input fields check karo, phir confirm karo.\n\n**💡 Tip:** Agar Images, Audio ya Video chahiye ho, bas bata dena!`
     ),
     uiType: "multi_select_form",
     uiData: {
@@ -514,7 +500,7 @@ function getNextDeepQuestion(session) {
   if (!session.extraction?.budget && !session.deepAnswers?.budgetPreference) {
     return {
       field: "budgetPreference",
-      question: "One last thing â€” what is your target budget per generation for this app?",
+      question: "Last step before I pick models — what's your budget per generation?",
       options: [
         "Free models only (0 coins)",
         "Low (< 5 coins)",
@@ -528,7 +514,7 @@ function getNextDeepQuestion(session) {
 }
 
 /* â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-   APPLY EDIT TO SESSION â€” rewrites session state so generatePromptTemplate
+   APPLY EDIT TO SESSION — rewrites session state so generatePromptTemplate
    gets clean, up-to-date context instead of old ghost memory.
    Call this BEFORE generatePromptTemplate on every edit path.
    â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
@@ -551,7 +537,7 @@ function applyEditToSession(session, editInstruction) {
     // Detect "transparent" or "no background" edits â†’ kill scene/background answers
     const wantsTransparent = /transparent|no background|remove background|no bg/i.test(editInstruction);
     const wantsNewBackground = /background|backdrop|scene|environment/i.test(editInstruction);
-    // Detect "no X" pattern â€” user explicitly rejecting a value
+    // Detect "no X" pattern — user explicitly rejecting a value
     const noXMatch = editInstruction.match(/no\s+(\w+)/i);
 
     const keysToRemove = [];
@@ -584,7 +570,7 @@ function applyEditToSession(session, editInstruction) {
   if (session.dynamicContext?.variables) {
     const wantsTransparent = /transparent|no background|remove background|no bg/i.test(editInstruction);
     if (wantsTransparent) {
-      // Remove scene/forest/backdrop variables â€” they conflict with transparent background
+      // Remove scene/forest/backdrop variables — they conflict with transparent background
       session.dynamicContext.variables = session.dynamicContext.variables.filter(v => {
         const vname = (typeof v === 'object' ? v.name : String(v)).toLowerCase();
         return !/scene|forest|nature|backdrop|environment|location|background_scene|forest_scene/i.test(vname);
@@ -622,7 +608,7 @@ async function showModels(session) {
   await saveSession(session);
   
   return {
-    reply: `## ðŸ¤– AI Model Selection\n\nI've ranked the **top 3 models** for your **${session.appType}** app based on your requirements and budget.\n\nEach card shows the model's strengths, speed, and cost per run â€” **click any card** to select it.`,
+    reply: `## 🤖 AI Model Selection\n\nI've ranked the **top 3 models** for your **${session.appType}** app based on your requirements and budget.\n\nEach card shows the model's strengths, speed, and cost per run — **click any card** to select it.`,
     uiType: 'models',
     uiData: { appType: session.appType, models },
     nextStep: 1,
@@ -634,7 +620,7 @@ async function buildStep0Response(session, text) {
   const ext = session.extraction;
 
   // â”€â”€ AMBIGUOUS DOMAIN DETECTION â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-  // These keywords are inherently ambiguous â€” they could be text OR image.
+  // These keywords are inherently ambiguous — they could be text OR image.
   // e.g., "birthday app" â†’ text (written wishes) or image (birthday card).
   // We SKIP local keyword inference for these and let the triage LLM ask the
   // user explicitly what output format they want.
@@ -655,7 +641,7 @@ async function buildStep0Response(session, text) {
   );
 
   // 1. IF APP TYPE IS MISSING: Try local keyword inference FIRST before showing chips
-  //    BUT: Skip for ambiguous domains â€” let triage ask about output format instead.
+  //    BUT: Skip for ambiguous domains — let triage ask about output format instead.
   if (!session.appType) {
     const LOCAL_TYPE_SIGNALS = {
       image: [
@@ -706,7 +692,7 @@ async function buildStep0Response(session, text) {
 
     // If ambiguous domain AND user hasn't explicitly confirmed format â†’ skip local inference
     if (isAmbiguousDomain && !hasExplicitTypeFromUser) {
-      console.log(`[Ambiguous Domain] "${purposeLower.substring(0, 60)}" matches ambiguous signals â€” skipping local inference, deferring to triage.`);
+      console.log(`[Ambiguous Domain] "${purposeLower.substring(0, 60)}" matches ambiguous signals — skipping local inference, deferring to triage.`);
     } else {
       for (const [type, signals] of Object.entries(LOCAL_TYPE_SIGNALS)) {
         if (signals.some(sig => purposeLower.includes(sig))) {
@@ -728,8 +714,8 @@ async function buildStep0Response(session, text) {
     if (hasPurpose) {
       // For ambiguous domains: DON'T auto-infer, let triage ask explicitly.
       if (isAmbiguousDomain && !hasExplicitTypeFromUser) {
-        console.log(`[Smart Infer] Ambiguous domain detected â€” NOT auto-inferring type. Triage will ask.`);
-        // Don't set session.appType â€” fall through to triage which will ask about output format
+        console.log(`[Smart Infer] Ambiguous domain detected — NOT auto-inferring type. Triage will ask.`);
+        // Don't set session.appType — fall through to triage which will ask about output format
       } else {
         // AGENTIC APPROACH: Smart default based on purpose keywords.
         // Detect if the purpose is likely visual (image) or textual.
@@ -750,11 +736,11 @@ async function buildStep0Response(session, text) {
         session.appType = inferredType;
         if (!session.extraction) session.extraction = {};
         session.extraction.appType = inferredType;
-        console.log(`[Smart Infer] No explicit type for "${ext.appPurpose.substring(0, 50)}" â€” inferred '${inferredType}' from purpose keywords.`);
+        console.log(`[Smart Infer] No explicit type for "${ext.appPurpose.substring(0, 50)}" — inferred '${inferredType}' from purpose keywords.`);
       }
-      // Fall through to triage below â€” it will ask smart domain questions
+      // Fall through to triage below — it will ask smart domain questions
     } else {
-      // Truly zero context â€” user said something too vague. Show format chips.
+      // Truly zero context — user said something too vague. Show format chips.
       session.step = 0;
       await saveSession(session);
       const options = detectLanguageMode(session) === "Hindi" ? ["à¤Ÿà¥‡à¤•à¥à¤¸à¥à¤Ÿ", "à¤‡à¤®à¥‡à¤œ", "à¤‘à¤¡à¤¿à¤¯à¥‹", "à¤µà¥€à¤¡à¤¿à¤¯à¥‹", "à¤µà¤¿à¤œà¤¼à¤¨"] : ["Text", "Image", "Audio", "Video", "Vision"];
@@ -768,55 +754,18 @@ async function buildStep0Response(session, text) {
   // 3. AGENTIC TRIAGE (Deep Context Questions)
   if (!session.dynamicContext) {
 
-    // â”€â”€ AMBIGUOUS DOMAIN FORCE-ASK: If no appType yet and domain is ambiguous, inject format question â”€â”€
-    if (!session.appType && isAmbiguousDomain && !session.formatAskedByTriage) {
-      session.formatAskedByTriage = true;
-      session.triageRounds = (session.triageRounds || 0) + 1;
-      await saveSession(session);
-      console.log(`[Ambiguous Domain] Forcing output format question for: "${purposeLowerForAmbiguity.substring(0, 60)}"`);
-      return {
-        reply: `I noticed your app idea could work as either written text or a visual image. What kind of output should this app generate?`,
-        uiType: "chips",
-        uiData: { options: ["Written text (wishes, poems, messages)", "Visual image (card, poster, design)"] },
-        nextStep: 0,
-        coins: null
-      };
-    }
-
-    // â”€â”€ Handle the format answer from the ambiguous-domain forced question â”€â”€
-    if (session.formatAskedByTriage && !session.appType) {
-      const answerLower = lower(text);
-      if (answerLower.includes('written') || answerLower.includes('text') || answerLower.includes('wishes') ||
-          answerLower.includes('poem') || answerLower.includes('message')) {
-        session.appType = 'text';
-        if (!session.extraction) session.extraction = {};
-        session.extraction.appType = 'text';
-        session.formatConfirmedByUser = true;
-        console.log(`[Ambiguous Domain] User confirmed: TEXT output`);
-      } else if (answerLower.includes('visual') || answerLower.includes('image') || answerLower.includes('card') ||
-                 answerLower.includes('poster') || answerLower.includes('design') || answerLower.includes('picture') ||
-                 answerLower.includes('photo')) {
-        session.appType = 'image';
-        if (!session.extraction) session.extraction = {};
-        session.extraction.appType = 'image';
-        session.formatConfirmedByUser = true;
-        console.log(`[Ambiguous Domain] User confirmed: IMAGE output`);
-      }
-      await saveSession(session);
-    }
-
-    // ðŸŸ¢ YES-AFFIRMATION FAST PATH: user said "yes/sure/ok" during triage â†’ skip API, treat as ready
+    // 🟢 YES-AFFIRMATION FAST PATH: user said "yes/sure/ok" during triage → skip API, treat as ready
     const affirmations = ['yes', 'sure', 'ok', 'yep', 'yeah', 'correct', 'sounds good', 'exactly',
       'perfect', 'go ahead', 'proceed', "that's right", 'looks good', 'right', 'agreed', 'great'];
     const msgClean = lower(text).trim().replace(/[!.,?]+$/, '');
     const isAffirmation = affirmations.includes(msgClean);
 
     if (isAffirmation && (session.triageRounds || 0) > 0) {
-      // User confirmed â€” mark triage complete, fall through to budget
+      // User confirmed — mark triage complete, fall through to budget
       session.triageRounds = 99;
       await saveSession(session);
     } else {
-      const triageResult = await triageDynamicContext({
+      let triageResult = await triageDynamicContext({
         appType: session.appType,
         appPurpose: session.extraction?.appPurpose || "",
         languageHint: detectLanguageMode(session),
@@ -824,14 +773,25 @@ async function buildStep0Response(session, text) {
         deepAnswers: session.deepAnswers || {}
       });
 
-      if (triageResult.status === "needs_context" && (session.triageRounds || 0) < 6) {
+      // Enforce question limits (max 3 total questions across the entire conversation)
+      if ((session.triageRounds || 0) >= 3 && (triageResult.status === "needs_context" || triageResult.status === "needs_format")) {
+        console.log(`[Triage] Limit of 3 questions reached. Forcing status to ready.`);
+        triageResult = {
+          status: "ready",
+          domain: triageResult.domain || session.domainIdentified || null,
+          app_format: triageResult.corrected_app_type || session.appType || "text",
+          form: null
+        };
+      }
+
+      if (triageResult.status === "needs_context") {
         const question = String(triageResult.question || "").trim();
         if (question.length >= 10) {
           session.triageRounds = (session.triageRounds || 0) + 1;
           session.lastQuestion = question;
           await saveSession(session);
 
-          // Use LLM-generated chips if available â€” fully dynamic requirement gathering
+          // Use LLM-generated chips if available — fully dynamic requirement gathering
           const hasChips = Array.isArray(triageResult.suggested_options) && triageResult.suggested_options.length >= 2;
           return {
             reply: question,
@@ -845,12 +805,12 @@ async function buildStep0Response(session, text) {
 
       // Apply type correction if triage detected a misclassification
       if (triageResult.corrected_app_type && triageResult.corrected_app_type !== session.appType) {
-        console.log(`[Triage] Type correction: ${session.appType} â†’ ${triageResult.corrected_app_type}`);
+        console.log(`[Triage] Type correction: ${session.appType} → ${triageResult.corrected_app_type}`);
         session.appType = triageResult.corrected_app_type;
         if (session.extraction) session.extraction.appType = triageResult.corrected_app_type;
       }
 
-      // AI satisfied or hit max rounds â€” save variables for Live Preview
+      // AI satisfied or hit max rounds — save variables for Live Preview
       if (triageResult.form) {
         session.dynamicContext = triageResult.form;
       } else {
@@ -861,11 +821,15 @@ async function buildStep0Response(session, text) {
         });
       }
       session.triageRounds = 0;
+      session.formConfirmed = true;
       await saveSession(session);
     } // end else (not affirmation)
   } // end if (!session.dynamicContext)
 
   // 3. BUDGET QUESTION (Only asked AFTER it fully understands the app and the form has been confirmed)
+  if (session.dynamicContext) {
+    session.formConfirmed = true;
+  }
   const isFormConfirmed = Boolean(session.formConfirmed);
   if (isFormConfirmed) {
     if (!session.extraction?.budget && !session.deepAnswers?.budgetPreference) {
@@ -873,7 +837,7 @@ async function buildStep0Response(session, text) {
       session.awaitingDeepAnswer = true;
       await saveSession(session);
       return {
-        reply: "## ðŸ’° Almost There â€” Budget Selection\n\nI've gathered all the details I need to architect your app! Just one last thing â€” **what's your target budget per generation?**\n\nThis helps me recommend the perfect AI model for your use case.",
+        reply: "Got everything I need to build your app! One last thing — **what's your budget per generation?** This helps me pick the right AI model.",
         uiType: "chips",
         uiData: { options: ["Free models only (0 coins)", "Low (< 5 coins)", "Medium (5 - 20 coins)", "Premium (> 20 coins)"] },
         nextStep: 0,
@@ -881,13 +845,20 @@ async function buildStep0Response(session, text) {
       };
     }
   } else {
+    if (!session.dynamicContext || !Array.isArray(session.dynamicContext.variables) || !Array.isArray(session.dynamicContext.options)) {
+      session.dynamicContext = buildDynamicContextFallback(
+        session.appType || "text",
+        session.extraction?.appPurpose || "",
+        detectLanguageMode(session)
+      );
+    }
     // Return the multi_select_form first!
     return {
       reply: localizedText(
         session,
-        "## ðŸ“‹ Customize Your App Configuration\n\nI've generated a draft of key features and input fields based on our conversation.\n\nVerify or adjust the options below, then click **Confirm options**!",
-        "## ðŸ“‹ à¤†à¤ªà¤•à¥‡ à¤à¤ª à¤•à¤¾ à¤¸à¥‡à¤Ÿà¤…à¤ª\n\nà¤®à¥ˆà¤‚à¤¨à¥‡ à¤¹à¤®à¤¾à¤°à¥€ à¤¬à¤¾à¤¤à¤šà¥€à¤¤ à¤•à¥‡ à¤†à¤§à¤¾à¤° à¤ªà¤° à¤ªà¥à¤°à¤®à¥à¤– à¤µà¤¿à¤¶à¥‡à¤·à¤¤à¤¾à¤“à¤‚ à¤”à¤° à¤‡à¤¨à¤ªà¥à¤Ÿ à¤«à¤¼à¥€à¤²à¥à¤¡à¥à¤¸ à¤•à¤¾ à¤à¤• à¤¡à¥à¤°à¤¾à¤«à¥à¤Ÿ à¤¤à¥ˆà¤¯à¤¾à¤° à¤•à¤¿à¤¯à¤¾ à¤¹à¥ˆà¥¤\n\nà¤•à¥ƒà¤ªà¤¯à¤¾ à¤¨à¥€à¤šà¥‡ à¤¦à¤¿à¤ à¤—à¤ à¤µà¤¿à¤•à¤²à¥à¤ªà¥‹à¤‚ à¤•à¥€ à¤œà¤¾à¤‚à¤š à¤•à¤°à¥‡à¤‚, à¤«à¤¿à¤° **Confirm options** à¤ªà¤° à¤•à¥à¤²à¤¿à¤• à¤•à¤°à¥‡à¤‚!",
-        "## ðŸ“‹ App Configuration Customise Karein\n\nMaine humari conversation ke basis par key features aur input fields ka ek draft generate kiya hai.\n\nNeeche diye options ko check/adjust karein, fir **Confirm options** par click karein!"
+        "## 📋 Customize Your App Configuration\n\nI've generated a draft of key features and input fields based on our conversation.\n\nVerify or adjust the options below, then click **Confirm options**!",
+        "## 📋 à¤†à¤ªà¤•à¥‡ à¤à¤ª à¤•à¤¾ à¤¸à¥‡à¤Ÿà¤…à¤ª\n\nà¤®à¥ˆà¤‚à¤¨à¥‡ à¤¹à¤®à¤¾à¤°à¥€ à¤¬à¤¾à¤¤à¤šà¥€à¤¤ à¤•à¥‡ à¤†à¤§à¤¾à¤° à¤ªà¤° à¤ªà¥à¤°à¤®à¥à¤– à¤µà¤¿à¤¶à¥‡à¤·à¤¤à¤¾à¤“à¤‚ à¤”à¤° à¤‡à¤¨à¤ªà¥à¤Ÿ à¤«à¤¼à¥€à¤²à¥à¤¡à¥à¤¸ à¤•à¤¾ à¤à¤• à¤¡à¥à¤°à¤¾à¤«à¥à¤Ÿ à¤¤à¥ˆà¤¯à¤¾à¤° à¤•à¤¿à¤¯à¤¾ à¤¹à¥ˆà¥¤\n\nà¤•à¥ƒà¤ªà¤¯à¤¾ à¤¨à¥€à¤šà¥‡ à¤¦à¤¿à¤ à¤—à¤ à¤µà¤¿à¤•à¤²à¥à¤ªà¥‹à¤‚ à¤•à¥€ à¤œà¤¾à¤‚à¤š à¤•à¤°à¥‡à¤‚, à¤«à¤¿à¤° **Confirm options** à¤ªà¤° à¤•à¥à¤²à¤¿à¤• à¤•à¤°à¥‡à¤‚!",
+        "## 📋 App Configuration Customise Karein\n\nMaine humari conversation ke basis par key features aur input fields ka ek draft generate kiya hai.\n\nNeeche diye options ko check/adjust karein, fir **Confirm options** par click karein!"
       ),
       uiType: "multi_select_form",
       uiData: {
@@ -921,19 +892,47 @@ async function execGatherRequirements(session, text) {
 }
 
 async function execRenderForm(session) {
-  if (!session.dynamicContext) {
+  if (!session.dynamicContext || !Array.isArray(session.dynamicContext.variables) || !Array.isArray(session.dynamicContext.options)) {
     session.dynamicContext = await generateDynamicContext({
       appType: session.appType || "text",
       appPurpose: session.extraction?.appPurpose || "",
       languageHint: detectLanguageMode(session)
     });
   }
+  if (!session.dynamicContext || !Array.isArray(session.dynamicContext.variables) || !Array.isArray(session.dynamicContext.options)) {
+    session.dynamicContext = buildDynamicContextFallback(
+      session.appType || "text",
+      session.extraction?.appPurpose || "",
+      detectLanguageMode(session)
+    );
+  }
+  session.formConfirmed = true;
+  await saveSession(session);
+
+  const budget = session.deepAnswers?.budgetPreference || session.extraction?.budget;
+  if (!budget) {
+    session.currentDeepField = "budgetPreference";
+    session.awaitingDeepAnswer = true;
+    await saveSession(session);
+    return {
+      reply: "Got everything I need to build your app! One last thing — **what's your budget per generation?** This helps me pick the right AI model.",
+      uiType: "chips",
+      uiData: { options: ["Free models only (0 coins)", "Low (< 5 coins)", "Medium (5 - 20 coins)", "Premium (> 20 coins)"] },
+      nextStep: 0,
+      coins: null
+    };
+  }
+
+  return showModels(session);
+}
+
+async function legacy_execRenderForm_unused(session) {
   return {
     reply: localizedText(
       session,
-      "## ðŸ“‹ Customize Your App Configuration\n\nReview the features and input fields below, then click **Confirm options**!",
-      "## ðŸ“‹ à¤†à¤ªà¤•à¥‡ à¤à¤ª à¤•à¤¾ à¤¸à¥‡à¤Ÿà¤…à¤ª\n\nà¤¨à¥€à¤šà¥‡ à¤¦à¤¿à¤ à¤—à¤ à¤µà¤¿à¤•à¤²à¥à¤ªà¥‹à¤‚ à¤•à¥€ à¤œà¤¾à¤‚à¤š à¤•à¤°à¥‡à¤‚, à¤«à¤¿à¤° **Confirm options** à¤ªà¤° à¤•à¥à¤²à¤¿à¤• à¤•à¤°à¥‡à¤‚!",
-      "## ðŸ“‹ App Configuration\n\nNeeche options check karo, fir **Confirm options** par click karo!"
+      "## 📋 Customize Your App Configuration\n\nReview the features and input fields below, then click **Confirm options**!",
+      "## 📋 à¤†à¤ªà¤•à¥‡ à¤à¤ª à¤•à¤¾ à¤¸à¥‡à¤Ÿà¤…à¤ª\n\nà¤¨à¥€à¤šà¥‡ à¤¦à¤¿à¤ à¤—à¤ à¤µà¤¿à¤•à¤²à¥à¤ªà¥‹à¤‚ à¤•à¥€ à¤œà¤¾à¤‚à¤š à¤•à¤°à¥‡à¤‚, à¤«à¤¿à¤° **Confirm options** à¤ªà¤° à¤•à¥à¤²à¤¿à¤• à¤•à¤°à¥‡à¤‚!",
+      "## 📋 App Configuration\n\nNeeche options check karo, fir **Confirm options** par click karo!"
     ),
     uiType: "multi_select_form",
     uiData: {
@@ -981,7 +980,7 @@ async function execGeneratePreview(session, text) {
     session.step = 2;
     await saveSession(session);
     return {
-      reply: `## ðŸŽ¯ App Preview Ready\n\nI've configured the full AI logic using **${selectedModel.name}**.\n\nTest it in the Live Preview below â€” click **Approve App** when ready!`,
+      reply: `## App Preview Ready\n\nI've configured the full AI logic using **${selectedModel.name}**.\n\nTest it in the Live Preview below — click **Approve App** when ready!`,
       uiType: "app_preview",
       uiData: {
         appName: seoData.appName,
@@ -1000,7 +999,7 @@ async function execGeneratePreview(session, text) {
   } catch (err) {
     console.error("[execGeneratePreview] Error:", err);
     return {
-      reply: "Oops! âš ï¸ I hit a snag generating the config. Please try selecting the model again.",
+      reply: "Oops! ⚠️ I hit a snag generating the config. Please try selecting the model again.",
       uiType: "text", uiData: null, nextStep: 1, coins: null
     };
   }
@@ -1011,7 +1010,7 @@ async function execReviewSEO(session) {
   await saveSession(session);
   const seoData = session.seoData || {};
   return {
-    reply: "## ðŸŽ‰ App Configured â€” Final Review\n\nReview your **app name, description, and tags** below.\n\nEdit any field before publishing â€” make it shine! âœ¨",
+    reply: "## 🎉 App Configured — Final Review\n\nReview your **app name, description, and tags** below.\n\nEdit any field before publishing — make it shine! ✨",
     uiType: "seo_preview",
     uiData: {
       appName: seoData.appName || "Your App",
@@ -1031,7 +1030,7 @@ async function execPivotApp(session, text, decision) {
   let newType = decision.app_type || parseChipAppType(text);
   if (!newType) { const m = text.toLowerCase().match(/(image|video|audio|text|vision)/i); if (m) newType = m[1].toLowerCase(); }
 
-  // Format-only pivot â€” keep purpose, just swap type
+  // Format-only pivot — keep purpose, just swap type
   const isFormatOnly = newType && newType !== session.appType && session.extraction?.appPurpose?.trim().length > 10 && !decision.is_major_pivot;
   if (isFormatOnly) {
     session.appType = newType;
@@ -1045,14 +1044,14 @@ async function execPivotApp(session, text, decision) {
     session.currentDeepField = "budgetPreference"; session.awaitingDeepAnswer = true;
     await saveSession(session);
     return {
-      reply: `Got it! Switching to a **${newType}** app â€” your context is preserved.\n\nWhat budget per generation works for you?`,
+      reply: `Got it! Switching to a **${newType}** app — your context is preserved.\n\nWhat budget per generation works for you?`,
       uiType: "chips",
       uiData: { options: ["Free models only (0 coins)", "Low (< 5 coins)", "Medium (5 - 20 coins)", "Premium (> 20 coins)"] },
       nextStep: 0, coins: null
     };
   }
 
-  // Full domain pivot â€” wipe everything
+  // Full domain pivot — wipe everything
   let cleanPurpose = text
     .replace(/\b(actually|instead|change it to|switch to|something different)\b/gi, "")
     .replace(/\bi want to (build|make|create) (a|an)\b/gi, "")
@@ -1095,7 +1094,7 @@ async function execEditApp(session, text, decision) {
   session.step = 2;
   await saveSession(session);
   return {
-    reply: `## âœ… App Updated\n\nApplied: **"${instruction}"**\n\nHere's the refreshed preview â€” approve when ready!`,
+    reply: `## ✅ App Updated\n\nApplied: **"${instruction}"**\n\nHere's the refreshed preview — approve when ready!`,
     uiType: "app_preview",
     uiData: {
       appName: session.seoData?.appName || "Your App",
@@ -1155,7 +1154,7 @@ async function execChangeModel(session, text, decision) {
   session.currentDeepField = "budgetPreference"; session.awaitingDeepAnswer = true; session.step = 0;
   await saveSession(session);
   return {
-    reply: "What target budget per generation would you like to switch to?",
+    reply: "What budget per generation would you like to switch to?",
     uiType: "chips",
     uiData: { options: ["Free models only (0 coins)", "Low (< 5 coins)", "Medium (5 - 20 coins)", "Premium (> 20 coins)"] },
     nextStep: 0, coins: null
@@ -1163,7 +1162,7 @@ async function execChangeModel(session, text, decision) {
 }
 
 /* â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
-   MAIN ROUTER â€” Declarative Action Dispatch
+   MAIN ROUTER — Declarative Action Dispatch
    â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â• */
 export async function route(session, message) {
   // â”€â”€ WALL OF TEXT GUARD â”€â”€
@@ -1190,7 +1189,7 @@ export async function route(session, message) {
       session.currentDeepField = "budgetPreference"; session.awaitingDeepAnswer = true;
       await saveSession(session);
       return {
-        reply: "## ðŸ’° Almost There â€” Budget Selection\n\nJust one last thing â€” **what's your target budget per generation?**",
+        reply: "One last thing — **what's your budget per generation?**",
         uiType: "chips",
         uiData: { options: ["Free models only (0 coins)", "Low (< 5 coins)", "Medium (5 - 20 coins)", "Premium (> 20 coins)"] },
         nextStep: 0, coins: null
@@ -1222,7 +1221,7 @@ export async function route(session, message) {
       console.log("\nâ•â• MOCK PUBLISH â•â•\n", JSON.stringify(payload, null, 2), "\nâ•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•\n");
       await deleteSession(session.sessionId);
       return {
-        reply: `## ðŸŽ‰ Published Successfully!\n\nYour app **"${session.seoData?.appName}"** is now live!\n\n- **Cost per run:** ${payload.costPerRun} coins\n- **Status:** âœ… Live ðŸš€`,
+        reply: `## 🎉 Published Successfully!\n\nYour app **"${session.seoData?.appName}"** is now live!\n\n- **Cost per run:** ${payload.costPerRun} coins\n- **Status:** ✅ Live ðŸš€`,
         uiType: "success",
         uiData: {
           appName: session.seoData?.appName, modelId: session.modelId,
@@ -1234,7 +1233,7 @@ export async function route(session, message) {
     }
     session.status = "draft"; await saveSession(session);
     return {
-      reply: `## ðŸ“‹ Draft Saved\n\n**"${session.seoData?.appName}"** saved. Resume anytime from your dashboard.`,
+      reply: `## 📋 Draft Saved\n\n**"${session.seoData?.appName}"** saved. Resume anytime from your dashboard.`,
       uiType: "success",
       uiData: { appName: session.seoData?.appName, status: "Draft" },
       nextStep: 0, coins: null
@@ -1247,13 +1246,13 @@ export async function route(session, message) {
   if ((session.step === 2 || session.step === 3) && msg === "edit app") {
     session.awaitingPromptTweak = true; await saveSession(session);
     return {
-      reply: "I'm listening! âœï¸\n\n- **Tweak the prompt** â€” tell me what to change\n- **Switch the AI model** â€” pick a different engine\n- **Start fresh** â€” describe a completely new app idea\n\nWhat would you like to adjust?",
+      reply: "I'm listening! 📝ï¸\n\n- **Tweak the prompt** — tell me what to change\n- **Switch the AI model** — pick a different engine\n- **Start fresh** — describe a completely new app idea\n\nWhat would you like to adjust?",
       uiType: "text", uiData: null, nextStep: session.step, coins: session.modelCost
     };
   }
 
   // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
-  // ORCHESTRATOR BRAIN â€” get recommended_action
+  // ORCHESTRATOR BRAIN — get recommended_action
   // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
   const decision = await getAgenticDecision(text, session);
   console.log(`[Router] Action: ${decision.recommended_action} (${decision._source}) | confidence: ${decision.confidence}`);
@@ -1273,11 +1272,11 @@ export async function route(session, message) {
     case "HANDLE_GREETING":
       if ((session.history || []).length < 3) {
         return {
-          reply: "Hey there! ðŸ‘‹ I'm your **RentPrompts App Architect** â€” I help you design, configure, and publish AI-powered apps in minutes.\n\n**Just describe your app idea** and I'll handle the rest!\n\nWhat would you like to build today?",
+          reply: "Hey there! 👋 I'm your **RentPrompts App Architect** — I help you design, configure, and publish AI-powered apps in minutes.\n\n**Just describe your app idea** and I'll handle the rest!\n\nWhat would you like to build today?",
           uiType: null, uiData: null, nextStep: session.step, coins: null
         };
       }
-      // Returning user mid-session â€” fall through to requirements
+      // Returning user mid-session — fall through to requirements
       return execGatherRequirements(session, text);
 
     case "HANDLE_OFF_TOPIC":
@@ -1292,7 +1291,7 @@ export async function route(session, message) {
 
     case "HANDLE_GIBBERISH":
       return {
-        reply: "Hmm, I didn't quite catch that! ðŸ¤” What type of output should your AI app generate?",
+        reply: "Hmm, I didn't quite catch that! 🤔 What type of output should your AI app generate?",
         uiType: "chips",
         uiData: { options: ["Text", "Image", "Audio", "Video", "Vision"] },
         nextStep: session.step, coins: null
@@ -1350,7 +1349,7 @@ export async function route(session, message) {
       }
       if (msg.includes("start over") || msg.includes("restart") || msg.includes("reset")) {
         return {
-          reply: "No problem! ðŸ”„ Let's start fresh.\n\n**What kind of AI app would you like to build?**",
+          reply: "No problem! 🔄 Let's start fresh.\n\n**What kind of AI app would you like to build?**",
           uiType: "chips",
           uiData: { options: ["Image app", "Video app", "Text app", "Audio app", "Vision app"] },
           nextStep: 0, coins: null, clearSession: true
