@@ -198,6 +198,11 @@ async def intent_classifier_node(state: PipelineState, config: dict) -> dict:
     if msg_clean.startswith("change:") or msg_clean.startswith("tweak"):
         return {"recommended_action": "EDIT_APP"}
 
+    # Check model selection pivot intent
+    pivot_phrases = ("change model", "switch model", "choose another model", "select another model", "change the model", "switch to another model", "select a different model", "change to a different model")
+    if any(phrase in msg_clean for phrase in pivot_phrases):
+        return {"recommended_action": "PIVOT_MODEL"}
+
     # Check model selection intent
     app_type = state.get("app_type", "text")
     candidates = MODELS.get(app_type, [])
@@ -231,14 +236,15 @@ async def intent_classifier_node(state: PipelineState, config: dict) -> dict:
 Classify the user's message into one of these actions:
 - "HANDLE_OFF_TOPIC": General question about AI, technology, programming, or general chit-chat.
 - "HANDLE_GREETING": Hello, hi, greetings.
-- "MODEL_SELECT": Selecting or switching an AI model (e.g. "let's use gpt-4o", "change to flux").
+- "PIVOT_MODEL": User wants to switch, change, or choose a different model (e.g. "change model", "choose another model", "switch models").
+- "MODEL_SELECT": Selecting or choosing a specific AI model by name (e.g. "let's use gpt-4o", "change to flux").
 - "APPROVE": Approving the prompt preview or asking to publish.
 - "EDIT_APP": User wants to edit or tweak the generated prompt template (e.g., "change the output to be shorter", "make it more creative").
 - "BUILD": Providing information about the app they want to build (describing goals, type, inputs, audience).
 
 Return JSON only:
 {
-  "action": "HANDLE_OFF_TOPIC|HANDLE_GREETING|MODEL_SELECT|APPROVE|EDIT_APP|BUILD",
+  "action": "HANDLE_OFF_TOPIC|HANDLE_GREETING|PIVOT_MODEL|MODEL_SELECT|APPROVE|EDIT_APP|BUILD",
   "model_id": "extracted model id if model select, else null"
 }"""
     try:
@@ -257,7 +263,7 @@ Return JSON only:
         parsed = json.loads(content)
         action = (parsed.get("action") or "BUILD").upper()
         # Ensure enums/actions are clean
-        if action not in ("HANDLE_OFF_TOPIC", "HANDLE_GREETING", "MODEL_SELECT", "APPROVE", "EDIT_APP", "BUILD"):
+        if action not in ("HANDLE_OFF_TOPIC", "HANDLE_GREETING", "PIVOT_MODEL", "MODEL_SELECT", "APPROVE", "EDIT_APP", "BUILD"):
             action = "BUILD"
         m_id = parsed.get("model_id")
         return {
@@ -267,6 +273,17 @@ Return JSON only:
     except Exception as e:
         logger.warning(f"LLM intent classification failed, falling back to BUILD: {e}")
         return {"recommended_action": "BUILD"}
+
+
+async def pivot_state_node(state: PipelineState) -> dict:
+    """Clears active model configuration to allow model re-selection."""
+    return {
+        "model_id": None,
+        "model_name": None,
+        "model_cost": None,
+        "current_step": 1,
+        "recommended_action": "SHOW_MODEL_CARDS"
+    }
 
 
 async def off_topic_responder_node(state: PipelineState, config: dict) -> PipelineState:
@@ -748,6 +765,8 @@ async def preview_and_registration_node(state: PipelineState, config: dict) -> P
 def route_conditional_edge(state: PipelineState) -> str:
     """Routes initial intent classifier decisions."""
     action = state.get("recommended_action")
+    if action in ("PIVOT_MODEL", "SHOW_MODEL_CARDS"):
+        return "pivot_state"
     if action == "HANDLE_OFF_TOPIC":
         return "off_topic_responder"
     if action == "HANDLE_GREETING":
@@ -817,6 +836,7 @@ def build_pipeline_graph(vector_store=None) -> StateGraph:
     graph.add_node("model_selection", model_selection_node)
     graph.add_node("app_preview", app_preview_node)
     graph.add_node("preview_and_registration", preview_and_registration_node)
+    graph.add_node("pivot_state", pivot_state_node)
 
     # Entry point
     graph.set_entry_point("intent_classifier")
@@ -825,6 +845,7 @@ def build_pipeline_graph(vector_store=None) -> StateGraph:
         "intent_classifier",
         route_conditional_edge,
         {
+            "pivot_state": "pivot_state",
             "off_topic_responder": "off_topic_responder",
             "greeting": "greeting",
             "ideation": "ideation",
@@ -852,6 +873,7 @@ def build_pipeline_graph(vector_store=None) -> StateGraph:
         }
     )
 
+    graph.add_edge("pivot_state", "model_selection")
     graph.add_edge("app_preview", END)
     graph.add_edge("preview_and_registration", END)
     graph.add_edge("off_topic_responder", END)

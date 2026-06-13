@@ -51,6 +51,9 @@ class Settings(BaseSettings):
     # --- Murf TTS ---
     murf_api_key: str = Field(default="", description="Murf.ai TTS API key for audio preview")
 
+    # --- Tavily Search ---
+    tavily_api_key: str = Field(default="", description="Tavily API key for web search")
+
     # --- Service ---
     host: str = Field(default="0.0.0.0")
     port: int = Field(default=8000)
