@@ -55,8 +55,6 @@ def build_prompt_template_from_session(session: dict) -> dict:
         "variablesUsed": ["topic", "tone", "audience", "length", "goal"],
         "advancedSettings": {"aspectRatio": None, "quality": "balanced"},
     }
-
-
 async def run_prompt_test(
     llm: LLMService,
     system_prompt: str,
@@ -68,8 +66,17 @@ async def run_prompt_test(
     model = model_hint or "google/gemini-1.5-flash"
     inputs = test_inputs if isinstance(test_inputs, dict) else {}
     resolved = str(user_prompt or "")
+    
+    # Support both $$variable and [variable] resolving case-insensitively
     for key, value in inputs.items():
-        resolved = resolved.replace(f"$${key}", str(value or ""))
+        val_str = str(value or "")
+        resolved = re.sub(re.escape(f"$${key}"), val_str, resolved, flags=re.I)
+        resolved = re.sub(re.escape(f"[{key}]"), val_str, resolved, flags=re.I)
+        
+        # Also try replacing underscores in key to cover both styles
+        key_alt = key.replace(" ", "_")
+        resolved = re.sub(re.escape(f"$${key_alt}"), val_str, resolved, flags=re.I)
+        resolved = re.sub(re.escape(f"[{key_alt}]"), val_str, resolved, flags=re.I)
 
     raw = await llm.openrouter_chat(
         system_prompt=str(system_prompt or "You are a helpful AI assistant."),
@@ -101,18 +108,18 @@ QUALITY RULES:
 1. systemPrompt: Define a tight AI persona. Include: role, domain expertise, tone, output format rules, and constraints. 3-5 sentences. It MUST be written in the second-person ("You are...") rather than first-person ("I am...").
 2. userPrompt — FORMAT DEPENDS ON APP TYPE:
    ▸ For TEXT and AUDIO apps: Must be HIGHLY DETAILED (200-400 words). Structure it as:
-     a) Instructions for the LLM as the expert using the $$variables ("Analyze the user's $$variable...", "Based on the topic $$variable...")
+     a) Instructions for the LLM as the expert using the [Variable_Name] variables ("Analyze the user's [Variable_Name]...", "Based on the topic [Variable_Name]...")
      b) Step-by-step processing logic
      c) Output format specification (headings, bullets, structure)
      d) Constraints (what NOT to do)
      DO NOT use markdown headers (##) inside the prompt — write it as flowing prose with labeled sections.
    ▸ For IMAGE and VIDEO apps: Must be a CONCISE VISUAL DESCRIPTION (50-120 words). Write it as:
      - A single flowing visual prompt describing the desired output
-     - Incorporate $$variables naturally: "A $$style $$subject with $$details"
+     - Incorporate [Variable_Name] variables naturally: "A [style] [subject] with [details]"
      - Include art direction: lighting, camera angle, color palette, mood
      - End with quality keywords: "professional photography, 8K, ultra-detailed"
      - DO NOT use ## headers, numbered steps, or "Processing Logic" — image generators don't read structured prompts
-3. Use $$snake_case_variable syntax ONLY for the REQUIRED INPUT VARIABLES listed below. Do not invent extra variables.
+3. Use [Variable_Name] bracket syntax ONLY for the REQUIRED INPUT VARIABLES listed below. Do not use $$ prefix or invent extra variables.
 4. negativePrompt: For image/video apps, write a detailed negative prompt. For text/audio/vision, set to null.
 5. acceptImageInput: SMART DETECTION — do NOT blindly set true for all image apps.
 6. NO META-PLATFORM DETAILS: NEVER mention the user's budget, coin cost, or model name in the systemPrompt or userPrompt.
@@ -121,26 +128,26 @@ QUALITY RULES:
 9. NEVER include in prompts: model names, coin costs, budget tiers, platform names ("RentPrompts"), or any internal metadata.
 10. USER PERSPECTIVE PRINCIPLE (CRITICAL): Variables must reflect what a NON-EXPERT end-user can actually provide.
 11. CONFLICT DETECTION & ANTI-HALLUCINATION (CRITICAL for legal/medical/expert apps).
-12. EXPERT INSTRUCTIONS (CRITICAL): The userPrompt must instruct the model to act as the expert and process the input variables (e.g. "Analyze the birth sign $$birth_sign and date of birth $$dob to generate daily horoscope..."). Do NOT write the prompt in the first-person perspective (do NOT write "I want...", "My sign is...").
+12. EXPERT INSTRUCTIONS (CRITICAL): For text apps, the userPrompt must instruct the model to act as the expert and process the input variables (e.g. "Analyze the [birth_sign] and [dob] to generate daily horoscope..."). Do NOT write the prompt in the first-person perspective (do NOT write "I want...", "My sign is...").
 
 Return ONLY valid JSON:
-{{
+{
   "reasoning": "Brief explanation of your design choices.",
   "systemPrompt": "Tight 3-5 sentence AI persona with role, domain, tone, format rules.",
   "userPrompt": "Highly detailed prompt with context, processing logic, output format, and constraints.",
   "negativePrompt": "Detailed negative prompt or null",
   "acceptImageInput": true or false,
-  "variablesUsed": ["$$var1", "$$var2"],
-  "variableDescriptions": {{ "$$var1": "What the user enters here" }}
-}}"""
+  "variablesUsed": ["[var1]", "[var2]"],
+  "variableDescriptions": { "[var1]": "What the user enters here" }
+}"""
 
     vars_list = (session.get("dynamicContext") or {}).get("variables") or []
     var_lines = []
     for v in vars_list:
         if isinstance(v, dict):
-            var_lines.append(f"$${v.get('name', '')}: {v.get('placeholder', '')}")
+            var_lines.append(f"[{v.get('name', '')}]: {v.get('placeholder', '')}")
         else:
-            var_lines.append(f"$${v}")
+            var_lines.append(f"[{v}]")
     var_list = "\n".join(var_lines)
 
     extraction = session.get("extraction") or {}
@@ -158,6 +165,7 @@ Return ONLY valid JSON:
     )
 
     try:
+        import re
         return await llm.openrouter_json(system_prompt, user_content)
     except Exception as err:
         logger.error(f"[generate_prompt_template] Error: {err}")
@@ -179,7 +187,7 @@ Return ONLY valid JSON:
             ),
             "userPrompt": (
                 "Based on the following inputs, perform the requested task precisely:\n\n"
-                f"$${main_var}\n\n"
+                f"[{main_var}]\n\n"
                 "Provide a detailed, well-structured response that directly addresses the request. "
                 "Do not add unrelated information."
             ),
@@ -190,11 +198,11 @@ Return ONLY valid JSON:
             ),
             "acceptImageInput": accept_image,
             "variablesUsed": [
-                f"$${v.get('name') if isinstance(v, dict) else v}"
+                f"[{v.get('name') if isinstance(v, dict) else v}]"
                 for v in vars_list[:3]
             ],
             "variableDescriptions": {
-                f"$${v.get('name') if isinstance(v, dict) else v}": (
+                f"[{v.get('name') if isinstance(v, dict) else v}]": (
                     v.get("placeholder") if isinstance(v, dict) else "Enter details"
                 )
                 for v in vars_list[:3]

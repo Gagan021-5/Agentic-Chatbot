@@ -55,11 +55,11 @@ ORCHESTRATOR_TOOL = {
                 "is_major_pivot": {"type": "boolean"},
                 "budget_tier": {
                     "type": ["string", "null"],
-                    "enum": ["free", "low", "medium", "premium", "FREE", "LOW", "MEDIUM", "PREMIUM", None],
+                    "enum": ["free", "low", "medium", "premium", None],
                 },
                 "confidence": {
                     "type": "string",
-                    "enum": ["high", "medium", "low", "HIGH", "MEDIUM", "LOW"],
+                    "enum": ["high", "medium", "low"],
                 },
             },
             "required": ["recommended_action", "is_major_pivot", "confidence"],

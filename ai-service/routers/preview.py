@@ -377,10 +377,16 @@ async def test_prompt(request: Request, body: TestPromptRequest):
     started = _time.time()
 
     try:
-        # Resolve $$variables in user prompt
+        # Resolve variables in user prompt supporting both legacy $$ and new [Variable] syntax
         resolved = body.userPrompt
         for key, value in (body.testInputs or {}).items():
-            resolved = resolved.replace(f"$${key}", str(value or ""))
+            val_str = str(value or "")
+            resolved = re.sub(re.escape(f"$${key}"), val_str, resolved, flags=re.I)
+            resolved = re.sub(re.escape(f"[{key}]"), val_str, resolved, flags=re.I)
+            
+            key_alt = key.replace(" ", "_")
+            resolved = re.sub(re.escape(f"$${key_alt}"), val_str, resolved, flags=re.I)
+            resolved = re.sub(re.escape(f"[{key_alt}]"), val_str, resolved, flags=re.I)
 
         raw = await llm.openrouter_chat(
             system_prompt=body.systemPrompt or "You are a helpful AI assistant.",

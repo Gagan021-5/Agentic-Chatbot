@@ -115,6 +115,10 @@ async def chat(request: Request, body: ChatRequest):
             "requirements_complete": session.get("requirements_complete") or False,
             "preview_approved": session.get("preview_approved") or False,
             "cms_registered": session.get("cms_registered") or False,
+            "form_confirmed": session.get("formConfirmed") or False,
+            "dynamic_context": session.get("dynamicContext"),
+            "awaiting_deep_answer": session.get("awaitingDeepAnswer") or False,
+            "current_deep_field": session.get("currentDeepField"),
             "enhanced_system_prompt": session.get("enhanced_system_prompt") or session.get("promptData", {}).get("systemPrompt"),
             "enhanced_user_prompt": session.get("enhanced_user_prompt") or session.get("promptData", {}).get("userPrompt"),
             "extracted_variables": session.get("extracted_variables") or [],
@@ -143,6 +147,10 @@ async def chat(request: Request, body: ChatRequest):
         session["requirements_complete"] = final_state.get("requirements_complete") or False
         session["preview_approved"] = final_state.get("preview_approved") or False
         session["cms_registered"] = final_state.get("cms_registered") or False
+        session["formConfirmed"] = final_state.get("form_confirmed") or False
+        session["dynamicContext"] = final_state.get("dynamic_context")
+        session["awaitingDeepAnswer"] = final_state.get("awaiting_deep_answer") or False
+        session["currentDeepField"] = final_state.get("current_deep_field")
         session["enhanced_system_prompt"] = final_state.get("enhanced_system_prompt")
         session["enhanced_user_prompt"] = final_state.get("enhanced_user_prompt")
         session["extracted_variables"] = final_state.get("extracted_variables")
