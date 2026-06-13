@@ -105,10 +105,11 @@ If the user provides ANY domain-specific intent (e.g. astrologer app, resume bui
 - VISION: image understanding, OCR, analysis
 Default priority if unclear: TEXT > IMAGE > AUDIO > VIDEO > VISION
 
+ 
 📊 CONFIDENCE SYSTEM:
 Assign confidence_score (0–100):
-- ≥ 80 → proceed to ready (status = "ready") without asking domain questions, question MUST be omitted or null.
-- < 80 → ask ONLY one clarification question about domain ambiguity (status = "needs_context"). Never ask more than one question per turn.
+- ≥ 85 → all key details (style, purpose, target audience, specific features) are clear and specific. Proceed to ready (status = "ready"), question MUST be omitted or null.
+- < 85 → if the user's idea is broad (e.g. "logo creator", "resume builder", "workout planner") or some key details are missing. You MUST ask exactly one friendly clarification question about their preferences (status = "needs_context"). Never ask more than one question per turn. Omit variables in this state.
 
 🔁 ADAPTIVE INTENT RULE:
 If user changes idea mid-conversation:
@@ -548,9 +549,9 @@ async def triage_dynamic_context(
         f'Current app idea: "{safe_purpose}"\n'
         f'Current app type: "{format_fallback}". If the conversation clearly indicates a DIFFERENT output type, correct it by including corrected_app_type.\n'
         f"Language: {safe_lang}.{answered_context}\n\n"
-        "Review the conversation history. If you already know what the app does, what users provide, and what output it produces — return \"ready\" with 3-6 domain-appropriate variables immediately.\n"
-        "If ONE critical detail is missing, ask exactly ONE question with 2-3 inline bolded choices (e.g. **choice one**, **choice two**). Do NOT use numbered list formats like (1), (2), (3).\n"
-        "Bias toward readiness. Do NOT over-interview."
+        "Review the conversation history. If the user's description is broad or general (e.g. 'logo creator', 'resume builder'), you MUST ask exactly one friendly question with 2-3 inline bolded choices to clarify specific preferences (such as style, aesthetic, target audience, tone) and return status = 'needs_context'. Do NOT set status = 'ready' on the very first turn of a broad description.\n"
+        "Otherwise, if you already have clear, specific context on what the app does and what custom inputs it needs, return status = 'ready' with 3-6 domain-appropriate variables immediately.\n"
+        "Do NOT over-interview once details are specific."
     )
 
     triage_messages = [

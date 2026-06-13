@@ -55,11 +55,11 @@ ORCHESTRATOR_TOOL = {
                 "is_major_pivot": {"type": "boolean"},
                 "budget_tier": {
                     "type": ["string", "null"],
-                    "enum": ["free", "low", "medium", "premium", None],
+                    "enum": ["free", "low", "medium", "premium", "FREE", "LOW", "MEDIUM", "PREMIUM", None],
                 },
                 "confidence": {
                     "type": "string",
-                    "enum": ["high", "medium", "low"],
+                    "enum": ["high", "medium", "low", "HIGH", "MEDIUM", "LOW"],
                 },
             },
             "required": ["recommended_action", "is_major_pivot", "confidence"],
@@ -401,8 +401,8 @@ async def get_agentic_decision(llm: LLMService, message: str, session: dict) -> 
                 "extracted_variables": parsed.get("extracted_variables") or {},
                 "app_type": parsed.get("app_type"),
                 "is_major_pivot": bool(parsed.get("is_major_pivot")),
-                "budget_tier": parsed.get("budget_tier"),
-                "confidence": parsed.get("confidence") or "medium",
+                "budget_tier": parsed.get("budget_tier").lower() if parsed.get("budget_tier") else None,
+                "confidence": parsed.get("confidence").lower() if parsed.get("confidence") else "medium",
                 "_source": "llm",
             }
             logger.info(

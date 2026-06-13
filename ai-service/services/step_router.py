@@ -638,11 +638,7 @@ async def _build_step0_response(session: dict, text: str, app_state: Any) -> dic
                     _detect_language_mode(session),
                 )
             session["triageRounds"] = 0
-            session["formConfirmed"] = True
             await _save(session, app_state)
-
-    if session.get("dynamicContext"):
-        session["formConfirmed"] = True
 
     is_form_confirmed = bool(session.get("formConfirmed"))
     if is_form_confirmed:
@@ -1264,27 +1260,32 @@ async def intent_classifier_node(state: ConversationState, config: dict) -> dict
     decision = await get_agentic_decision(app_state.llm, text, temp_session)
     action = decision.get("recommended_action") or "GATHER_REQUIREMENTS"
     
-    # Extra robustness check for general questions/informational inquiries at Step 0
-    if state.get("current_step", 0) == 0:
-        msg_clean = msg.strip().lower()
-        # Clean question prefixes
-        question_prefixes = (
-            "how does", "how do", "how is", "what is", "what are", "whats", "what's",
-            "why does", "why do", "why is", "tell me about", "explain how", "explain what",
-            "can you explain", "how can i", "how do i", "how to"
-        )
-        # Check if the user is asking an informational/general question
-        is_informational_question = msg_clean.startswith(question_prefixes) or (
-            ("?" in msg_clean or msg_clean.startswith(("what", "how", "why", "explain")))
-            and not any(phrase in msg_clean for phrase in (
-                "i want to build", "i want to create", "i want to make", "i want to start",
-                "let's build", "lets build", "let's create", "lets create", "let's make", "lets make",
-                "create a", "create an", "build a", "build an", "make a", "make an"
-            ))
-        )
-        if is_informational_question:
-            action = "HANDLE_OFF_TOPIC"
-            
+    # Extra robustness check for general questions/informational inquiries at any step
+    msg_clean = msg.strip().lower()
+    # Clean question prefixes
+    question_prefixes = (
+        "how does", "how do", "how is", "what is", "what are", "whats", "what's",
+        "why does", "why do", "why is", "tell me about", "explain how", "explain what",
+        "can you explain", "how can i", "how do i", "how to"
+    )
+    # Check if the user is asking an informational/general question
+    is_informational_question = msg_clean.startswith(question_prefixes) or (
+        ("?" in msg_clean or msg_clean.startswith(("what", "how", "why", "explain")))
+        and not any(phrase in msg_clean for phrase in (
+            "i want to build", "i want to create", "i want to make", "i want to start",
+            "let's build", "lets build", "let's create", "lets create", "let's make", "lets make",
+            "create a", "create an", "build a", "build an", "make a", "make an"
+        ))
+    )
+    if is_informational_question or action == "HANDLE_OFF_TOPIC":
+        action = "HANDLE_OFF_TOPIC"
+
+    # Normalize decision fields to lowercase
+    if decision.get("confidence"):
+        decision["confidence"] = decision["confidence"].lower()
+    if decision.get("budget_tier"):
+        decision["budget_tier"] = decision["budget_tier"].lower()
+        
     app_type = state.get("app_type")
     extraction = state.get("extraction") or {}
     if decision.get("app_type") and decision["app_type"] != app_type:
@@ -1640,30 +1641,22 @@ async def initiate_tweak_node(state: ConversationState, config: dict) -> dict:
 
 
 async def handle_greeting_node(state: ConversationState, config: dict) -> dict:
-    app_state = config["configurable"]["app_state"]
-    text = state.get("message", "")
     temp_session = {}
     _state_to_session(state, temp_session)
     
-    if len(temp_session.get("history") or []) < 3:
-        result = {
-            "reply": (
-                "Hey there! 👋 I'm your **RentPrompts App Architect** — I help you design, "
-                "configure, and publish AI-powered apps in minutes.\n\n"
-                "**Just describe your app idea** and I'll handle the rest!\n\n"
-                "What would you like to build today?"
-            ),
-            "uiType": None,
-            "uiData": None,
-            "nextStep": temp_session.get("step", 0),
-            "coins": None,
-        }
-        new_state = _session_to_state(temp_session, text)
-        new_state["response_payload"] = result
-        return new_state
-        
-    result = await _exec_gather_requirements(temp_session, text, app_state)
-    new_state = _session_to_state(temp_session, text)
+    result = {
+        "reply": (
+            "Hey there! 👋 I'm your **RentPrompts App Architect** — I help you design, "
+            "configure, and publish AI-powered apps in minutes.\n\n"
+            "**Just describe your app idea** and I'll handle the rest!\n\n"
+            "What would you like to build today?"
+        ),
+        "uiType": None,
+        "uiData": None,
+        "nextStep": temp_session.get("step", 0),
+        "coins": None,
+    }
+    new_state = _session_to_state(temp_session, state.get("message", ""))
     new_state["response_payload"] = result
     return new_state
 
@@ -1699,6 +1692,16 @@ def route_by_conversational_intent(state: ConversationState) -> str:
     """Dynamic routing logic determining target execution state."""
     action = state.get("recommended_action")
     
+    # If the state variables indicate requirements are incomplete, bypass advance attempts
+    if action in ("SHOW_MODEL_CARDS", "GENERATE_PREVIEW"):
+        is_form_confirmed = bool(state.get("form_confirmed"))
+        extraction = state.get("extraction") or {}
+        deep_answers = state.get("deep_answers") or {}
+        has_budget = bool(extraction.get("budget") or deep_answers.get("budgetPreference"))
+        
+        if not is_form_confirmed or not has_budget:
+            return "ideation_triage_node"
+            
     if action == "HANDLE_OFF_TOPIC":
         return "off_topic_handler_node"
     if action == "HANDLE_VIOLATION":

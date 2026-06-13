@@ -1,10 +1,13 @@
 """
+═══════════════════════════════════════════════════════════════
 Chat Router — LangGraph pipeline + SSE stream endpoint.
+═══════════════════════════════════════════════════════════════
 """
 
 import asyncio
 import json
 import time
+from typing import Optional
 
 import structlog
 from fastapi import APIRouter, Request, HTTPException
@@ -65,45 +68,100 @@ async def chat_stream(session_id: str, request: Request):
 
 @router.post("/", response_model=ChatResponse)
 async def chat(request: Request, body: ChatRequest):
-    """Full LangGraph pipeline execution.
+    """Conversational LangGraph pipeline execution entrypoint.
 
-    This endpoint runs the complete workflow:
-    START → RequirementAnalysis → ModelSelection → Retrieval → PromptEngineering → VariableExtraction → Output → END
-
-    Use this when:
-    - Complex multi-step reasoning is needed
-    - Full RAG + web research should be combined
-    - the caller wants the complete enhanced context in one call
+    Handles message-based turns, intent routing, dynamic state gating,
+    and persistency logic with the Redis session cache.
     """
     start = time.time()
 
     try:
-        vector_store = request.app.state.vector_store
+        session_svc = request.app.state.session
 
-        # Build initial state from request
+        # 1. Retrieve or initialize current session
+        session = await session_svc.get_or_create_session(body.session_id)
+
+        # 2. Append new user message to history
+        if "history" not in session or not isinstance(session["history"], list):
+            session["history"] = []
+        session["history"].append({"role": "user", "content": body.message})
+
+        # 3. Synchronize incoming state payload override overrides if supplied
+        if body.app_type:
+            session["appType"] = body.app_type
+        if body.app_purpose:
+            session["appPurpose"] = body.app_purpose
+        if body.model_id:
+            session["modelId"] = body.model_id
+
+        # 4. Formulate graph state from session & request
+        hist = []
+        for m in session.get("history", []):
+            role = m.get("role", "user")
+            content = m.get("content", "")
+            norm_role = "assistant" if role in ("agent", "assistant") else "user"
+            hist.append({"role": norm_role, "content": content})
+
         initial_state: PipelineState = {
             "session_id": body.session_id,
             "message": body.message,
-            "app_type": body.app_type,
-            "app_purpose": body.app_purpose,
-            "model_id": body.model_id,
-            "extraction": body.extraction or {},
-            "deep_answers": body.deep_answers or {},
-            "history": body.history,
-            "requirements_complete": bool(body.app_purpose and body.app_type),
+            "history": hist,
+            "app_type": session.get("appType"),
+            "app_purpose": session.get("appPurpose"),
+            "model_id": session.get("modelId"),
+            "extraction": session.get("extraction") or {},
+            "deep_answers": session.get("deepAnswers") or {},
+            "current_step": session.get("step") or 1,
+            "requirements_complete": session.get("requirements_complete") or False,
+            "preview_approved": session.get("preview_approved") or False,
+            "cms_registered": session.get("cms_registered") or False,
+            "enhanced_system_prompt": session.get("enhanced_system_prompt") or session.get("promptData", {}).get("systemPrompt"),
+            "enhanced_user_prompt": session.get("enhanced_user_prompt") or session.get("promptData", {}).get("userPrompt"),
+            "extracted_variables": session.get("extracted_variables") or [],
+            "rag_documents": session.get("rag_documents") or [],
+            "rag_context_injected": session.get("rag_context_injected") or "",
+            "model_guidance": session.get("model_guidance") or "",
+            "optimization_notes": session.get("optimization_notes") or [],
+            "similar_apps": session.get("similar_apps") or [],
         }
 
-        # Run LangGraph pipeline
-        graph = build_pipeline_graph(vector_store)
-        final_state = await graph.ainvoke(initial_state)
+        # 5. Invoke conversational state pipeline
+        graph = build_pipeline_graph()
+        final_state = await graph.ainvoke(
+            initial_state,
+            config={"configurable": {"app_state": request.app.state}}
+        )
 
-        # Build response
+        # 6. Synchronize execution outcome back to persistence layer
+        reply = final_state.get("reply", "")
+        session["appType"] = final_state.get("app_type")
+        session["appPurpose"] = final_state.get("app_purpose")
+        session["modelId"] = final_state.get("model_id")
+        session["extraction"] = final_state.get("extraction")
+        session["deepAnswers"] = final_state.get("deep_answers")
+        session["step"] = final_state.get("current_step") or 1
+        session["requirements_complete"] = final_state.get("requirements_complete") or False
+        session["preview_approved"] = final_state.get("preview_approved") or False
+        session["cms_registered"] = final_state.get("cms_registered") or False
+        session["enhanced_system_prompt"] = final_state.get("enhanced_system_prompt")
+        session["enhanced_user_prompt"] = final_state.get("enhanced_user_prompt")
+        session["extracted_variables"] = final_state.get("extracted_variables")
+        session["rag_documents"] = final_state.get("rag_documents")
+        session["rag_context_injected"] = final_state.get("rag_context_injected")
+        session["model_guidance"] = final_state.get("model_guidance")
+        session["optimization_notes"] = final_state.get("optimization_notes")
+        session["similar_apps"] = final_state.get("similar_apps")
+
+        session["history"].append({"role": "agent", "content": reply})
+        await session_svc.save_session(session)
+
+        # 7. Package response models
         documents = [
             RetrievedDocument(
                 content=d["content"],
                 source=d["source"],
                 category=d["category"],
-                relevance_score=d["relevance_score"],
+                relevance_score=d.get("relevance_score", 0.0),
                 metadata=d.get("metadata", {}),
             )
             for d in final_state.get("rag_documents", [])
@@ -137,6 +195,8 @@ async def chat(request: Request, body: ChatRequest):
 
         return ChatResponse(
             session_id=body.session_id,
+            reply=reply,
+            history=session["history"],
             enhanced_context=enhanced_context,
             retrieved_documents=documents,
             optimized_prompt=optimized_prompt,

@@ -3,99 +3,285 @@
 LangGraph Workflow — RentPrompts AI Pipeline StateGraph
 ═══════════════════════════════════════════════════════════════
 
-START → RequirementAnalysis → ModelSelection → Retrieval
-       ├─ InternalRAG
-       ├─ HistoricalAppSearch
-       └─ WebSearch
-       → PromptEngineering → VariableExtraction → Output → END
+Multi-turn conversational agent pipeline for configuring,
+optimizing, and registering Rapps.
 """
 
 from __future__ import annotations
+import re
+import json
 import time
-import structlog
-from typing import TypedDict, Annotated, Any, Literal
+from typing import TypedDict, Annotated, Any, Literal, Optional
+from datetime import datetime, timezone
 
 from langgraph.graph import StateGraph, END
 from langgraph.graph.message import add_messages
+from loguru import logger
 
-logger = structlog.get_logger(__name__)
+from data.models import MODELS
 
 
 # ─── State Definition ──────────────────────────────────────
 
 class PipelineState(TypedDict, total=False):
     """Full state flowing through the LangGraph pipeline."""
-
-    # --- Input ---
     session_id: str
     message: str
-    app_type: str | None
-    app_purpose: str | None
-    model_id: str | None
+    history: Annotated[list, add_messages]
+
+    # Active Application Scope Attributes
+    app_type: Optional[str]
+    app_purpose: Optional[str]
     extraction: dict[str, Any]
     deep_answers: dict[str, Any]
-    history: list[dict[str, Any]]
 
-    # --- Intermediate ---
-    requirements_complete: bool
-    model_guidance: str
+    # Conversation progress tracking
+    current_step: int
+    recommended_action: str
+    reply: str
+
+    # Retrieval and models
+    model_id: Optional[str]
+    model_guidance: Optional[str]
     rag_documents: list[dict[str, Any]]
-    web_research_results: dict[str, Any]
+    similar_apps: list[dict[str, Any]]
     merged_context: str
+    web_research_results: dict[str, Any]
 
-    # --- Output ---
-    enhanced_system_prompt: str | None
-    enhanced_user_prompt: str | None
-    rag_context_injected: str
+    # Prompt and manifest results
+    enhanced_system_prompt: Optional[str]
+    enhanced_user_prompt: Optional[str]
+    rag_context_injected: Optional[str]
     optimization_notes: list[str]
     extracted_variables: list[dict[str, Any]]
-    similar_apps: list[dict[str, Any]]
+
+    # Exit flags / completion status
+    requirements_complete: bool
+    preview_approved: bool
+    cms_registered: bool
     processing_time_ms: float
 
 
 # ─── Node Implementations ──────────────────────────────────
 
-async def requirement_analysis_node(state: PipelineState) -> PipelineState:
-    """Analyze incoming requirements and determine readiness."""
-    logger.info("node_requirement_analysis", session_id=state.get("session_id"))
+async def intent_classifier_node(state: PipelineState, config: dict) -> dict:
+    """Classifies user intent and determines the next execution node."""
+    app_state = config["configurable"]["app_state"]
+    message = state.get("message", "")
+    msg_clean = message.strip().lower()
 
-    app_purpose = state.get("app_purpose", "")
-    extraction = state.get("extraction", {})
+    # 1. Quick regex intercepts for fast path
+    if msg_clean in ("hi", "hello", "hey", "hola"):
+        return {"recommended_action": "HANDLE_GREETING"}
+    if msg_clean in ("approve", "publish", "approve app", "looks good", "confirm"):
+        return {"recommended_action": "APPROVE"}
 
-    # Determine if we have enough to proceed
-    has_purpose = bool(app_purpose and len(app_purpose) > 10)
-    has_type = bool(state.get("app_type"))
-    has_model = bool(state.get("model_id"))
+    # Check model catalog IDs
+    all_model_ids = []
+    for cat_models in MODELS.values():
+        for m in cat_models:
+            all_model_ids.append(m["id"])
 
-    state["requirements_complete"] = has_purpose and has_type
-    state["optimization_notes"] = []
+    for model_id in all_model_ids:
+        if model_id in msg_clean:
+            return {"recommended_action": "MODEL_SELECT", "model_id": model_id}
 
-    if not has_purpose:
-        state["optimization_notes"].append("App purpose is too vague for optimization")
-    if not has_type:
-        state["optimization_notes"].append("App type not yet determined")
+    # 2. Informational questions / off-topic heuristics
+    question_prefixes = (
+        "how does", "how do", "how is", "what is", "what are", "whats", "what's",
+        "why does", "why do", "why is", "tell me about", "explain how", "explain what",
+        "can you explain", "how can i", "how do i", "how to"
+    )
+    is_informational_question = msg_clean.startswith(question_prefixes) or (
+        ("?" in msg_clean or msg_clean.startswith(("what", "how", "why", "explain")))
+        and not any(phrase in msg_clean for phrase in (
+            "i want to build", "i want to create", "i want to make", "i want to start",
+            "let's build", "lets build", "let's create", "lets create", "let's make", "lets make",
+            "create a", "create an", "build a", "build an", "make a", "make an"
+        ))
+    )
+    if is_informational_question:
+        return {"recommended_action": "HANDLE_OFF_TOPIC"}
+
+    # 3. LLM classification call
+    history_slice = []
+    for h in state.get("history", [])[-8:]:
+        role = "assistant" if h.get("role") == "agent" else "user"
+        content = h.get("content", "")
+        if not isinstance(content, str):
+            content = json.dumps(content)
+        history_slice.append({"role": role, "content": content[:400]})
+
+    system_prompt = """You are an intent classifier for a conversational AI App Builder.
+Classify the user's message into one of these actions:
+- "HANDLE_OFF_TOPIC": General question about AI, technology, programming, or general chit-chat.
+- "HANDLE_GREETING": Hello, hi, greetings.
+- "MODEL_SELECT": Selecting or switching an AI model (e.g. "let's use gpt-4o", "change to flux").
+- "APPROVE": Approving the prompt preview or asking to publish.
+- "BUILD": Providing information about the app they want to build (describing goals, type, inputs, audience).
+
+Return JSON only:
+{
+  "action": "HANDLE_OFF_TOPIC|HANDLE_GREETING|MODEL_SELECT|APPROVE|BUILD",
+  "model_id": "extracted model id if model select, else null"
+}"""
+    try:
+        res = await app_state.llm.groq_completion(
+            messages=[
+                {"role": "system", "content": system_prompt},
+                *history_slice,
+                {"role": "user", "content": message}
+            ],
+            model="llama-3.1-8b-instant",
+            response_format={"type": "json_object"}
+        )
+        content = res.get("choices", [{}])[0].get("message", {}).get("content", "{}")
+        parsed = json.loads(content)
+        action = parsed.get("action") or "BUILD"
+        m_id = parsed.get("model_id")
+        return {
+            "recommended_action": action,
+            "model_id": m_id if m_id else state.get("model_id")
+        }
+    except Exception as e:
+        logger.warning(f"LLM intent classification failed, falling back: {e}")
+        return {"recommended_action": "BUILD"}
+
+
+async def off_topic_responder_node(state: PipelineState, config: dict) -> PipelineState:
+    """Answers informational queries using the RAG knowledge base."""
+    app_state = config["configurable"]["app_state"]
+    query = state.get("message", "")
+
+    # 1. RAG retrieval
+    rag_docs = []
+    try:
+        rag_results = await app_state.vector_store.search(
+            query=query,
+            categories=["models", "prompting", "marketplace", "examples", "seo"],
+            top_k=3,
+        )
+        rag_docs = rag_results
+    except Exception as e:
+        logger.warning(f"RAG search failed in off-topic responder: {e}")
+
+    context = "\n\n".join([d["content"] for d in rag_docs])
+
+    # 2. LLM response
+    system_prompt = f"""You are the RentPrompts Help Desk Assistant.
+Answer the user's question friendly and naturally. Use the following retrieved knowledge base context to provide accurate answers about the platform, models, or prompt engineering where relevant:
+{context}
+
+Keep your answer relatively concise (1-3 paragraphs) and helpful.
+Do not prompt the user about their app setup in this message unless relevant."""
+
+    history_slice = []
+    for h in state.get("history", [])[-8:]:
+        role = "assistant" if h.get("role") == "agent" else "user"
+        content = h.get("content", "")
+        if not isinstance(content, str):
+            content = json.dumps(content)
+        history_slice.append({"role": role, "content": content[:400]})
+
+    try:
+        res = await app_state.llm.groq_completion(
+            messages=[
+                {"role": "system", "content": system_prompt},
+                *history_slice,
+                {"role": "user", "content": query}
+            ],
+            model="llama-3.1-8b-instant"
+        )
+        reply = res.get("choices", [{}])[0].get("message", {}).get("content", "I am here to help you learn about AI models and our platform.")
+    except Exception as e:
+        reply = "I'm sorry, I'm having trouble answering your question right now. How can I help you build your app?"
+
+    state["reply"] = reply
+    state["rag_documents"] = rag_docs
+    return state
+
+
+async def greeting_node(state: PipelineState) -> PipelineState:
+    """Welcomes the user and asks for app specifications."""
+    state["reply"] = (
+        "Hello! 👋 I'm your App Creator Assistant. I will guide you through designing your application.\n\n"
+        "To get started, **what type of AI app would you like to build today?**"
+    )
+    return state
+
+
+async def ideation_node(state: PipelineState, config: dict) -> PipelineState:
+    """Step 1: Scopes the app purpose and type using extraction heuristics."""
+    app_state = config["configurable"]["app_state"]
+    message = state.get("message", "")
+    history = state.get("history", [])
+
+    app_type = state.get("app_type")
+    app_purpose = state.get("app_purpose")
+    extraction = state.get("extraction") or {}
+
+    from services.extraction import extract_requirements
+    ext = await extract_requirements(app_state.llm, message, history)
+
+    if ext.get("appType") and ext["appType"] != "null":
+        app_type = ext["appType"]
+    if ext.get("appPurpose") and len(ext["appPurpose"]) > 5:
+        app_purpose = ext["appPurpose"]
+
+    extraction.update({k: v for k, v in ext.items() if v is not None and v != "null"})
+
+    state["app_type"] = app_type
+    state["app_purpose"] = app_purpose
+    state["extraction"] = extraction
+
+    has_purpose = bool(app_purpose and len(app_purpose) > 8)
+    has_type = bool(app_type and app_type in ("text", "image", "audio", "video", "vision"))
+
+    if has_purpose and has_type:
+        state["requirements_complete"] = True
+        state["current_step"] = 2
+    else:
+        state["requirements_complete"] = False
+        state["current_step"] = 1
+        if not has_type:
+            state["reply"] = (
+                f"I've got your goal: \"{app_purpose}\" if that's right. "
+                "But I need to know what **type of output** your AI app should generate.\n\n"
+                "Please choose one of: Text, Image, Audio, Video, or Vision."
+            )
+        else:
+            state["reply"] = ext.get("suggestedReply") or "Could you describe what your AI app should do or generate in more detail?"
 
     return state
 
 
 async def model_selection_node(state: PipelineState) -> PipelineState:
-    """Prepare model-specific guidance for prompt engineering."""
-    logger.info("node_model_selection", model_id=state.get("model_id"))
-
-    model_id = state.get("model_id")
+    """Step 2: Renders available models and requests selection."""
     app_type = state.get("app_type", "text")
+    model_id = state.get("model_id")
 
-    # Build model guidance context
-    model_hints = _get_model_hints(model_id, app_type)
-    state["model_guidance"] = model_hints
+    candidates = MODELS.get(app_type, [])
+
+    if not model_id:
+        card_texts = []
+        for m in candidates:
+            card_texts.append(f"- **{m['name']}** (Cost: {m['cost']} coins) - *{m['desc']}*")
+
+        options = "\n".join(card_texts)
+        state["reply"] = (
+            f"Requirements verified! For **{app_type}** apps, here are our recommended models:\n\n"
+            f"{options}\n\n"
+            "Please select a model by typing its name or choosing one to proceed."
+        )
+    else:
+        state["current_step"] = 3
 
     return state
 
 
-async def retrieval_node(state: PipelineState, vector_store) -> PipelineState:
-    """Parallel retrieval from internal RAG, historical apps, and web search."""
-    logger.info("node_retrieval", session_id=state.get("session_id"))
-
+async def rag_and_optimization_node(state: PipelineState, config: dict) -> PipelineState:
+    """Step 3 & 4: Retrieval and Prompt Optimization with variable mapping."""
+    app_state = config["configurable"]["app_state"]
     app_purpose = state.get("app_purpose", "")
     app_type = state.get("app_type", "text")
     model_id = state.get("model_id")
@@ -103,109 +289,77 @@ async def retrieval_node(state: PipelineState, vector_store) -> PipelineState:
     query = f"{app_type} app: {app_purpose}"
     all_docs = []
 
-    # 1. Internal RAG — model docs + prompting guides
-    categories_to_search = ["models", "prompting", "marketplace"]
-    if model_id:
-        categories_to_search.insert(0, "models")
-
+    # 1. Retrieval
     try:
-        rag_results = await vector_store.search(
+        categories = ["models", "prompting", "marketplace", "examples", "seo"]
+        rag_results = await app_state.vector_store.search(
             query=query,
-            categories=categories_to_search,
+            categories=categories,
             top_k=5,
         )
         all_docs.extend(rag_results)
     except Exception as e:
-        logger.warning("rag_search_error", error=str(e))
-
-    # 2. Historical app search — similar published apps
-    try:
-        example_results = await vector_store.search(
-            query=query,
-            categories=["examples"],
-            top_k=3,
-        )
-        state["similar_apps"] = [
-            {"content": r["content"], "source": r["source"], "score": r["relevance_score"]}
-            for r in example_results
-        ]
-        all_docs.extend(example_results)
-    except Exception as e:
-        logger.warning("examples_search_error", error=str(e))
-
-    # 3. SEO patterns
-    try:
-        seo_results = await vector_store.search(
-            query=f"marketplace listing for {app_type} {app_purpose}",
-            categories=["seo"],
-            top_k=2,
-        )
-        all_docs.extend(seo_results)
-    except Exception as e:
-        logger.warning("seo_search_error", error=str(e))
+        logger.warning(f"RAG search error in optimization: {e}")
 
     state["rag_documents"] = all_docs
-    return state
 
-
-async def prompt_engineering_node(state: PipelineState) -> PipelineState:
-    """Enhance prompt with retrieved context and model-specific guidance."""
-    logger.info("node_prompt_engineering", session_id=state.get("session_id"))
-
-    rag_docs = state.get("rag_documents", [])
-    model_guidance = state.get("model_guidance", "")
-    app_purpose = state.get("app_purpose", "")
-    app_type = state.get("app_type", "text")
-    existing_system = state.get("enhanced_system_prompt") or ""
-    existing_user = state.get("enhanced_user_prompt") or ""
-
-    # Build RAG context injection
     context_parts = []
-
-    if model_guidance:
-        context_parts.append(f"MODEL GUIDANCE:\n{model_guidance}")
-
-    # Group retrieved docs by category
-    by_category: dict[str, list[str]] = {}
-    for doc in rag_docs:
-        cat = doc.get("category", "general")
-        if cat not in by_category:
-            by_category[cat] = []
-        by_category[cat].append(doc["content"])
-
-    for cat, contents in by_category.items():
-        label = cat.upper().replace("_", " ")
-        combined = "\n---\n".join(contents[:3])  # Max 3 per category
-        context_parts.append(f"{label} CONTEXT:\n{combined}")
-
-    rag_context = "\n\n".join(context_parts) if context_parts else ""
+    for doc in all_docs:
+        context_parts.append(f"[{doc['category'].upper()}] Source: {doc['source']}\n{doc['content']}")
+    rag_context = "\n---\n".join(context_parts)
     state["rag_context_injected"] = rag_context
 
-    # Build optimization notes
-    notes = state.get("optimization_notes", [])
-    if rag_docs:
-        notes.append(f"Retrieved {len(rag_docs)} relevant documents from knowledge base")
-    if model_guidance:
-        notes.append(f"Applied model-specific guidance for {state.get('model_id', 'unknown')}")
+    # 2. Guidance hints
+    model_guidance = _get_model_hints(model_id, app_type)
+    state["model_guidance"] = model_guidance
 
-    state["optimization_notes"] = notes
-    return state
+    # 3. Optimize Prompt Templates
+    system_prompt = f"""You are the RentPrompts Prompt Engineer.
+Your task is to craft an optimized, high-fidelity system prompt and user prompt blueprint for a custom AI app.
+The app type is {app_type} and its purpose is: {app_purpose}.
+The target AI engine is {model_id}.
 
+Here is the retrieved knowledge context:
+{rag_context}
 
-async def variable_extraction_node(state: PipelineState) -> PipelineState:
-    """Extract and normalize variables from prompt templates."""
-    logger.info("node_variable_extraction", session_id=state.get("session_id"))
+Here is the model-specific guidance:
+{model_guidance}
 
-    import re
+You MUST define user inputs/variables in the prompt template using square brackets: [variable_name]
+Example: "Write a [tone] birthday message for [recipient_name]."
 
-    # Extract $$variables from existing prompts
-    system_prompt = state.get("enhanced_system_prompt") or ""
-    user_prompt = state.get("enhanced_user_prompt") or ""
-    combined = f"{system_prompt}\n{user_prompt}"
+Return strict JSON only:
+{{
+  "system_prompt": "enhanced system prompt here",
+  "user_prompt": "enhanced user prompt here",
+  "optimization_notes": ["note 1", "note 2"]
+}}"""
 
-    # Find all $$variable patterns
-    var_pattern = re.compile(r"\$\$([a-zA-Z_][a-zA-Z0-9_]*)")
-    found_vars = list(set(var_pattern.findall(combined)))
+    try:
+        res = await app_state.llm.groq_completion(
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": "Generate the optimized prompts."}
+            ],
+            model="llama-3.1-8b-instant",
+            response_format={"type": "json_object"}
+        )
+        content = res.get("choices", [{}])[0].get("message", {}).get("content", "{}")
+        parsed = json.loads(content)
+
+        state["enhanced_system_prompt"] = parsed.get("system_prompt")
+        state["enhanced_user_prompt"] = parsed.get("user_prompt")
+        state["optimization_notes"] = parsed.get("optimization_notes") or []
+    except Exception as e:
+        logger.error(f"Failed to generate optimized prompts: {e}")
+        state["enhanced_system_prompt"] = f"You are a helpful {app_purpose} AI assistant."
+        state["enhanced_user_prompt"] = f"Generate {app_purpose} output based on [user_input]."
+        state["optimization_notes"] = ["Fallback prompt generated due to error."]
+
+    # 4. Variable Extraction via [variable_name]
+    combined_prompts = f"{state['enhanced_system_prompt']}\n{state['enhanced_user_prompt']}"
+    var_pattern = re.compile(r"\[([a-zA-Z_][a-zA-Z0-9_]*)\]")
+    found_vars = list(set(var_pattern.findall(combined_prompts)))
 
     variables = []
     for var_name in found_vars:
@@ -213,63 +367,156 @@ async def variable_extraction_node(state: PipelineState) -> PipelineState:
             "identifier": var_name,
             "display_name": _humanize_variable(var_name),
             "type": _infer_variable_type(var_name),
-            "placeholder": _generate_placeholder(var_name, state.get("app_type", "text")),
+            "placeholder": _generate_placeholder(var_name, app_type),
             "required": True,
         })
-
     state["extracted_variables"] = variables
+    state["current_step"] = 5
+
     return state
 
 
-async def output_node(state: PipelineState) -> PipelineState:
-    """Finalize output and compute metrics."""
-    logger.info("node_output", session_id=state.get("session_id"))
-    # Output is already assembled in state
+async def preview_and_registration_node(state: PipelineState, config: dict) -> PipelineState:
+    """Step 5 & 6: Previews mock outputs and registers final Rapp via Payload CMS."""
+    app_state = config["configurable"]["app_state"]
+    action = state.get("recommended_action")
+    app_type = state.get("app_type", "text")
+    app_purpose = state.get("app_purpose", "")
+
+    if action == "APPROVE" or state.get("preview_approved"):
+        payload = {
+            "appType": app_type,
+            "modelId": state.get("model_id"),
+            "costPerRun": 2.0,
+            "systemPrompt": state.get("enhanced_system_prompt"),
+            "userPrompt": state.get("enhanced_user_prompt"),
+            "appName": f"{app_purpose.title()[:30]} Creator",
+            "appDescription": f"AI app for {app_purpose}",
+            "tags": [app_type, "automated"],
+            "publishedAt": datetime.now(timezone.utc).isoformat(),
+        }
+        try:
+            res = await app_state.cms.create_rapp(payload)
+            state["cms_registered"] = True
+            state["reply"] = (
+                f"## 🎉 RAPP Registered Successfully!\n\n"
+                f"Your application **\"{payload['appName']}\"** has been registered in the CMS catalog.\n\n"
+                f"- **Model:** {state.get('model_id')}\n"
+                f"- **Rapp ID:** {res.get('id', 'N/A')}\n"
+                f"- **Status:** Live & Ready! 🚀"
+            )
+        except Exception as e:
+            logger.error(f"CMS registration failed: {e}")
+            state["reply"] = "Rapp registration failed due to CMS connection error. Please try again."
+    else:
+        mock_assets = {
+            "text": "Generated text output preview goes here...",
+            "image": "https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=500",
+            "audio": "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3",
+            "video": "https://www.w3schools.com/html/mov_bbb.mp4",
+            "vision": "Analyzed vision labels: [Object, Pattern, Texture]",
+        }
+        mock_url = mock_assets.get(app_type, mock_assets["text"])
+
+        state["reply"] = (
+            f"### 📋 Prompt Preview & Mock Assets\n\n"
+            f"**Enhanced System Prompt:**\n```\n{state.get('enhanced_system_prompt')}\n```\n\n"
+            f"**Enhanced User Prompt:**\n```\n{state.get('enhanced_user_prompt')}\n```\n\n"
+            f"**Mock Output Preview:**\n"
+            f"{mock_url}\n\n"
+            f"If you like this configuration, type **Approve** or **Publish** to deploy it!"
+        )
+
     return state
 
 
 # ─── Routing Logic ──────────────────────────────────────────
 
-def should_retrieve(state: PipelineState) -> Literal["retrieve", "skip_retrieval"]:
-    """Decide if retrieval is needed based on requirements."""
+def route_conditional_edge(state: PipelineState) -> str:
+    """Routes initial intent classifier decisions."""
+    action = state.get("recommended_action")
+    if action == "HANDLE_OFF_TOPIC":
+        return "off_topic_responder"
+    if action == "HANDLE_GREETING":
+        return "greeting"
+
+    step = state.get("current_step", 1)
+    if step == 1:
+        return "ideation"
+    if step == 2:
+        return "model_selection"
+    if step >= 3 and not state.get("extracted_variables"):
+        return "rag_and_optimization"
+    return "preview_and_registration"
+
+
+def should_continue_from_ideation(state: PipelineState) -> Literal["model_selection", "end"]:
+    """Gates continuation based on requirement completeness."""
     if state.get("requirements_complete"):
-        return "retrieve"
-    return "skip_retrieval"
+        return "model_selection"
+    return "end"
+
+
+def should_continue_from_model(state: PipelineState) -> Literal["rag_and_optimization", "end"]:
+    """Gates model choice requirements."""
+    if state.get("model_id"):
+        return "rag_and_optimization"
+    return "end"
 
 
 # ─── Graph Builder ──────────────────────────────────────────
 
-def build_pipeline_graph(vector_store) -> StateGraph:
-    """Build the LangGraph StateGraph for the RentPrompts AI pipeline."""
-
+def build_pipeline_graph(vector_store=None) -> StateGraph:
+    """Build the conversational StateGraph workflow."""
     graph = StateGraph(PipelineState)
 
-    # Add nodes
-    graph.add_node("requirement_analysis", requirement_analysis_node)
+    # Register Nodes
+    graph.add_node("intent_classifier", intent_classifier_node)
+    graph.add_node("off_topic_responder", off_topic_responder_node)
+    graph.add_node("greeting", greeting_node)
+    graph.add_node("ideation", ideation_node)
     graph.add_node("model_selection", model_selection_node)
-    graph.add_node("retrieval", lambda s: retrieval_node(s, vector_store))
-    graph.add_node("prompt_engineering", prompt_engineering_node)
-    graph.add_node("variable_extraction", variable_extraction_node)
-    graph.add_node("output", output_node)
+    graph.add_node("rag_and_optimization", rag_and_optimization_node)
+    graph.add_node("preview_and_registration", preview_and_registration_node)
 
-    # Define edges
-    graph.set_entry_point("requirement_analysis")
+    # Entry point
+    graph.set_entry_point("intent_classifier")
 
-    graph.add_edge("requirement_analysis", "model_selection")
+    graph.add_conditional_edges(
+        "intent_classifier",
+        route_conditional_edge,
+        {
+            "off_topic_responder": "off_topic_responder",
+            "greeting": "greeting",
+            "ideation": "ideation",
+            "model_selection": "model_selection",
+            "rag_and_optimization": "rag_and_optimization",
+            "preview_and_registration": "preview_and_registration",
+        }
+    )
+
+    graph.add_conditional_edges(
+        "ideation",
+        should_continue_from_ideation,
+        {
+            "model_selection": "model_selection",
+            "end": END,
+        }
+    )
 
     graph.add_conditional_edges(
         "model_selection",
-        should_retrieve,
+        should_continue_from_model,
         {
-            "retrieve": "retrieval",
-            "skip_retrieval": "prompt_engineering",
-        },
+            "rag_and_optimization": "rag_and_optimization",
+            "end": END,
+        }
     )
 
-    graph.add_edge("retrieval", "prompt_engineering")
-    graph.add_edge("prompt_engineering", "variable_extraction")
-    graph.add_edge("variable_extraction", "output")
-    graph.add_edge("output", END)
+    graph.add_edge("rag_and_optimization", "preview_and_registration")
+    graph.add_edge("preview_and_registration", END)
+    graph.add_edge("off_topic_responder", END)
+    graph.add_edge("greeting", END)
 
     return graph.compile()
 
@@ -281,58 +528,25 @@ def _get_model_hints(model_id: str | None, app_type: str) -> str:
     if not model_id:
         return ""
 
-    # Model-specific prompt hints based on the actual RentPrompts model catalog
     hints = {
-        # Image models
-        "flux-schnell": "Flux Schnell is ultra-fast. Keep prompts concise (40-80 words). Focus on subject + style + lighting. Avoid verbose instructions.",
-        "flux-2-pro": "Flux 2 Pro supports editing. Use descriptive visual language. Include camera angle, lighting direction, and material textures.",
-        "imagen-4": "Imagen 4 excels at photorealism. Use natural language descriptions. Specify real-world references. Include 'photorealistic, natural lighting'.",
-        "sdxl": "SDXL responds well to weighted prompts. Use specific art styles. Include resolution keywords: '4K, ultra-detailed, sharp focus'.",
-        "recraft-v4-pro": "Recraft v4 Pro is design-focused with strong text rendering. Great for logos and branded content.",
-        "vgpt-image-2": "vGPT Image 2 supports inpainting/editing. Structure prompts with clear subject, action, and environment.",
-        "kling-image-v3": "Kling Image v3 excels at creative, detailed compositions. Use vivid descriptive language.",
-        "nano-banana-2": "Nano Banana 2 by Google. Fast generation. Works well with structured scene descriptions.",
-        "seedream-5-lite": "Seedream 5 Lite supports multi-image generation with reasoning. Include design intent.",
-
-        # Text models
-        "gpt-5.2": "GPT-5.2 is the coding/agentic flagship. Use structured instructions with clear output format requirements.",
-        "gpt-5.1": "GPT-5.1 has deep reasoning. Best for complex analysis, long-context tasks. Be explicit about reasoning steps.",
-        "gpt-4o": "GPT-4o is versatile multimodal. Works across text, vision, and chat. Keep prompts clear and task-focused.",
-        "gpt-4o-mini": "GPT-4o Mini is compact. Keep prompts focused and concise. Good for simple Q&A and content generation.",
-        "gpt-4.1-nano": "GPT-4.1 Nano is ultra-fast. Short prompts work best. Ideal for simple text generation tasks.",
-        "llama3.3-70b": "LLaMA 3.3 70B is open-source. Responds well to structured system prompts. Explicit output formatting needed.",
-        "kimi-k2-thinking": "Kimi K2 Thinking specializes in deep reasoning. Use chain-of-thought prompts. Ask for step-by-step analysis.",
-        "grok-4": "Grok 4 is xAI's advanced model. Large context window. Good for complex multi-step tasks.",
-        "minimax-m2.7": "MiniMax M2.7 is fast and multimodal. Keep prompts efficient. Good for real-time chat applications.",
-
-        # Audio models
-        "orpheus-tts": "Orpheus TTS is emotionally expressive. Include tone markers in the script: [excited], [solemn], [warm].",
-        "kokoro-82m": "Kokoro 82M is efficient multilingual TTS. Specify language and speaking pace in the prompt.",
-        "lyria-3-pro": "Lyria 3 Pro is for music generation. Describe genre, tempo, mood, instruments, and duration.",
-        "tts-1.5-max": "TTS 1.5 Max produces human-like speech. Use natural conversational scripts without markdown formatting.",
-        "stable-audio": "Stable Audio generates from text prompts. Describe the audio scene: environment, instruments, mood, duration.",
-
-        # Video models
-        "veo3": "Veo 3 is Google's most advanced video AI. Describe scenes cinematically. Include camera movements and transitions.",
-        "veo-3-fast": "Veo 3 Fast is optimized for speed. Keep scene descriptions focused. One clear visual per prompt.",
-        "seedance-2.0": "Seedance 2.0 supports image-to-video. Describe the motion and transformation clearly.",
-        "gen-4.5": "Gen 4.5 by Runway. Cinematic quality. Use film terminology: 'dolly shot', 'rack focus', 'fade to black'.",
-        "wan-2.2-fast": "Wan 2.2 Fast is the cheapest video option. Simple scene descriptions work best.",
-
-        # Vision models
-        "gpt-4.1-vision": "GPT-4.1 Vision excels at image analysis. Prompt should specify what to extract or analyze in the image.",
+        "flux-schnell": "Flux Schnell is ultra-fast. Keep prompts concise (40-80 words). Focus on style.",
+        "flux-2-pro": "Flux 2 Pro supports editing. Use descriptive visual language.",
+        "imagen-4": "Imagen 4 excels at photorealism. Use natural language descriptions.",
+        "sdxl": "SDXL responds well to weighted prompts. Use specific art styles.",
+        "recraft-v4-pro": "Recraft v4 Pro is design-focused with strong text rendering.",
+        "gpt-5.2": "GPT-5.2 is coding/agentic flagship. Use structured instructions.",
+        "gpt-5.1": "GPT-5.1 has deep reasoning. Ask for step-by-step analysis.",
+        "gpt-4o": "GPT-4o is versatile multimodal. Keep prompts task-focused.",
+        "llama3.3-70b": "LLaMA 3.3 70B responds well to structured system prompts.",
     }
-
-    return hints.get(model_id, f"Use best practices for {app_type} generation with {model_id}.")
+    return hints.get(model_id, f"Use best practices for {app_type} generation.")
 
 
 def _humanize_variable(name: str) -> str:
-    """Convert snake_case to human-readable title case."""
     return name.replace("_", " ").title()
 
 
 def _infer_variable_type(name: str) -> str:
-    """Infer variable type from its name."""
     name_lower = name.lower()
     if any(k in name_lower for k in ["image", "photo", "picture", "url"]):
         return "image_url"
@@ -344,7 +558,6 @@ def _infer_variable_type(name: str) -> str:
 
 
 def _generate_placeholder(name: str, app_type: str) -> str:
-    """Generate a helpful placeholder for a variable."""
     name_lower = name.lower()
     placeholders = {
         "topic": "e.g., The future of AI in healthcare",
@@ -352,16 +565,8 @@ def _generate_placeholder(name: str, app_type: str) -> str:
         "tone": "e.g., professional, casual, humorous",
         "language": "e.g., English, Hindi, Spanish",
         "audience": "e.g., college students, business executives",
-        "format": "e.g., bullet points, essay, script",
-        "subject": "e.g., A majestic lion on a cliff",
-        "color_scheme": "e.g., warm earth tones, vibrant neon",
-        "background": "e.g., sunset over mountains, studio lighting",
-        "company_name": "e.g., Acme Inc.",
-        "industry": "e.g., Technology, Healthcare, Education",
     }
-
     for key, placeholder in placeholders.items():
         if key in name_lower:
             return placeholder
-
     return f"Enter {_humanize_variable(name).lower()}"

@@ -47,6 +47,8 @@ class ChatRequest(BaseModel):
 class ChatResponse(BaseModel):
     """LangGraph workflow response."""
     session_id: str
+    reply: Optional[str] = None
+    history: list[dict[str, Any]] = Field(default_factory=list)
     enhanced_context: dict[str, Any] = Field(default_factory=dict)
     retrieved_documents: list[RetrievedDocument] = Field(default_factory=list)
     optimized_prompt: dict[str, Any] | None = None
