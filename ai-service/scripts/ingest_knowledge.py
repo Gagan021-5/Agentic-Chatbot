@@ -82,12 +82,18 @@ async def ingest_all():
             ]
 
             # Ingest
-            await vs.add_documents(
-                category=category,
-                documents=documents,
-                metadatas=metadatas,
-                ids=ids,
-            )
+            try:
+                await vs.add_documents(
+                    category=category,
+                    documents=documents,
+                    metadatas=metadatas,
+                    ids=ids,
+                )
+            except Exception as e:
+                import traceback
+                print(f"\n❌ Error ingesting {filename} in {category}: {e}")
+                traceback.print_exc()
+                raise e
 
             total_docs += len(documents)
             print(f"     ✅ {filename}: {len(documents)} chunks ingested")

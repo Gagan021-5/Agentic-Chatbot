@@ -1,20 +1,3 @@
-"""
-═══════════════════════════════════════════════════════════════
-Agent Chat Router — POST /api/agent/chat + GET /api/agent/history
-═══════════════════════════════════════════════════════════════
-FastAPI routes: POST /api/agent/chat + GET /api/agent/history
-React calls these routes directly through FastAPI.
-
-Response contract (must match exactly for React):
-{
-  "reply": "markdown string",
-  "uiType": "text | chips | models | multi_select_form | app_preview | seo_preview | success | null",
-  "uiData": { ... } | null,
-  "step": 0-3,
-  "coins": number | null,
-  "confirm": object | null
-}
-"""
 
 import time
 import json
@@ -26,7 +9,6 @@ from typing import Any
 router = APIRouter()
 
 
-# ─── Request / Response Schemas ─────────────────────────────
 
 class AgentChatRequest(BaseModel):
     sessionId: str
@@ -46,7 +28,6 @@ class HistoryResponse(BaseModel):
     history: list[dict[str, Any]] = Field(default_factory=list)
 
 
-# ─── Helpers ────────────────────────────────────────────────
 
 def format_user_display(message: str) -> str | None:
     """Format special payloads for display in chat history."""
@@ -61,7 +42,6 @@ def format_user_display(message: str) -> str | None:
     return None
 
 
-# ─── POST /api/agent/chat ──────────────────────────────────
 
 @router.post("/chat", response_model=AgentChatResponse)
 async def agent_chat(request: Request, body: AgentChatRequest):

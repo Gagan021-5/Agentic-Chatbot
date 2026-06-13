@@ -124,12 +124,11 @@ After domain is confirmed, extract 3–6 variables:
 - NEVER include model names, internal parameters, legal codes, or system settings
 - 🚨 CRITICAL SCHEMA STRUCTURING CONSTRAINT: Every extracted variable name MUST be translated into explicit human language. You are strictly prohibited from generating variables named 'input', 'text', 'data', 'variables', 'param', or 'main_input'. If the application parses legal domains, map to fields like 'incident_details' or 'dispute_context'. If editing visual elements, map strictly to fields like 'target_aesthetic' or 'canvas_dimensions'.
 
-⚠️ QUESTION RULE:
-Only ask:
-- ONE question per turn
-- ONLY when confidence < 80
-- ONLY to resolve domain uncertainty (not features)
-Never show assistant menus, templates, or category choices.
+🤖 CHATBOT BEHAVIOR & QUESTION RULE:
+- Behave like a natural, friendly chatbot (like Claude, Grok, ChatGPT). Use conversational, helpful phrasing in your questions.
+- If the output format/app type is ambiguous, or you are confused/uncertain, set status to "needs_context", confidence_score < 80, ask a friendly question to clarify the type of output they want, and return suggested_options = ["Text", "Image", "Audio", "Video", "Vision"].
+- For other domain clarifications, you can provide 2-5 simple options in suggested_options to be shown as clickable choice chips.
+- Otherwise, if confidence >= 80, set status = "ready", question = null, and suggested_options = null.
 
 Every response must be valid JSON only and include:
 - status ("needs_context" or "ready")
@@ -137,16 +136,28 @@ Every response must be valid JSON only and include:
 - confidence_score (0-100)
 - corrected_app_type (optional, only if initial classification was wrong: "text" | "image" | "audio" | "video" | "vision")
 - variables (3-6 variables, each with name, placeholder, and realistic test_value)
-- question (a single question only when confidence is below 80, otherwise null or omit)
+- question (a single conversational question when confidence is below 80, otherwise null or omit)
+- suggested_options (optional, list of 2-5 simple option strings to resolve ambiguity, e.g. ["Text", "Image", "Audio", "Video", "Vision"] if format is unclear)
 
 Do not include any explanation or markdown outside the valid JSON object."""
 
 
 def _is_rate_limit_error(error: Exception) -> bool:
+    from tenacity import RetryError
+    if isinstance(error, RetryError):
+        attempt = getattr(error, "last_attempt", None)
+        if attempt:
+            try:
+                underlying = attempt.exception()
+                if underlying:
+                    error = underlying
+            except Exception:
+                pass
     if isinstance(error, httpx.HTTPStatusError) and error.response.status_code == 429:
         return True
     msg = str(error)
-    return "429" in msg
+    return "429" in msg or "rate_limit" in msg.lower() or "too many requests" in msg.lower()
+
 
 
 def _normalize_language_hint(language_hint: str | None) -> str:

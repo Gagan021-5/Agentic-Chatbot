@@ -416,7 +416,29 @@ async def get_agentic_decision(llm: LLMService, message: str, session: dict) -> 
         return build_fallback_decision(text, session)
 
     except Exception as err:
-        logger.error(f"[Orchestrator] LLM call failed: {err}")
+        from tenacity import RetryError
+        real_err = err
+        if isinstance(err, RetryError):
+            attempt = getattr(err, "last_attempt", None)
+            if attempt:
+                try:
+                    underlying = attempt.exception()
+                    if underlying:
+                        real_err = underlying
+                except Exception:
+                    pass
+        
+        # Log response content if it's an httpx status error
+        import httpx
+        if isinstance(real_err, httpx.HTTPStatusError):
+            try:
+                resp_text = real_err.response.text
+                logger.error(f"[Orchestrator] LLM call failed with status {real_err.response.status_code}: {resp_text}")
+            except Exception:
+                logger.error(f"[Orchestrator] LLM call failed: {real_err}")
+        else:
+            logger.error(f"[Orchestrator] LLM call failed: {real_err}")
+            
         return build_fallback_decision(text, session)
 
 

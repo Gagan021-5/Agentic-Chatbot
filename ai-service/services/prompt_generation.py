@@ -101,7 +101,7 @@ QUALITY RULES:
 1. systemPrompt: Define a tight AI persona. Include: role, domain expertise, tone, output format rules, and constraints. 3-5 sentences. It MUST be written in the second-person ("You are...") rather than first-person ("I am...").
 2. userPrompt — FORMAT DEPENDS ON APP TYPE:
    ▸ For TEXT and AUDIO apps: Must be HIGHLY DETAILED (200-400 words). Structure it as:
-     a) A first-person scenario using the $$variables ("I want...", "My topic is...")
+     a) Instructions for the LLM as the expert using the $$variables ("Analyze the user's $$variable...", "Based on the topic $$variable...")
      b) Step-by-step processing logic
      c) Output format specification (headings, bullets, structure)
      d) Constraints (what NOT to do)
@@ -121,7 +121,7 @@ QUALITY RULES:
 9. NEVER include in prompts: model names, coin costs, budget tiers, platform names ("RentPrompts"), or any internal metadata.
 10. USER PERSPECTIVE PRINCIPLE (CRITICAL): Variables must reflect what a NON-EXPERT end-user can actually provide.
 11. CONFLICT DETECTION & ANTI-HALLUCINATION (CRITICAL for legal/medical/expert apps).
-12. FIRST-PERSON PERSPECTIVE (CRITICAL): userPrompt must ALWAYS be first-person ("I want...", "My sign is...").
+12. EXPERT INSTRUCTIONS (CRITICAL): The userPrompt must instruct the model to act as the expert and process the input variables (e.g. "Analyze the birth sign $$birth_sign and date of birth $$dob to generate daily horoscope..."). Do NOT write the prompt in the first-person perspective (do NOT write "I want...", "My sign is...").
 
 Return ONLY valid JSON:
 {{

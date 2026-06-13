@@ -116,23 +116,40 @@ class LLMService:
         temperature: float = 0.7,
         response_format: dict | None = None,
     ) -> str:
-        """Call OpenRouter with a full messages array."""
-        if not self._openrouter_client:
-            raise RuntimeError("OPENROUTER_API_KEY not configured")
+        """Call OpenRouter with a full messages array, falling back to Groq if needed."""
+        try:
+            if not self._openrouter_client:
+                raise RuntimeError("OPENROUTER_API_KEY not configured")
 
-        body: dict = {
-            "model": model,
-            "messages": messages,
-            "temperature": temperature,
-            "max_tokens": max_tokens,
-        }
-        if response_format:
-            body["response_format"] = response_format
+            body: dict = {
+                "model": model,
+                "messages": messages,
+                "temperature": temperature,
+                "max_tokens": max_tokens,
+            }
+            if response_format:
+                body["response_format"] = response_format
 
-        resp = await self._openrouter_client.post("/chat/completions", json=body)
-        resp.raise_for_status()
-        data = resp.json()
-        return data["choices"][0]["message"]["content"]
+            resp = await self._openrouter_client.post("/chat/completions", json=body)
+            resp.raise_for_status()
+            data = resp.json()
+            return data["choices"][0]["message"]["content"]
+        except Exception as e:
+            logger.warning(f"OpenRouter completion failed ({e}). Falling back to Groq...")
+            if self._groq_client:
+                groq_model = "llama-3.3-70b-versatile"
+                if "flash" in model or "8b" in model:
+                    groq_model = "llama-3.1-8b-instant"
+                
+                result = await self.groq_completion(
+                    messages=messages,
+                    model=groq_model,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                    response_format=response_format,
+                )
+                return result["choices"][0]["message"]["content"]
+            raise
 
     async def groq_tool_call(
         self,
@@ -184,25 +201,42 @@ class LLMService:
         max_tokens: int = 3000,
         temperature: float = 0.7,
     ) -> str:
-        """Call OpenRouter and return raw text response."""
-        if not self._openrouter_client:
-            raise RuntimeError("OPENROUTER_API_KEY not configured")
+        """Call OpenRouter and return raw text response, falling back to Groq if needed."""
+        try:
+            if not self._openrouter_client:
+                raise RuntimeError("OPENROUTER_API_KEY not configured")
 
-        resp = await self._openrouter_client.post(
-            "/chat/completions",
-            json={
-                "model": model,
-                "messages": [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_content},
-                ],
-                "temperature": temperature,
-                "max_tokens": max_tokens,
-            },
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        return data["choices"][0]["message"]["content"]
+            resp = await self._openrouter_client.post(
+                "/chat/completions",
+                json={
+                    "model": model,
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_content},
+                    ],
+                    "temperature": temperature,
+                    "max_tokens": max_tokens,
+                },
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            return data["choices"][0]["message"]["content"]
+        except Exception as e:
+            logger.warning(f"OpenRouter chat failed ({e}). Falling back to Groq...")
+            if self._groq_client:
+                groq_model = "llama-3.3-70b-versatile"
+                if "flash" in model or "8b" in model:
+                    groq_model = "llama-3.1-8b-instant"
+                
+                result = await self.groq_chat(
+                    system_prompt=system_prompt,
+                    user_content=user_content,
+                    model=groq_model,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                )
+                return result["choices"][0]["message"]["content"]
+            raise
 
     async def openrouter_json(
         self,

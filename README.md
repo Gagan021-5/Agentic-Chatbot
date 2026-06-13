@@ -33,7 +33,6 @@ rentprompts-agent/
 ├── ai-service/
 │   ├── main.py
 │   ├── requirements.txt
-│   ├── Dockerfile
 │   ├── config/
 │   ├── data/
 │   ├── graphs/
@@ -54,7 +53,6 @@ rentprompts-agent/
 │   ├── src/
 │   ├── package.json
 │   └── vite.config.js
-├── docker-compose.yml
 └── README.md
 ```
 
@@ -163,14 +161,6 @@ Local URLs:
 - Frontend: `http://localhost:5173`
 - Backend: `http://localhost:8000`
 - API docs: `http://localhost:8000/docs`
-
-## Docker
-
-```bash
-docker compose up --build
-```
-
-The compose file builds only the Python backend and persists ChromaDB data in the `chromadb-data` volume.
 
 ## Notes
 

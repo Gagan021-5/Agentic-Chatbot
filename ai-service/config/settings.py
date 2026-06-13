@@ -59,7 +59,7 @@ class Settings(BaseSettings):
     app_version: str = Field(default="1.0.0")
 
     # --- Embedding ---
-    embedding_model: str = Field(default="models/text-embedding-004")
+    embedding_model: str = Field(default="models/gemini-embedding-001")
     embedding_dimensions: int = Field(default=768)
 
     # --- RAG ---

@@ -7,16 +7,13 @@ Matches the GEMINI_API_KEY already in the project .env.
 """
 
 import structlog
-import google.generativeai as genai
+from langchain_google_genai import GoogleGenerativeAIEmbeddings
 from tenacity import retry, stop_after_attempt, wait_exponential
 
 from config import get_settings
 
 logger = structlog.get_logger(__name__)
 settings = get_settings()
-
-# Configure Gemini with AI Studio key
-genai.configure(api_key=settings.gemini_api_key)
 
 
 class EmbeddingService:
@@ -25,28 +22,26 @@ class EmbeddingService:
     def __init__(self):
         self.model_name = settings.embedding_model
         self.dimensions = settings.embedding_dimensions
+        self._document_embeddings = GoogleGenerativeAIEmbeddings(
+            model=self.model_name,
+            google_api_key=settings.gemini_api_key,
+            task_type="retrieval_document",
+        )
+        self._query_embeddings = GoogleGenerativeAIEmbeddings(
+            model=self.model_name,
+            google_api_key=settings.gemini_api_key,
+            task_type="retrieval_query",
+        )
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=5))
     def embed_text(self, text: str) -> list[float]:
         """Embed a single text string."""
-        result = genai.embed_content(
-            model=self.model_name,
-            content=text,
-            task_type="retrieval_document",
-            output_dimensionality=self.dimensions,
-        )
-        return result["embedding"]
+        return self._document_embeddings.embed_query(text)
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=5))
     def embed_query(self, query: str) -> list[float]:
         """Embed a query string (uses retrieval_query task type for better recall)."""
-        result = genai.embed_content(
-            model=self.model_name,
-            content=query,
-            task_type="retrieval_query",
-            output_dimensionality=self.dimensions,
-        )
-        return result["embedding"]
+        return self._query_embeddings.embed_query(query)
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=5))
     def embed_batch(self, texts: list[str], task_type: str = "retrieval_document") -> list[list[float]]:
@@ -54,18 +49,12 @@ class EmbeddingService:
         if not texts:
             return []
 
-        # Gemini supports batch embedding
         results = []
-        # Process in chunks of 100
+        embeddings = self._query_embeddings if task_type == "retrieval_query" else self._document_embeddings
+
         for i in range(0, len(texts), 100):
             chunk = texts[i:i + 100]
-            batch_result = genai.embed_content(
-                model=self.model_name,
-                content=chunk,
-                task_type=task_type,
-                output_dimensionality=self.dimensions,
-            )
-            results.extend(batch_result["embedding"])
+            results.extend(embeddings.embed_documents(chunk))
 
         return results
 
