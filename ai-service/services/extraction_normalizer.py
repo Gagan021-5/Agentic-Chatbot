@@ -1,0 +1,171 @@
+"""Extraction normalization helpers — RentPrompts gemini.js."""
+
+import re
+
+
+def detect_language(message: str) -> str:
+    text = str(message or "")
+    lower = text.lower()
+    if re.search(r"[\u0900-\u097F]", text):
+        return "Hindi"
+    hinglish_signals = [
+        "mujhe", "banana", "banani", "hai", "likhta", "likh", "ke liye",
+        "karna", "mera", "meri", "krdo", "chahiye", "jaldi",
+    ]
+    if any(word in lower for word in hinglish_signals):
+        return "Hinglish"
+    return "English"
+
+
+def detect_budget(message: str) -> tuple[str | None, str]:
+    lower = message.lower()
+    if "free" in lower:
+        return "free", "HIGH"
+    if "cheap" in lower or "low budget" in lower or "budget" in lower:
+        return "low", "MEDIUM"
+    if "premium" in lower or "quality" in lower:
+        return "high", "MEDIUM"
+    if "ultra" in lower or "best possible" in lower:
+        return "ultra", "HIGH"
+    return None, "LOW"
+
+
+def infer_app_type(message: str) -> tuple[str | None, str]:
+    lower = message.lower()
+    if re.search(r"(video|animate|reel|cinematic|movie)", lower):
+        return "video", "HIGH"
+    if re.search(
+        r"(blog|write|writer|copy|text|article|caption|planner|workout|meal|diet|"
+        r"itinerary|guide|report|advocate|legal|lawyer|law|document|draft|summary)",
+        lower,
+    ):
+        return "text", "HIGH"
+    if re.search(r"(image|photo|picture|poster|thumbnail|logo|design)", lower):
+        return "image", "HIGH"
+    if re.search(r"(voice|audio|music|podcast|song|speech)", lower):
+        return "audio", "HIGH"
+    if re.search(r"(vision|analy(s|z)e|ocr|scan|detect|inspect)", lower):
+        return "vision", "HIGH"
+    return None, "LOW"
+
+
+def infer_tone(message: str) -> str:
+    lower = message.lower()
+    if re.search(r"(asap|urgent|quick|jaldi|immediately|fast)", lower):
+        return "urgent"
+    if re.search(r"(please|kindly)", lower):
+        return "formal"
+    if re.search(r"(maybe|something|not sure|idk)", lower):
+        return "unsure"
+    return "casual"
+
+
+def build_one_line_understanding(extraction: dict) -> str:
+    if extraction.get("appType") == "video" and extraction.get("wantsImageInput"):
+        return "you want a video app that turns photos into cinematic clips"
+    if extraction.get("appType") == "text" and re.search(r"blog", extraction.get("appPurpose") or "", re.I):
+        return "you want a text app that writes blogs"
+    if extraction.get("appType"):
+        return f"you want a {extraction['appType']} app for {extraction.get('appPurpose') or 'your use case'}"
+    return extraction.get("appPurpose") or "you want help shaping an app idea"
+
+
+def normalize_extraction(raw: dict | None, fallback_message: str = "") -> dict:
+    message = fallback_message or ""
+    inferred_type, inferred_conf = infer_app_type(message)
+    budget_val, budget_conf = detect_budget(message)
+
+    normalized_budget = budget_val
+    if not normalized_budget and raw:
+        rb = raw.get("budget")
+        conf = (raw.get("confidence") or {}).get("budget")
+        if rb in ("free", "low", "medium", "high", "ultra") and conf == "HIGH":
+            normalized_budget = rb
+
+    normalized_budget_conf = budget_conf if budget_val else (
+        (raw or {}).get("confidence", {}).get("budget")
+        if normalized_budget and (raw or {}).get("confidence", {}).get("budget") in ("HIGH", "MEDIUM", "LOW")
+        else "LOW"
+    )
+
+    valid_types = ("text", "image", "audio", "video", "vision")
+    app_type = None
+    if raw and raw.get("appType") in valid_types:
+        app_type = raw["appType"]
+    else:
+        app_type = inferred_type
+
+    app_purpose = None
+    if raw and isinstance(raw.get("appPurpose"), str) and raw["appPurpose"].strip():
+        app_purpose = raw["appPurpose"].strip()
+
+    target_users = None
+    if raw and isinstance(raw.get("targetUsers"), str):
+        tu = raw["targetUsers"].strip()
+        if tu and tu != "general users":
+            target_users = tu
+
+    key_features = []
+    if raw and isinstance(raw.get("keyFeatures"), list):
+        key_features = [f for f in raw["keyFeatures"] if f][:6]
+
+    wants_image = bool(raw and raw.get("wantsImageInput")) or bool(
+        re.search(r"(photo|image|picture)", message, re.I)
+    )
+
+    detected_lang = detect_language(message)
+    if raw and isinstance(raw.get("detectedLanguage"), str) and raw["detectedLanguage"].strip():
+        detected_lang = raw["detectedLanguage"].strip()
+
+    user_tone = infer_tone(message)
+    if raw and raw.get("userTone") in ("urgent", "casual", "formal", "unsure"):
+        user_tone = raw["userTone"]
+
+    user_type = "unknown"
+    if raw and raw.get("userType") in ("enterprise", "business", "developer", "normal", "unknown"):
+        user_type = raw["userType"]
+
+    app_type_conf = inferred_conf
+    if raw and (raw.get("confidence") or {}).get("appType") in ("HIGH", "MEDIUM", "LOW"):
+        app_type_conf = raw["confidence"]["appType"]
+
+    missing = []
+    if raw and isinstance(raw.get("missingFields"), list):
+        missing = [m for m in raw["missingFields"] if m]
+
+    one_line = ""
+    if raw and isinstance(raw.get("oneLineUnderstanding"), str) and raw["oneLineUnderstanding"].strip():
+        one_line = raw["oneLineUnderstanding"].strip()
+
+    suggested = None
+    if raw and isinstance(raw.get("suggestedReply"), str) and raw["suggestedReply"].strip():
+        suggested = raw["suggestedReply"].strip()
+
+    extraction = {
+        "appType": app_type,
+        "appPurpose": app_purpose,
+        "targetUsers": target_users,
+        "keyFeatures": key_features,
+        "budget": normalized_budget,
+        "wantsImageInput": wants_image,
+        "detectedLanguage": detected_lang,
+        "userTone": user_tone,
+        "userType": user_type,
+        "enterpriseSignals": bool(raw and raw.get("enterpriseSignals")),
+        "confidence": {"appType": app_type_conf, "budget": normalized_budget_conf},
+        "missingFields": missing,
+        "oneLineUnderstanding": one_line,
+        "suggestedReply": suggested,
+    }
+
+    if not extraction["oneLineUnderstanding"] and extraction["appType"]:
+        extraction["oneLineUnderstanding"] = f"you want a {extraction['appType']} app"
+    elif not extraction["oneLineUnderstanding"]:
+        extraction["oneLineUnderstanding"] = build_one_line_understanding(extraction)
+
+    if not extraction["appType"]:
+        extraction["missingFields"] = list(set(extraction["missingFields"] + ["appType"]))
+    if not extraction["targetUsers"]:
+        extraction["missingFields"] = list(set(extraction["missingFields"] + ["targetUsers"]))
+
+    return extraction

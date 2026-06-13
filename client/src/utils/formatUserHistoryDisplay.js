@@ -1,4 +1,4 @@
-/** Same behavior as server/lib/formatUserHistoryDisplay.js — readable text after refresh. */
+/** Same behavior as the backend history formatter — readable text after refresh. */
 
 export function formatUserPayloadForHistory(message) {
   const t = String(message || "").trim();

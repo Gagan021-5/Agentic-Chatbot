@@ -1,8 +1,8 @@
-/** In dev, use same-origin `/api` so Vite proxies to the server (see vite.config.js). */
+/** In dev, use same-origin `/api` so Vite proxies to FastAPI (see vite.config.js). */
 const API_ORIGIN =
   typeof import.meta !== "undefined" && import.meta.env?.DEV
     ? ""
-    : (import.meta.env?.VITE_API_ORIGIN ?? "http://localhost:3001");
+    : (import.meta.env?.VITE_API_ORIGIN ?? "http://localhost:8000");
 
 function apiUrl(path) {
   const p = path.startsWith("/") ? path : `/${path}`;

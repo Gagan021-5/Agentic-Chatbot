@@ -17,6 +17,10 @@ pids
 node_modules/
 jspm_packages/
 web_modules/
+.venv/
+venv/
+__pycache__/
+*.py[cod]
 
 # ── Build outputs ──────────────────────────────────
 dist/
@@ -54,6 +58,9 @@ lib-cov/
 .serverless/
 .temp/
 .grunt/
+ai-service/data/chromadb/
+scratch_*
+client/client.log
 
 # ── TypeScript ─────────────────────────────────────
 *.tsbuildinfo
