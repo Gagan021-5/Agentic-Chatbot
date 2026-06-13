@@ -9,7 +9,9 @@ import asyncio
 import json
 import re
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, TypedDict, Annotated, Dict, Optional
+from langgraph.graph import StateGraph, END
+from langgraph.graph.message import add_messages
 
 from loguru import logger
 
@@ -1126,266 +1128,758 @@ async def _handle_seo_publish(session: dict, card_data: dict, app_state: Any) ->
     }
 
 
-async def route(session: dict, message: str, app_state: Any) -> dict:
-    """Main orchestration entry for the chat state router."""
-    raw_text = str(message or "")[:1000]
-    text = _normalize(raw_text)
+# ─── STATE DEFINITION ────────────────────────────────────────
+
+class ConversationState(TypedDict, total=False):
+    """Unified conversational state schema for LangGraph."""
+    session_id: str
+    message: str
+    history: Annotated[list, add_messages]
+    app_type: Optional[str]        # text | image | audio | video | vision
+    app_purpose: Optional[str]
+    extraction: Dict[str, Any]
+    deep_answers: Dict[str, Any]
+    dynamic_context: Optional[Dict[str, Any]]
+    model_id: Optional[str]
+    model_name: Optional[str]
+    model_cost: Optional[float]
+    prompt_data: Dict[str, Any]
+    seo_data: Dict[str, Any]
+    current_step: int              # 0: Ideation, 1: Models, 2: Preview, 3: SEO Review
+    recommended_action: str        # e.g., "GATHER_REQUIREMENTS", "HANDLE_OFF_TOPIC", "EDIT_APP"
+    response_payload: Dict[str, Any] # React client contract
+    
+    # Internal parameters
+    awaiting_confirmation: bool
+    awaiting_prompt_tweak: bool
+    awaiting_deep_answer: bool
+    current_deep_field: Optional[str]
+    triage_rounds: int
+    form_confirmed: bool
+    clear_session: bool
+    language_mode: str
+    enterprise_signals: Optional[bool]
+    user_type: Optional[str]
+    is_pivot: bool
+    decision_payload: Dict[str, Any]
+
+
+# Helper state translators
+def _session_to_state(session: dict, message: str) -> ConversationState:
+    hist = []
+    for m in session.get("history", []):
+        role = m.get("role", "user")
+        content = m.get("content", "")
+        norm_role = "assistant" if role in ("agent", "assistant") else "user"
+        hist.append({"role": norm_role, "content": content})
+    
+    return {
+        "session_id": session.get("sessionId") or session.get("session_id") or "",
+        "message": message,
+        "history": hist,
+        "app_type": session.get("appType"),
+        "app_purpose": (session.get("extraction") or {}).get("appPurpose"),
+        "extraction": session.get("extraction") or {},
+        "dynamic_context": session.get("dynamicContext"),
+        "deep_answers": session.get("deepAnswers") or {},
+        "current_step": session.get("step") or 0,
+        "recommended_action": "",
+        "response_payload": {},
+        "awaiting_confirmation": session.get("awaitingConfirmation") or False,
+        "awaiting_prompt_tweak": session.get("awaitingPromptTweak") or False,
+        "awaiting_deep_answer": session.get("awaitingDeepAnswer") or False,
+        "current_deep_field": session.get("currentDeepField"),
+        "triage_rounds": session.get("triageRounds") or 0,
+        "form_confirmed": session.get("formConfirmed") or False,
+        "model_id": session.get("modelId") or session.get("selectedModelId"),
+        "model_cost": session.get("modelCost"),
+        "model_name": session.get("modelName"),
+        "prompt_data": session.get("promptData") or {},
+        "seo_data": session.get("seoData") or {},
+        "clear_session": False,
+        "language_mode": session.get("languageMode") or "English",
+        "enterprise_signals": session.get("enterpriseSignals"),
+        "user_type": session.get("userType"),
+        "is_pivot": session.get("isPivot") or False,
+        "decision_payload": {},
+    }
+
+
+def _state_to_session(state: ConversationState, session: dict) -> None:
+    session["step"] = state.get("current_step", 0)
+    session["appType"] = state.get("app_type")
+    session["extraction"] = state.get("extraction") or {}
+    session["dynamicContext"] = state.get("dynamic_context")
+    session["deepAnswers"] = state.get("deep_answers") or {}
+    session["awaitingConfirmation"] = state.get("awaiting_confirmation") or False
+    session["awaitingPromptTweak"] = state.get("awaiting_prompt_tweak") or False
+    session["awaitingDeepAnswer"] = state.get("awaiting_deep_answer") or False
+    session["currentDeepField"] = state.get("current_deep_field")
+    session["triageRounds"] = state.get("triage_rounds", 0)
+    session["formConfirmed"] = state.get("form_confirmed") or False
+    session["modelId"] = state.get("model_id")
+    session["modelCost"] = state.get("model_cost")
+    session["modelName"] = state.get("model_name")
+    session["promptData"] = state.get("prompt_data") or {}
+    session["seoData"] = state.get("seo_data") or {}
+    session["languageMode"] = state.get("language_mode", "English")
+    session["enterpriseSignals"] = state.get("enterprise_signals")
+    session["userType"] = state.get("user_type")
+    session["isPivot"] = state.get("is_pivot") or False
+    
+    session_history = []
+    for m in state.get("history", []):
+        if isinstance(m, dict):
+            role = m.get("role")
+            content = m.get("content")
+        else:
+            role = m.type
+            content = m.content
+        norm_role = "agent" if role in ("assistant", "agent", "ai") else "user"
+        session_history.append({"role": norm_role, "content": content})
+    session["history"] = session_history
+
+
+# ─── ISOLATED ASYNC NODES ────────────────────────────────────
+
+async def intent_classifier_node(state: ConversationState, config: dict) -> dict:
+    """Classifies user intent and assigns next recommended action."""
+    app_state = config["configurable"]["app_state"]
+    message = state.get("message", "")
+    text = _normalize(message)
     msg = _lower(text)
-
+    
+    # Check UI/Action interceptors
     if text.lower().startswith("multi_select_form::"):
-        payload = _parse_multi_select_payload(message)
-        if payload:
-            if not session.get("dynamicContext"):
-                session["dynamicContext"] = {}
-            session["dynamicContext"]["options"] = payload.get("selectedOptions") or []
-            session["dynamicContext"]["variables"] = [
-                {
-                    "name": v.get("name"),
-                    "placeholder": v.get("placeholder") or "Enter details...",
-                    "test_value": v.get("value") or "",
-                }
-                for v in (payload.get("variables") or [])
-                if isinstance(v, dict)
-            ]
-            session["formConfirmed"] = True
-            if not session.get("extraction"):
-                session["extraction"] = {}
-            session["extraction"]["keyFeatures"] = payload.get("selectedOptions") or []
+        return {"recommended_action": "PROCESS_FORM"}
+    if text.startswith("SEO_PUBLISH::"):
+        return {"recommended_action": "PUBLISH_APP"}
+    if text.startswith("SEO_DRAFT::"):
+        return {"recommended_action": "SAVE_DRAFT"}
+    if state.get("current_step") in (2, 3) and msg == "edit app":
+        return {"recommended_action": "INITIATE_TWEAK"}
+        
+    temp_session = {}
+    _state_to_session(state, temp_session)
+    decision = await get_agentic_decision(app_state.llm, text, temp_session)
+    action = decision.get("recommended_action") or "GATHER_REQUIREMENTS"
+    
+    # Extra robustness check for general questions/informational inquiries at Step 0
+    if state.get("current_step", 0) == 0:
+        msg_clean = msg.strip().lower()
+        # Clean question prefixes
+        question_prefixes = (
+            "how does", "how do", "how is", "what is", "what are", "whats", "what's",
+            "why does", "why do", "why is", "tell me about", "explain how", "explain what",
+            "can you explain", "how can i", "how do i", "how to"
+        )
+        # Check if the user is asking an informational/general question
+        is_informational_question = msg_clean.startswith(question_prefixes) or (
+            ("?" in msg_clean or msg_clean.startswith(("what", "how", "why", "explain")))
+            and not any(phrase in msg_clean for phrase in (
+                "i want to build", "i want to create", "i want to make", "i want to start",
+                "let's build", "lets build", "let's create", "lets create", "let's make", "lets make",
+                "create a", "create an", "build a", "build an", "make a", "make an"
+            ))
+        )
+        if is_informational_question:
+            action = "HANDLE_OFF_TOPIC"
+            
+    app_type = state.get("app_type")
+    extraction = state.get("extraction") or {}
+    if decision.get("app_type") and decision["app_type"] != app_type:
+        app_type = decision["app_type"]
+        extraction = {**extraction, "appType": app_type}
+        
+    return {
+        "recommended_action": action,
+        "app_type": app_type,
+        "extraction": extraction,
+        "decision_payload": decision,
+    }
 
-            budget = (session.get("deepAnswers") or {}).get("budgetPreference") or (
-                (session.get("extraction") or {}).get("budget")
-            )
-            if budget:
-                return await _show_models(session, app_state)
 
-            session["currentDeepField"] = "budgetPreference"
-            session["awaitingDeepAnswer"] = True
-            await _save(session, app_state)
-            return {
-                "reply": "One last thing — **what's your budget per generation?**",
-                "uiType": "chips",
-                "uiData": {"options": BUDGET_CHIP_OPTIONS},
-                "nextStep": 0,
-                "coins": None,
-            }
-
-    is_seo_publish = text.startswith("SEO_PUBLISH::")
-    is_seo_save_draft = text.startswith("SEO_DRAFT::")
-    if is_seo_publish or is_seo_save_draft:
-        try:
-            json_str = text[text.index("::") + 2 :]
-            card_data = json.loads(json_str)
-            session["seoData"] = {**(session.get("seoData") or {}), **card_data}
-            await _save(session, app_state)
-        except (json.JSONDecodeError, TypeError, ValueError) as err:
-            logger.warning(f"[route] Failed to parse SEO payload: {err}")
-
-        if is_seo_publish:
-            try:
-                json_str = text[text.index("::") + 2 :]
-                card_data = json.loads(json_str)
-            except (json.JSONDecodeError, TypeError, ValueError):
-                card_data = {}
-            return await _handle_seo_publish(session, card_data, app_state)
-
-        session["status"] = "draft"
-        await _save(session, app_state)
-        app_name = (session.get("seoData") or {}).get("appName") or "Your App"
-        return {
-            "reply": f'## 📋 Draft Saved\n\n**"{app_name}"** saved. Resume anytime from your dashboard.',
-            "uiType": "success",
-            "uiData": {"appName": app_name, "status": "Draft"},
-            "nextStep": 0,
-            "coins": None,
-        }
-
-    if session.get("step") in (2, 3) and msg == "edit app":
-        session["awaitingPromptTweak"] = True
-        await _save(session, app_state)
-        return {
-            "reply": (
-                "I'm listening! 📝\n\n"
-                "- **Tweak the prompt** — tell me what to change\n"
-                "- **Switch the AI model** — pick a different engine\n"
-                "- **Start fresh** — describe a completely new app idea\n\n"
-                "What would you like to adjust?"
-            ),
-            "uiType": "text",
-            "uiData": None,
-            "nextStep": session.get("step"),
-            "coins": session.get("modelCost"),
-        }
-
-    decision = await get_agentic_decision(app_state.llm, text, session)
-    logger.info(
-        f"[Router] Action: {decision.get('recommended_action')} ({decision.get('_source')}) "
-        f"| confidence: {decision.get('confidence')}"
+async def off_topic_handler_node(state: ConversationState, config: dict) -> dict:
+    """Answers general questions or casual chat naturally without modifying session state."""
+    app_state = config["configurable"]["app_state"]
+    message = state.get("message", "")
+    
+    system_prompt = (
+        "You are RentPrompts App Architect, a conversational AI app builder. "
+        "The user is asking a general question, seeking informational guidance, or having casual talk. "
+        "Answer their question naturally, concisely, and friendly. "
+        "Keep the focus on how RentPrompts can help them build, test, and publish custom AI apps (Rapps) "
+        "for text, image, audio, video, or vision outputs. "
+        "Do NOT ask configuration details (like budget, options, variables, prompts) yet unless they explicitly say they want to build an app."
     )
+    
+    messages = [{"role": "system", "content": system_prompt}]
+    for m in state.get("history", []):
+        role = m.get("role") if isinstance(m, dict) else m.type
+        content = m.get("content") if isinstance(m, dict) else m.content
+        messages.append({"role": role, "content": content})
+    messages.append({"role": "user", "content": message})
+    messages = messages[:1] + messages[-9:]
+    
+    try:
+        completion = await app_state.llm.groq_completion(messages, model="llama-3.3-70b-versatile")
+        reply = completion["choices"][0]["message"]["content"]
+    except Exception as e:
+        logger.warning(f"Off-topic completion failed: {e}. Falling back to default.")
+        reply = (
+            "I'm here to help you design, configure, and publish custom AI apps (Rapps) "
+            "on the RentPrompts platform. What kind of app would you like to build?"
+        )
+        
+    result = {
+        "reply": reply,
+        "uiType": None,
+        "uiData": None,
+        "nextStep": state.get("current_step", 0),
+        "coins": None,
+    }
+    
+    return {
+        "response_payload": result,
+    }
 
-    if decision.get("app_type") and decision["app_type"] != session.get("appType"):
-        session["appType"] = decision["app_type"]
-        if not session.get("extraction"):
-            session["extraction"] = {}
-        session["extraction"]["appType"] = decision["app_type"]
 
-    action = decision.get("recommended_action")
-
-    if action == "HANDLE_GREETING":
-        if len(session.get("history") or []) < 3:
-            return {
-                "reply": (
-                    "Hey there! 👋 I'm your **RentPrompts App Architect** — I help you design, "
-                    "configure, and publish AI-powered apps in minutes.\n\n"
-                    "**Just describe your app idea** and I'll handle the rest!\n\n"
-                    "What would you like to build today?"
-                ),
-                "uiType": None,
-                "uiData": None,
-                "nextStep": session.get("step", 0),
-                "coins": None,
-            }
-        return await _exec_gather_requirements(session, text, app_state)
-
-    if action == "HANDLE_OFF_TOPIC":
-        if decision.get("confidence") != "low":
-            return OFF_TOPIC_RESPONSE
-        return await _exec_gather_requirements(session, text, app_state)
-
-    if action == "HANDLE_VIOLATION":
-        return {
-            "reply": (
-                "I can only help build apps that comply with RentPrompts' safety and content "
-                "guidelines. Please suggest a different idea."
-            ),
-            "uiType": "text",
-            "uiData": None,
-            "nextStep": session.get("step", 0),
-            "coins": None,
-        }
-
-    if action == "HANDLE_GIBBERISH":
-        return {
-            "reply": "Hmm, I didn't quite catch that! 🤔 What type of output should your AI app generate?",
-            "uiType": "chips",
-            "uiData": {"options": ["Text", "Image", "Audio", "Video", "Vision"]},
-            "nextStep": session.get("step", 0),
-            "coins": None,
-        }
-
-    if action == "HANDLE_BUDGET":
-        return await _exec_handle_budget(session, text, decision, app_state)
-
-    if action == "CHANGE_MODEL":
-        return await _exec_change_model(session, text, decision, app_state)
-
-    if action == "PIVOT_APP":
-        return await _exec_pivot_app(session, text, decision, app_state)
-
-    if action == "EDIT_APP":
-        if re.match(r"^change\s*:", msg, re.IGNORECASE):
-            correction = re.sub(r"^change\s*:", "", text, flags=re.IGNORECASE).strip()
-            if len(correction) > 1:
-                extracted = decision.get("extracted_variables") or {}
-                extracted["editInstruction"] = correction
-                decision["extracted_variables"] = extracted
-        return await _exec_edit_app(session, text, decision, app_state)
-
-    if action == "RENDER_FORM":
-        if not session.get("history"):
-            session["history"] = []
-        extraction = session.get("extraction") or {}
-        if not extraction.get("appPurpose"):
-            ext = await extract_requirements(app_state.llm, text, session["history"])
-            session["extraction"] = _merge_extraction(session.get("extraction"), ext, text)
-        await _save(session, app_state)
-        return await _exec_render_form(session, app_state)
-
-    if action == "SHOW_MODEL_CARDS":
-        return await _show_models(session, app_state)
-
-    if action == "GENERATE_PREVIEW":
-        return await _exec_generate_preview(session, text, app_state)
-
-    if action == "REVIEW_SEO":
-        return await _exec_review_seo(session, app_state)
-
-    if action == "PUBLISH_APP":
-        if "save draft" in msg or "save to draft" in msg:
-            return {
-                "reply": (
-                    "Done! Your progress has been saved as a draft. "
-                    "Access it anytime from your RentPrompts dashboard."
-                ),
-                "uiType": "success",
-                "uiData": {
-                    "appName": (session.get("seoData") or {}).get("appName")
-                    or (session.get("extraction") or {}).get("appPurpose")
-                    or "Untitled Draft",
-                    "status": "Draft",
-                },
-                "nextStep": 0,
-                "coins": None,
-                "clearSession": True,
-            }
-        if any(phrase in msg for phrase in ("start over", "restart", "reset")):
-            return {
-                "reply": (
-                    "No problem! 🔄 Let's start fresh.\n\n"
-                    "**What kind of AI app would you like to build?**"
-                ),
-                "uiType": "chips",
-                "uiData": {
-                    "options": ["Image app", "Video app", "Text app", "Audio app", "Vision app"]
-                },
-                "nextStep": 0,
-                "coins": None,
-                "clearSession": True,
-            }
-        return {
-            "reply": "Ready to publish? Review the SEO card and hit **Publish to Marketplace**!",
-            "uiType": "chips",
-            "uiData": {"options": ["Publish to Marketplace", "Save Draft", "Edit App"]},
-            "nextStep": session.get("step") or 3,
-            "coins": session.get("modelCost"),
-        }
-
-    # GATHER_REQUIREMENTS and default
+async def ideation_triage_node(state: ConversationState, config: dict) -> dict:
+    """Runs Step 0 requirements scoping logic to build initial understanding."""
+    app_state = config["configurable"]["app_state"]
+    text = state.get("message", "")
+    temp_session = {}
+    _state_to_session(state, temp_session)
+    
+    # Check format input from chip override
     chip_type = _parse_chip_app_type(text)
     if chip_type:
-        if not session.get("appType") or (
-            session.get("formatAskedByTriage") and not session.get("formatConfirmedByUser")
+        if not temp_session.get("appType") or (
+            temp_session.get("formatAskedByTriage") and not temp_session.get("formatConfirmedByUser")
         ):
-            session["appType"] = chip_type
-            if not session.get("extraction"):
-                session["extraction"] = {}
-            session["extraction"]["appType"] = chip_type
-            if session.get("formatAskedByTriage"):
-                session["formatConfirmedByUser"] = True
-                logger.info(f"[Format Override] Chip confirmed: {chip_type}")
-
-    if session.get("awaitingDeepAnswer") and session.get("currentDeepField"):
-        if not session.get("deepAnswers"):
-            session["deepAnswers"] = {}
-        session["deepAnswers"][session["currentDeepField"]] = text
-        if not session.get("extraction"):
-            session["extraction"] = {}
-        if session["currentDeepField"] == "budgetPreference":
-            session["extraction"]["budget"] = text
-        session["awaitingDeepAnswer"] = False
-        session["currentDeepField"] = None
-
-        next_q = _get_next_deep_question(session)
+            temp_session["appType"] = chip_type
+            if not temp_session.get("extraction"):
+                temp_session["extraction"] = {}
+            temp_session["extraction"]["appType"] = chip_type
+            if temp_session.get("formatAskedByTriage"):
+                temp_session["formatConfirmedByUser"] = True
+                
+    if temp_session.get("awaitingDeepAnswer") and temp_session.get("currentDeepField"):
+        if not temp_session.get("deepAnswers"):
+            temp_session["deepAnswers"] = {}
+        temp_session["deepAnswers"][temp_session["currentDeepField"]] = text
+        if not temp_session.get("extraction"):
+            temp_session["extraction"] = {}
+        if temp_session["currentDeepField"] == "budgetPreference":
+            temp_session["extraction"]["budget"] = text
+        temp_session["awaitingDeepAnswer"] = False
+        temp_session["currentDeepField"] = None
+        
+        next_q = _get_next_deep_question(temp_session)
         if next_q:
-            session["currentDeepField"] = next_q["field"]
-            session["awaitingDeepAnswer"] = True
-            await _save(session, app_state)
-            return {
+            temp_session["currentDeepField"] = next_q["field"]
+            temp_session["awaitingDeepAnswer"] = True
+            result = {
                 "reply": next_q["question"],
                 "uiType": "chips",
                 "uiData": {"options": next_q.get("options") or []},
                 "nextStep": 0,
                 "coins": None,
             }
-        return await _show_models(session, app_state)
+        else:
+            result = await _show_models(temp_session, app_state)
+    else:
+        result = await _exec_gather_requirements(temp_session, text, app_state)
+        
+    new_state = _session_to_state(temp_session, text)
+    new_state["response_payload"] = result
+    return new_state
 
-    return await _exec_gather_requirements(session, text, app_state)
+
+async def form_submission_node(state: ConversationState, config: dict) -> dict:
+    """Extracts features and variables from front-end multi-select forms."""
+    app_state = config["configurable"]["app_state"]
+    text = state.get("message", "")
+    temp_session = {}
+    _state_to_session(state, temp_session)
+    
+    payload = _parse_multi_select_payload(text)
+    if payload:
+        if not temp_session.get("dynamicContext"):
+            temp_session["dynamicContext"] = {}
+        temp_session["dynamicContext"]["options"] = payload.get("selectedOptions") or []
+        temp_session["dynamicContext"]["variables"] = [
+            {
+                "name": v.get("name"),
+                "placeholder": v.get("placeholder") or "Enter details...",
+                "test_value": v.get("value") or "",
+            }
+            for v in (payload.get("variables") or [])
+            if isinstance(v, dict)
+        ]
+        temp_session["formConfirmed"] = True
+        if not temp_session.get("extraction"):
+            temp_session["extraction"] = {}
+        temp_session["extraction"]["keyFeatures"] = payload.get("selectedOptions") or []
+        
+        budget = (temp_session.get("deepAnswers") or {}).get("budgetPreference") or (
+            (temp_session.get("extraction") or {}).get("budget")
+        )
+        if budget:
+            result = await _show_models(temp_session, app_state)
+        else:
+            temp_session["currentDeepField"] = "budgetPreference"
+            temp_session["awaitingDeepAnswer"] = True
+            result = {
+                "reply": "One last thing — **what's your budget per generation?**",
+                "uiType": "chips",
+                "uiData": {"options": BUDGET_CHIP_OPTIONS},
+                "nextStep": 0,
+                "coins": None,
+            }
+    else:
+        result = {"reply": "Invalid form configuration.", "uiType": "text"}
+        
+    new_state = _session_to_state(temp_session, text)
+    new_state["response_payload"] = result
+    return new_state
+
+
+async def model_selection_node(state: ConversationState, config: dict) -> dict:
+    """Filters and ranks model options for selection cards."""
+    app_state = config["configurable"]["app_state"]
+    temp_session = {}
+    _state_to_session(state, temp_session)
+    
+    result = await _show_models(temp_session, app_state)
+    
+    new_state = _session_to_state(temp_session, state["message"])
+    new_state["response_payload"] = result
+    return new_state
+
+
+async def app_preview_node(state: ConversationState, config: dict) -> dict:
+    """Generates prompt template blueprints and serves the test card preview."""
+    app_state = config["configurable"]["app_state"]
+    text = state.get("message", "")
+    temp_session = {}
+    _state_to_session(state, temp_session)
+    
+    result = await _exec_generate_preview(temp_session, text, app_state)
+    
+    new_state = _session_to_state(temp_session, text)
+    new_state["response_payload"] = result
+    return new_state
+
+
+async def modification_handler_node(state: ConversationState, config: dict) -> dict:
+    """Processes prompt adjustments or AI engine selection swaps."""
+    app_state = config["configurable"]["app_state"]
+    text = state.get("message", "")
+    temp_session = {}
+    _state_to_session(state, temp_session)
+    
+    msg = _lower(text)
+    decision = state.get("decision_payload") or {}
+    if re.match(r"^change\s*:", msg, re.IGNORECASE):
+        correction = re.sub(r"^change\s*:", "", text, flags=re.IGNORECASE).strip()
+        if len(correction) > 1:
+            extracted = decision.get("extracted_variables") or {}
+            extracted["editInstruction"] = correction
+            decision["extracted_variables"] = extracted
+            
+    result = await _exec_edit_app(temp_session, text, decision, app_state)
+    
+    new_state = _session_to_state(temp_session, text)
+    new_state["response_payload"] = result
+    return new_state
+
+
+async def seo_review_node(state: ConversationState, config: dict) -> dict:
+    """Presents calculated app metadata name, description, and tags for review."""
+    app_state = config["configurable"]["app_state"]
+    temp_session = {}
+    _state_to_session(state, temp_session)
+    
+    result = await _exec_review_seo(temp_session, app_state)
+    
+    new_state = _session_to_state(temp_session, state["message"])
+    new_state["response_payload"] = result
+    return new_state
+
+
+async def publish_app_node(state: ConversationState, config: dict) -> dict:
+    """Pubishes configurations directly to the marketplace database CMS."""
+    app_state = config["configurable"]["app_state"]
+    text = state.get("message", "")
+    temp_session = {}
+    _state_to_session(state, temp_session)
+    
+    card_data = {}
+    if text.startswith("SEO_PUBLISH::"):
+        try:
+            json_str = text[len("SEO_PUBLISH::"):]
+            card_data = json.loads(json_str)
+        except Exception:
+            pass
+            
+    result = await _handle_seo_publish(temp_session, card_data, app_state)
+    
+    new_state = _session_to_state(temp_session, text)
+    new_state["response_payload"] = result
+    new_state["clear_session"] = result.get("clearSession", False)
+    return new_state
+
+
+# Additional nodes to ensure logic coverage
+async def render_form_node(state: ConversationState, config: dict) -> dict:
+    """Renders the dynamic option fields form."""
+    app_state = config["configurable"]["app_state"]
+    text = state.get("message", "")
+    temp_session = {}
+    _state_to_session(state, temp_session)
+    
+    from services.extraction import extract_requirements, _merge_extraction
+    if not temp_session.get("history"):
+        temp_session["history"] = []
+    extraction = temp_session.get("extraction") or {}
+    if not extraction.get("appPurpose"):
+        ext = await extract_requirements(app_state.llm, text, temp_session["history"])
+        temp_session["extraction"] = _merge_extraction(temp_session.get("extraction"), ext, text)
+        
+    result = await _exec_render_form(temp_session, app_state)
+    new_state = _session_to_state(temp_session, text)
+    new_state["response_payload"] = result
+    return new_state
+
+
+async def handle_budget_node(state: ConversationState, config: dict) -> dict:
+    app_state = config["configurable"]["app_state"]
+    text = state.get("message", "")
+    temp_session = {}
+    _state_to_session(state, temp_session)
+    decision = state.get("decision_payload") or {}
+    result = await _exec_handle_budget(temp_session, text, decision, app_state)
+    new_state = _session_to_state(temp_session, text)
+    new_state["response_payload"] = result
+    return new_state
+
+
+async def change_model_node(state: ConversationState, config: dict) -> dict:
+    app_state = config["configurable"]["app_state"]
+    text = state.get("message", "")
+    temp_session = {}
+    _state_to_session(state, temp_session)
+    decision = state.get("decision_payload") or {}
+    result = await _exec_change_model(temp_session, text, decision, app_state)
+    new_state = _session_to_state(temp_session, text)
+    new_state["response_payload"] = result
+    return new_state
+
+
+async def pivot_app_node(state: ConversationState, config: dict) -> dict:
+    app_state = config["configurable"]["app_state"]
+    text = state.get("message", "")
+    temp_session = {}
+    _state_to_session(state, temp_session)
+    decision = state.get("decision_payload") or {}
+    result = await _exec_pivot_app(temp_session, text, decision, app_state)
+    new_state = _session_to_state(temp_session, text)
+    new_state["response_payload"] = result
+    return new_state
+
+
+async def save_draft_node(state: ConversationState, config: dict) -> dict:
+    text = state.get("message", "")
+    temp_session = {}
+    _state_to_session(state, temp_session)
+    
+    card_data = {}
+    if text.startswith("SEO_DRAFT::"):
+        try:
+            json_str = text[len("SEO_DRAFT::"):]
+            card_data = json.loads(json_str)
+        except Exception:
+            pass
+            
+    temp_session["seoData"] = {**(temp_session.get("seoData") or {}), **card_data}
+    temp_session["status"] = "draft"
+    app_name = (temp_session.get("seoData") or {}).get("appName") or "Your App"
+    result = {
+        "reply": f'## 📋 Draft Saved\n\n**"{app_name}"** saved. Resume anytime from your dashboard.',
+        "uiType": "success",
+        "uiData": {"appName": app_name, "status": "Draft"},
+        "nextStep": 0,
+        "coins": None,
+        "clearSession": True,
+    }
+    new_state = _session_to_state(temp_session, text)
+    new_state["response_payload"] = result
+    new_state["clear_session"] = True
+    return new_state
+
+
+async def initiate_tweak_node(state: ConversationState, config: dict) -> dict:
+    result = {
+        "reply": (
+            "I'm listening! 📝\n\n"
+            "- **Tweak the prompt** — tell me what to change\n"
+            "- **Switch the AI model** — pick a different engine\n"
+            "- **Start fresh** — describe a completely new app idea\n\n"
+            "What would you like to adjust?"
+        ),
+        "uiType": "text",
+        "uiData": None,
+        "nextStep": state.get("current_step", 2),
+        "coins": state.get("model_cost"),
+    }
+    return {
+        "awaiting_prompt_tweak": True,
+        "response_payload": result,
+    }
+
+
+async def handle_greeting_node(state: ConversationState, config: dict) -> dict:
+    app_state = config["configurable"]["app_state"]
+    text = state.get("message", "")
+    temp_session = {}
+    _state_to_session(state, temp_session)
+    
+    if len(temp_session.get("history") or []) < 3:
+        result = {
+            "reply": (
+                "Hey there! 👋 I'm your **RentPrompts App Architect** — I help you design, "
+                "configure, and publish AI-powered apps in minutes.\n\n"
+                "**Just describe your app idea** and I'll handle the rest!\n\n"
+                "What would you like to build today?"
+            ),
+            "uiType": None,
+            "uiData": None,
+            "nextStep": temp_session.get("step", 0),
+            "coins": None,
+        }
+        new_state = _session_to_state(temp_session, text)
+        new_state["response_payload"] = result
+        return new_state
+        
+    result = await _exec_gather_requirements(temp_session, text, app_state)
+    new_state = _session_to_state(temp_session, text)
+    new_state["response_payload"] = result
+    return new_state
+
+
+async def handle_violation_node(state: ConversationState, config: dict) -> dict:
+    result = {
+        "reply": (
+            "I can only help build apps that comply with RentPrompts' safety and content "
+            "guidelines. Please suggest a different idea."
+        ),
+        "uiType": "text",
+        "uiData": None,
+        "nextStep": state.get("current_step", 0),
+        "coins": None,
+    }
+    return {"response_payload": result}
+
+
+async def handle_gibberish_node(state: ConversationState, config: dict) -> dict:
+    result = {
+        "reply": "Hmm, I didn't quite catch that! 🤔 What type of output should your AI app generate?",
+        "uiType": "chips",
+        "uiData": {"options": ["Text", "Image", "Audio", "Video", "Vision"]},
+        "nextStep": state.get("current_step", 0),
+        "coins": None,
+    }
+    return {"response_payload": result}
+
+
+# ─── CONDITIONAL STATE ROUTING EDGE ──────────────────────────
+
+def route_by_conversational_intent(state: ConversationState) -> str:
+    """Dynamic routing logic determining target execution state."""
+    action = state.get("recommended_action")
+    
+    if action == "HANDLE_OFF_TOPIC":
+        return "off_topic_handler_node"
+    if action == "HANDLE_VIOLATION":
+        return "handle_violation_node"
+    if action == "HANDLE_GIBBERISH":
+        return "handle_gibberish_node"
+    if action == "HANDLE_GREETING":
+        return "handle_greeting_node"
+    if action == "HANDLE_BUDGET":
+        return "handle_budget_node"
+    if action == "CHANGE_MODEL":
+        return "change_model_node"
+    if action == "PIVOT_APP":
+        return "pivot_app_node"
+    if action == "EDIT_APP":
+        return "modification_handler_node"
+    if action == "RENDER_FORM":
+        return "render_form_node"
+    if action == "SHOW_MODEL_CARDS":
+        return "model_selection_node"
+    if action == "GENERATE_PREVIEW":
+        return "app_preview_node"
+    if action == "REVIEW_SEO":
+        return "seo_review_node"
+    if action == "PUBLISH_APP":
+        return "publish_app_node"
+    if action == "SAVE_DRAFT":
+        return "save_draft_node"
+    if action == "INITIATE_TWEAK":
+        return "initiate_tweak_node"
+    if action == "PROCESS_FORM":
+        return "form_submission_node"
+        
+    return "ideation_triage_node"
+
+
+# ─── GRAPH ASSEMBLY & COMPILATION ────────────────────────────
+
+def build_orchestrator_graph() -> StateGraph:
+    """Builds and compiles the conversational routing StateGraph."""
+    graph = StateGraph(ConversationState)
+    
+    # Add nodes
+    graph.add_node("intent_classifier_node", intent_classifier_node)
+    graph.add_node("off_topic_handler_node", off_topic_handler_node)
+    graph.add_node("ideation_triage_node", ideation_triage_node)
+    graph.add_node("form_submission_node", form_submission_node)
+    graph.add_node("model_selection_node", model_selection_node)
+    graph.add_node("app_preview_node", app_preview_node)
+    graph.add_node("modification_handler_node", modification_handler_node)
+    graph.add_node("seo_review_node", seo_review_node)
+    graph.add_node("publish_app_node", publish_app_node)
+    
+    # Add extra nodes
+    graph.add_node("render_form_node", render_form_node)
+    graph.add_node("handle_budget_node", handle_budget_node)
+    graph.add_node("change_model_node", change_model_node)
+    graph.add_node("pivot_app_node", pivot_app_node)
+    graph.add_node("save_draft_node", save_draft_node)
+    graph.add_node("initiate_tweak_node", initiate_tweak_node)
+    graph.add_node("handle_greeting_node", handle_greeting_node)
+    graph.add_node("handle_violation_node", handle_violation_node)
+    graph.add_node("handle_gibberish_node", handle_gibberish_node)
+    
+    # Establish Entrypoint
+    graph.set_entry_point("intent_classifier_node")
+    
+    # Routing conditional edges
+    graph.add_conditional_edges(
+        "intent_classifier_node",
+        route_by_conversational_intent,
+        {
+            "off_topic_handler_node": "off_topic_handler_node",
+            "ideation_triage_node": "ideation_triage_node",
+            "form_submission_node": "form_submission_node",
+            "model_selection_node": "model_selection_node",
+            "app_preview_node": "app_preview_node",
+            "modification_handler_node": "modification_handler_node",
+            "seo_review_node": "seo_review_node",
+            "publish_app_node": "publish_app_node",
+            
+            # extra nodes mapping
+            "render_form_node": "render_form_node",
+            "handle_budget_node": "handle_budget_node",
+            "change_model_node": "change_model_node",
+            "pivot_app_node": "pivot_app_node",
+            "save_draft_node": "save_draft_node",
+            "initiate_tweak_node": "initiate_tweak_node",
+            "handle_greeting_node": "handle_greeting_node",
+            "handle_violation_node": "handle_violation_node",
+            "handle_gibberish_node": "handle_gibberish_node",
+        }
+    )
+    
+    # Leaf links to END
+    graph.add_edge("off_topic_handler_node", END)
+    graph.add_edge("ideation_triage_node", END)
+    graph.add_edge("form_submission_node", END)
+    graph.add_edge("model_selection_node", END)
+    graph.add_edge("app_preview_node", END)
+    graph.add_edge("modification_handler_node", END)
+    graph.add_edge("seo_review_node", END)
+    graph.add_edge("publish_app_node", END)
+    graph.add_edge("render_form_node", END)
+    graph.add_edge("handle_budget_node", END)
+    graph.add_edge("change_model_node", END)
+    graph.add_edge("pivot_app_node", END)
+    graph.add_edge("save_draft_node", END)
+    graph.add_edge("initiate_tweak_node", END)
+    graph.add_edge("handle_greeting_node", END)
+    graph.add_edge("handle_violation_node", END)
+    graph.add_edge("handle_gibberish_node", END)
+    
+    return graph.compile()
+
+
+compiled_graph = build_orchestrator_graph()
+
+
+# ─── CORE ORCHESTRATOR ENTRYPOINT ────────────────────────────
+
+async def route(session: dict, message: str, app_state: Any) -> dict:
+    """Main entrypoint invoking the event-driven LangGraph pipeline."""
+    initial_state = _session_to_state(session, message)
+    config = {"configurable": {"app_state": app_state}}
+    
+    final_state = await compiled_graph.ainvoke(initial_state, config=config)
+    
+    _state_to_session(final_state, session)
+    return final_state.get("response_payload") or {}
+
+
+# ─── FASTAPI HTTP ROUTER REFERENCE INTEGRATION ────────────────
+
+# Pydantic templates for the client request / response payload structure
+# class AgentChatRequest(BaseModel):
+#     sessionId: str
+#     message: str
+#
+# class AgentChatResponse(BaseModel):
+#     reply: str
+#     uiType: Optional[str] = None
+#     uiData: Optional[dict] = None
+#     step: int = 0
+#     coins: Optional[float] = None
+#     confirm: Optional[dict] = None
+#
+# @router.post("/api/agent/chat", response_model=AgentChatResponse)
+# async def agent_chat(request: Request, body: AgentChatRequest):
+#     # 1. Access request application states and services
+#     session_svc = request.app.state.session
+#     
+#     # 2. Retrieve or initialize the session state
+#     session = await session_svc.get_or_create_session(body.sessionId)
+#     if not isinstance(session.get("history"), list):
+#         session["history"] = []
+#     
+#     # 3. Add current user input to conversation history
+#     session["history"].append({"role": "user", "content": body.message})
+#     
+#     # 4. Trigger the LangGraph State Machine route runner via .ainvoke()
+#     response_payload = await route(session, body.message, request.app.state)
+#     
+#     # 5. Persist or clear session store changes based on execution outcomes
+#     if response_payload.get("clearSession"):
+#         await session_svc.delete_session(body.sessionId)
+#     else:
+#         session["history"].append({
+#             "role": "agent", 
+#             "content": response_payload.get("reply", ""), 
+#             "uiType": response_payload.get("uiType")
+#         })
+#         await session_svc.save_session(session)
+#         
+#     # 6. Deliver calculated response_payload contract to client
+#     return AgentChatResponse(
+#         reply=response_payload.get("reply", ""),
+#         uiType=response_payload.get("uiType"),
+#         uiData=response_payload.get("uiData"),
+#         step=response_payload.get("nextStep", session.get("step", 0)),
+#         coins=response_payload.get("coins"),
+#     )
+
+
