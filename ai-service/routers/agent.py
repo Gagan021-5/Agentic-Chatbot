@@ -112,7 +112,7 @@ async def agent_chat(request: Request, body: AgentChatRequest):
         )
 
     except Exception as e:
-        logger.error(f"agent_chat error: {e}")
+        logger.exception("agent_chat error")
         raise HTTPException(status_code=500, detail=str(e))
 
 

@@ -131,15 +131,15 @@ QUALITY RULES:
 12. EXPERT INSTRUCTIONS (CRITICAL): For text apps, the userPrompt must instruct the model to act as the expert and process the input variables (e.g. "Analyze the [birth_sign] and [dob] to generate daily horoscope..."). Do NOT write the prompt in the first-person perspective (do NOT write "I want...", "My sign is...").
 
 Return ONLY valid JSON:
-{
+{{
   "reasoning": "Brief explanation of your design choices.",
   "systemPrompt": "Tight 3-5 sentence AI persona with role, domain, tone, format rules.",
   "userPrompt": "Highly detailed prompt with context, processing logic, output format, and constraints.",
   "negativePrompt": "Detailed negative prompt or null",
   "acceptImageInput": true or false,
   "variablesUsed": ["[var1]", "[var2]"],
-  "variableDescriptions": { "[var1]": "What the user enters here" }
-}"""
+  "variableDescriptions": {{ "[var1]": "What the user enters here" }}
+}}"""
 
     vars_list = (session.get("dynamicContext") or {}).get("variables") or []
     var_lines = []

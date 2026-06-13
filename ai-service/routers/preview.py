@@ -249,11 +249,14 @@ async def test_preview(request: Request, body: TestPreviewRequest):
 
         # ─── 3. AUDIO APP ──────────────────────────────────
         elif app_type == "audio":
-            # Check if user provided script text
-            script_fields = ["scripted_conversation", "script", "content", "text", "dialogue",
-                           "narration", "transcript", "message", "body", "story"]
+            # Check if user provided script text, matching normalized keys containing script/text keywords
+            script_keywords = [
+                "scripted_conversation", "script", "content", "text", "dialogue",
+                "narration", "transcript", "message", "body", "story", "speech", "input"
+            ]
             user_script_field = next(
-                (f for f in script_fields if body.variables.get(f) and len(str(body.variables[f]).strip()) > 30),
+                (k for k in body.variables if any(kw in k.lower().replace(" ", "_").replace("-", "_") for kw in script_keywords)
+                 and len(str(body.variables[k]).strip()) > 0),
                 None,
             )
 
@@ -384,9 +387,13 @@ async def test_prompt(request: Request, body: TestPromptRequest):
             resolved = re.sub(re.escape(f"$${key}"), val_str, resolved, flags=re.I)
             resolved = re.sub(re.escape(f"[{key}]"), val_str, resolved, flags=re.I)
             
-            key_alt = key.replace(" ", "_")
-            resolved = re.sub(re.escape(f"$${key_alt}"), val_str, resolved, flags=re.I)
-            resolved = re.sub(re.escape(f"[{key_alt}]"), val_str, resolved, flags=re.I)
+            key_alt1 = key.replace(" ", "_")
+            resolved = re.sub(re.escape(f"$${key_alt1}"), val_str, resolved, flags=re.I)
+            resolved = re.sub(re.escape(f"[{key_alt1}]"), val_str, resolved, flags=re.I)
+            
+            key_alt2 = key.replace("_", " ")
+            resolved = re.sub(re.escape(f"$${key_alt2}"), val_str, resolved, flags=re.I)
+            resolved = re.sub(re.escape(f"[{key_alt2}]"), val_str, resolved, flags=re.I)
 
         raw = await llm.openrouter_chat(
             system_prompt=body.systemPrompt or "You are a helpful AI assistant.",

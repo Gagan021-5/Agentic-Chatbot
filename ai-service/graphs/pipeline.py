@@ -141,6 +141,49 @@ def _parse_chip_app_type(msg: Any) -> str | None:
 
 # ─── Node Implementations ──────────────────────────────────
 
+def _get_clean_history(history: list) -> list[dict]:
+    """Converts a mix of LangChain message objects and dictionaries into standard dictionaries,
+    and prunes the history to only include the messages from the most recent app idea to prevent cross-contamination.
+    """
+    clean = []
+    for h in (history or []):
+        if not h:
+            continue
+        if hasattr(h, "type") and hasattr(h, "content"):
+            role = "assistant" if h.type in ("ai", "assistant", "agent") else "user"
+            content = h.content
+        elif isinstance(h, dict):
+            role = "assistant" if h.get("role") in ("agent", "assistant", "ai") else "user"
+            content = h.get("content") or h.get("text") or ""
+        else:
+            role = "user"
+            content = str(h)
+
+        if not isinstance(content, str):
+            try:
+                content = json.dumps(content)
+            except Exception:
+                content = str(content)
+
+        clean.append({"role": role, "content": content})
+
+    # Prune history to only start from the last time the user described a new app idea
+    start_idx = 0
+    new_idea_patterns = (
+        "i want to build", "i want to create", "i want to make", "i want to write", "i want to generate", "i want to design", "i want to develop",
+        "let's build", "lets build", "let's create", "lets create", "let's make", "lets make",
+        "create a", "create an", "build a", "build an", "make a", "make an", "generate a", "generate an", "write a", "write an", "design a", "design an",
+        "i want a", "i want an", "i need a", "i need an", "make me a", "make me an", "create me a", "create me an"
+    )
+    for idx, msg in enumerate(clean):
+        if msg["role"] == "user":
+            content_lower = msg["content"].lower()
+            if any(pat in content_lower for pat in new_idea_patterns):
+                start_idx = idx
+
+    return clean[start_idx:]
+
+
 async def intent_classifier_node(state: PipelineState, config: dict) -> dict:
     """Classifies user intent and determines the next execution node."""
     app_state = config["configurable"]["app_state"]
@@ -171,22 +214,18 @@ async def intent_classifier_node(state: PipelineState, config: dict) -> dict:
     is_informational_question = msg_clean.startswith(question_prefixes) or (
         ("?" in msg_clean or msg_clean.startswith(("what", "how", "why", "explain")))
         and not any(phrase in msg_clean for phrase in (
-            "i want to build", "i want to create", "i want to make", "i want to start",
+            "i want to build", "i want to create", "i want to make", "i want to write", "i want to generate", "i want to design", "i want to develop", "i want to start",
             "let's build", "lets build", "let's create", "lets create", "let's make", "lets make",
-            "create a", "create an", "build a", "build an", "make a", "make an"
+            "create a", "create an", "build a", "build an", "make a", "make an", "generate a", "generate an", "write a", "write an", "design a", "design an",
+            "i want a", "i want an", "i need a", "i need an", "make me a", "make me an", "create me a", "create me an"
         ))
     )
     if is_informational_question:
         return {"recommended_action": "HANDLE_OFF_TOPIC"}
 
-    # 3. LLM classification call
-    history_slice = []
-    for h in state.get("history", [])[-8:]:
-        role = "assistant" if h.get("role") in ("agent", "assistant") else "user"
-        content = h.get("content", "")
-        if not isinstance(content, str):
-            content = json.dumps(content)
-        history_slice.append({"role": role, "content": content[:400]})
+    history = state.get("history", []) or []
+    clean_hist = _get_clean_history(history)
+    history_slice = [{"role": m["role"], "content": m["content"][:400]} for m in clean_hist[-8:]]
 
     system_prompt = """You are an intent classifier for a conversational AI App Builder.
 Classify the user's message into one of these actions:
@@ -212,6 +251,8 @@ Return JSON only:
             model="llama-3.1-8b-instant",
             response_format={"type": "json_object"}
         )
+        if not res or not isinstance(res, dict):
+            raise ValueError("Invalid LLM response for intent classification")
         content = res.get("choices", [{}])[0].get("message", {}).get("content", "{}")
         parsed = json.loads(content)
         action = (parsed.get("action") or "BUILD").upper()
@@ -256,13 +297,9 @@ Answer the user's question friendly and naturally. Use the following retrieved k
 Keep your answer relatively concise (1-3 paragraphs) and helpful.
 Do not ask or prompt the user about their app setup in this message."""
 
-    history_slice = []
-    for h in state.get("history", [])[-8:]:
-        role = "assistant" if h.get("role") in ("agent", "assistant") else "user"
-        content = h.get("content", "")
-        if not isinstance(content, str):
-            content = json.dumps(content)
-        history_slice.append({"role": role, "content": content[:400]})
+    history = state.get("history", []) or []
+    clean_hist = _get_clean_history(history)
+    history_slice = [{"role": m["role"], "content": m["content"][:400]} for m in clean_hist[-8:]]
 
     try:
         res = await app_state.llm.groq_completion(
@@ -273,6 +310,8 @@ Do not ask or prompt the user about their app setup in this message."""
             ],
             model="llama-3.1-8b-instant"
         )
+        if not res or not isinstance(res, dict):
+            raise ValueError("Invalid LLM response for off topic responder")
         reply = res.get("choices", [{}])[0].get("message", {}).get("content", "I am here to help you learn about AI models and our platform.")
     except Exception as e:
         reply = "I'm sorry, I'm having trouble answering your question right now. How can I help you build your app?"
@@ -333,8 +372,20 @@ async def ideation_node(state: PipelineState, config: dict) -> PipelineState:
             state["awaiting_deep_answer"] = False
             state["current_deep_field"] = None
 
+    # If the user has responded to a triage question, capture their answer in deep_answers
+    # to prevent the triage LLM from asking the same question again.
+    has_agent_turned = any(
+        h.get("role") in ("agent", "assistant", "ai") if isinstance(h, dict)
+        else (h.type in ("ai", "assistant", "agent") if hasattr(h, "type") else False)
+        for h in history
+    )
+    if not form_confirmed and not awaiting_deep and has_agent_turned and message:
+        if not message.lower().startswith("multi_select_form::") and not message.lower().startswith("select"):
+            key = f"clarification_{len(deep_answers) + 1}"
+            deep_answers[key] = message
+
     # Call LLM extraction on user's message
-    latest_ext = await extract_requirements(app_state.llm, message, history)
+    latest_ext = await extract_requirements(app_state.llm, message, _get_clean_history(history))
     for k, v in latest_ext.items():
         if v is not None and v != "null":
             extraction[k] = v
@@ -343,6 +394,31 @@ async def ideation_node(state: PipelineState, config: dict) -> PipelineState:
         app_type = extraction["appType"]
     if extraction.get("appPurpose") and len(extraction["appPurpose"]) > 5:
         app_purpose = extraction["appPurpose"]
+
+    # Detect adaptive intent / change of app idea
+    new_purpose = latest_ext.get("appPurpose")
+    if new_purpose and new_purpose != "null" and app_purpose:
+        old_words = set(re.findall(r"\w+", app_purpose.lower()))
+        new_words = set(re.findall(r"\w+", new_purpose.lower()))
+        important_old = {w for w in old_words if len(w) > 3}
+        important_new = {w for w in new_words if len(w) > 3}
+        if important_old and important_new and not (important_old & important_new):
+            logger.info(f"New app idea detected: '{new_purpose}' vs old: '{app_purpose}'. Resetting elicitation state.")
+            deep_answers = {}
+            extraction = latest_ext
+            dynamic_context = {}
+            state["deep_answers"] = {}
+            state["extraction"] = latest_ext
+            state["dynamic_context"] = {}
+            app_purpose = new_purpose
+            state["app_purpose"] = new_purpose
+            state["form_confirmed"] = False
+            state["requirements_complete"] = False
+            app_type = latest_ext.get("appType") if latest_ext.get("appType") != "null" else None
+            state["app_type"] = app_type
+            # Reset history to start fresh from the user message that introduced the new app idea
+            history = [{"role": "user", "content": message}]
+            state["pruned_history"] = history
 
     state["app_type"] = app_type
     state["app_purpose"] = app_purpose
@@ -374,7 +450,7 @@ async def ideation_node(state: PipelineState, config: dict) -> PipelineState:
             app_type,
             app_purpose or message,
             "English",
-            history,
+            _get_clean_history(history),
             deep_answers
         )
 
@@ -453,7 +529,7 @@ async def ideation_node(state: PipelineState, config: dict) -> PipelineState:
 
     # Everything is complete for ideation
     state["requirements_complete"] = True
-    state["current_step"] = 2
+    state["current_step"] = 1
     return state
 
 
@@ -491,13 +567,13 @@ async def model_selection_node(state: PipelineState, config: dict) -> PipelineSt
         state["reply"] = reply
         state["response_payload"] = {
             "reply": reply,
-            "uiType": "model_cards" if candidates else None,
+            "uiType": "models" if candidates else None,
             "uiData": {"models": candidates} if candidates else None,
-            "nextStep": 2,
+            "nextStep": 1,
         }
-        state["current_step"] = 2
+        state["current_step"] = 1
     else:
-        state["current_step"] = 3
+        state["current_step"] = 2
 
     return state
 
@@ -524,7 +600,7 @@ async def app_preview_node(state: PipelineState, config: dict) -> PipelineState:
         "modelId": model_id,
         "deepAnswers": deep_answers,
         "extraction": state.get("extraction") or {},
-        "history": state.get("history") or [],
+        "history": _get_clean_history(state.get("history") or []),
         "dynamicContext": state.get("dynamic_context") or {},
     }
 
@@ -540,17 +616,48 @@ async def app_preview_node(state: PipelineState, config: dict) -> PipelineState:
     state["prompt_data"] = prompt_data
     state["seo_data"] = seo_data
 
-    # Extract variables from brackets
+    # Extract variables from brackets (supporting letters, digits, underscores, dashes, spaces)
     combined_prompts = f"{enhanced_system_prompt}\n{enhanced_user_prompt}"
-    var_pattern = re.compile(r"\[([a-zA-Z_][a-zA-Z0-9_]*)\]")
-    found_vars = list(set(var_pattern.findall(combined_prompts)))
+    var_pattern = re.compile(r"\[([a-zA-Z0-9_\s-]+)\]")
+    found_vars = list(set(var_name.strip() for var_name in var_pattern.findall(combined_prompts)))
+
+    # Get user-confirmed variables from dynamic_context to populate test_value
+    confirmed_vars = (state.get("dynamic_context") or {}).get("variables") or []
+    
+    # Helper to normalize variable names for matching (ignoring spaces, underscores, dashes, case)
+    def normalize_var_name(n: str) -> str:
+        return re.sub(r"[\s_-]", "", str(n)).lower()
+
+    confirmed_lookup = {}
+    for cv in confirmed_vars:
+        if isinstance(cv, dict) and cv.get("name"):
+            confirmed_lookup[normalize_var_name(cv["name"])] = cv
+        elif isinstance(cv, str):
+            confirmed_lookup[normalize_var_name(cv)] = {"name": cv, "test_value": "", "placeholder": ""}
 
     variables = []
     for var_name in found_vars:
+        if not var_name:
+            continue
+        norm = normalize_var_name(var_name)
+        matched_cv = confirmed_lookup.get(norm)
+        
+        placeholder = ""
+        test_value = ""
+        display_name = var_name
+        
+        if matched_cv:
+            placeholder = matched_cv.get("placeholder") or matched_cv.get("value") or ""
+            test_value = matched_cv.get("test_value") or matched_cv.get("value") or ""
+            display_name = matched_cv.get("name") or var_name
+        
+        if not placeholder:
+            placeholder = _generate_placeholder(display_name, app_type)
+
         variables.append({
-            "name": var_name,
-            "placeholder": _generate_placeholder(var_name, app_type),
-            "test_value": "",
+            "name": display_name,
+            "placeholder": placeholder,
+            "test_value": test_value,
         })
 
     state["extracted_variables"] = variables
@@ -576,11 +683,11 @@ async def app_preview_node(state: PipelineState, config: dict) -> PipelineState:
         "reply": reply,
         "uiType": "app_preview",
         "uiData": ui_data,
-        "nextStep": 3,
+        "nextStep": 2,
         "coins": state.get("model_cost"),
     }
 
-    state["current_step"] = 3
+    state["current_step"] = 2
     return state
 
 
@@ -620,7 +727,7 @@ async def preview_and_registration_node(state: PipelineState, config: dict) -> P
                 "reply": reply,
                 "uiType": "text",
                 "uiData": None,
-                "nextStep": 5,
+                "nextStep": 3,
                 "clearSession": True,
             }
         except Exception as e:
@@ -631,7 +738,7 @@ async def preview_and_registration_node(state: PipelineState, config: dict) -> P
                 "reply": reply,
                 "uiType": "text",
                 "uiData": None,
-                "nextStep": 3,
+                "nextStep": 2,
             }
     return state
 
@@ -650,15 +757,20 @@ def route_conditional_edge(state: PipelineState) -> str:
 
     # Route by step
     step = state.get("current_step", 0)
-    if step == 0 or step == 1:
+    if step == 0:
         return "ideation"
-    if step == 2:
+    if step == 1:
         return "model_selection"
-    return "app_preview"
+    if step == 2:
+        return "app_preview"
+    return "preview_and_registration"
 
 
 def should_continue_from_ideation(state: PipelineState) -> Literal["model_selection", "end"]:
     """Gates continuation based on requirement completeness."""
+    # Strict single-turn response gate: if payload was generated, stop graph execution immediately
+    if state.get("response_payload"):
+        return "end"
     if state.get("requirements_complete"):
         return "model_selection"
     return "end"
@@ -666,6 +778,9 @@ def should_continue_from_ideation(state: PipelineState) -> Literal["model_select
 
 def should_continue_from_model(state: PipelineState) -> Literal["app_preview", "end"]:
     """Gates model choice requirements."""
+    # Strict single-turn response gate: if payload was generated, stop graph execution immediately
+    if state.get("response_payload"):
+        return "end"
     if state.get("model_id"):
         return "app_preview"
     return "end"
@@ -755,11 +870,47 @@ async def route(session: dict, message: str, app_state: Any) -> dict:
     """Main entrypoint invoking the event-driven LangGraph pipeline.
     This serves as the drop-in replacement for step_router.route().
     """
+    # Map raw session history (which has role='agent') to standard role='assistant' so LangGraph coercion doesn't fail
+    raw_hist = session.get("history", []) or []
+    cleaned_hist = []
+    for h in raw_hist:
+        if isinstance(h, dict):
+            role = h.get("role", "user")
+            if role == "agent":
+                role = "assistant"
+            cleaned_hist.append({**h, "role": role})
+        else:
+            cleaned_hist.append(h)
+
+    # Prune history to only start from the last time the user described a new app idea
+    start_idx = 0
+    new_idea_patterns = (
+        "i want to build", "i want to create", "i want to make", "i want to write", "i want to generate", "i want to design", "i want to develop",
+        "let's build", "lets build", "let's create", "lets create", "let's make", "lets make",
+        "create a", "create an", "build a", "build an", "make a", "make an", "generate a", "generate an", "write a", "write an", "design a", "design an",
+        "i want a", "i want an", "i need a", "i need an", "make me a", "make me an", "create me a", "create me an"
+    )
+    for idx, msg in enumerate(cleaned_hist):
+        if isinstance(msg, dict) and msg.get("role") == "user":
+            content_lower = str(msg.get("content") or "").lower()
+            if any(pat in content_lower for pat in new_idea_patterns):
+                start_idx = idx
+        elif hasattr(msg, "type") and msg.type == "user":
+            content_lower = str(getattr(msg, "content", "")).lower()
+            if any(pat in content_lower for pat in new_idea_patterns):
+                start_idx = idx
+
+    if start_idx > 0:
+        pruned = cleaned_hist[start_idx:]
+        logger.info(f"Pruned stale conversation history (from {len(cleaned_hist)} to {len(pruned)} messages) based on new app intent pattern.")
+        session["history"] = pruned
+        cleaned_hist = pruned
+
     # Convert session to pipeline state structure
     initial_state: PipelineState = {
         "session_id": session.get("sessionId") or session.get("session_id") or "",
         "message": message,
-        "history": session.get("history", []),
+        "history": cleaned_hist,
         "app_type": session.get("appType"),
         "app_purpose": session.get("appPurpose") or (session.get("extraction") or {}).get("appPurpose"),
         "extraction": session.get("extraction") or {},
@@ -768,15 +919,15 @@ async def route(session: dict, message: str, app_state: Any) -> dict:
         "model_id": session.get("modelId"),
         "model_name": session.get("modelName"),
         "model_cost": session.get("modelCost"),
-        "prompt_data": session.get("promptData", {}),
-        "seo_data": session.get("seoData", {}),
+        "prompt_data": session.get("promptData") or {},
+        "seo_data": session.get("seoData") or {},
         "current_step": session.get("step") or 0,
         "requirements_complete": session.get("requirements_complete") or False,
         "preview_approved": session.get("preview_approved") or False,
         "cms_registered": session.get("cms_registered") or False,
         "form_confirmed": session.get("formConfirmed") or False,
-        "enhanced_system_prompt": session.get("enhanced_system_prompt") or session.get("promptData", {}).get("systemPrompt"),
-        "enhanced_user_prompt": session.get("enhanced_user_prompt") or session.get("promptData", {}).get("userPrompt"),
+        "enhanced_system_prompt": session.get("enhanced_system_prompt") or (session.get("promptData") or {}).get("systemPrompt"),
+        "enhanced_user_prompt": session.get("enhanced_user_prompt") or (session.get("promptData") or {}).get("userPrompt"),
         "extracted_variables": session.get("extracted_variables") or [],
         "rag_documents": session.get("rag_documents") or [],
         "rag_context_injected": session.get("rag_context_injected") or "",
@@ -799,6 +950,8 @@ async def route(session: dict, message: str, app_state: Any) -> dict:
     session["extraction"] = final_state.get("extraction") or {}
     session["deepAnswers"] = final_state.get("deep_answers") or {}
     session["dynamicContext"] = final_state.get("dynamic_context")
+    if "pruned_history" in final_state:
+        session["history"] = final_state["pruned_history"]
     session["modelId"] = final_state.get("model_id")
     session["modelName"] = final_state.get("model_name")
     session["modelCost"] = final_state.get("model_cost")
