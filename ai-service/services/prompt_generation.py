@@ -189,15 +189,34 @@ Return ONLY valid JSON:
 
     extraction = session.get("extraction") or {}
     requirements = session.get("requirements") or {}
+
+    web_search_block = ""
+    web_search_ctx = session.get("webSearchContext")
+    if web_search_ctx and isinstance(web_search_ctx, dict):
+        summary = web_search_ctx.get("summary") or ""
+        sources = web_search_ctx.get("sources") or []
+        source_lines = "\n".join(
+            f"  - {s.get('title', 'Source')}: {s.get('url', '')}" for s in sources[:5]
+        )
+        if summary:
+            web_search_block = (
+                f"\n- LIVE WEB RESEARCH (ground prompt engineering on these findings):\n"
+                f"  Summary: {summary}\n"
+                f"{f'  Sources:{chr(10)}{source_lines}' if source_lines else ''}\n"
+                f"  Apply optimal prompting parameters from this research to systemPrompt and userPrompt."
+            )
+
     user_content = (
         f"Generate a production-ready prompt for this app:\n"
         f"- App Type: {session.get('appType')}\n"
+        f"- Selected Model: {session.get('modelName') or session.get('modelId') or 'unknown'}\n"
         f"- App Purpose: {requirements.get('appPurpose') or extraction.get('appPurpose') or 'Not specified'}\n"
         f"- Target Users: {requirements.get('targetUsers') or extraction.get('targetUsers') or 'General Public'}\n"
         f"- Domain Context from Chat: {json.dumps(session.get('deepAnswers') or {})}\n"
         f"- Conversation Summary: {json.dumps([(h.get('content')) for h in (session.get('history') or [])[-6:]])}\n"
         f"- REQUIRED INPUT VARIABLES (use EXACTLY these, no more, no less):\n"
         f"{var_list or 'Use the most logical 3-4 variables for this app type and purpose.'}"
+        f"{web_search_block}"
         f"{edit_instruction}"
     )
 

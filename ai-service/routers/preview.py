@@ -58,7 +58,8 @@ def _generate_video_preview(prompt: str) -> str:
     import hashlib
     clean_prompt = quote(prompt.strip())
     h = int(hashlib.md5(prompt.encode('utf-8')).hexdigest(), 16) % 1000000
-    return f"https://pollinations.ai/p/{clean_prompt}?model=video&width=1024&height=576&seed={h}"
+    return f"https://gen.pollinations.ai/video/{clean_prompt}?width=1024&height=576&seed={h}"
+
 
 
 # ─── Pollinations Helpers ───────────────────────────────────
@@ -575,16 +576,33 @@ async def test_preview(request: Request, body: TestPreviewRequest):
 
         # ─── 5. VISION APP ─────────────────────────────────
         elif app_type == "vision":
-            vision_text = (
-                f"👁️ **Vision Analysis Complete**\n\n"
-                f"Based on the uploaded image and parameters ({json.dumps(body.variables)}), "
-                f"the AI detects elements matching your {body.systemPrompt[:40]}... logic."
-            )
+            image_url = body.variables.get("$$image_input") or body.variables.get("image_input") or body.testImageBase64 or "https://via.placeholder.com/400x200.png?text=No+Image"
+            if not image_url.startswith("data:image/") and not image_url.startswith("http://") and not image_url.startswith("https://"):
+                image_url = body.testImageBase64 or image_url
+
+            analysis_goal = body.variables.get("$$analysis_goal") or body.variables.get("analysis_goal") or "Describe what you see in detail."
+            detail_level = body.variables.get("$$output_detail") or body.variables.get("output_detail") or "detailed"
+            
+            vision_prompt = f"{analysis_goal} Provide a {detail_level} analysis."
+            
+            try:
+                res = await llm.groq_vision(
+                    image_data_url=image_url,
+                    prompt=vision_prompt,
+                    model="llava-v1.5-7b-4096-preview",
+                    max_tokens=1000
+                )
+                vision_text = res
+            except Exception as vision_err:
+                logger.error(f"Vision analysis preview error: {vision_err}")
+                vision_text = f"👁️ **Vision Analysis Complete (with error: {vision_err})**\n\nFallback: could not analyze image."
+
             preview_result = {
                 "type": "multimodal",
-                "url": body.testImageBase64 or "https://via.placeholder.com/400x200.png?text=No+Image",
+                "url": image_url,
                 "content": vision_text,
             }
+
 
         if ui_meta is None:
             ui_meta = {}

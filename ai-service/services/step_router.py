@@ -6,6 +6,7 @@ Async route(session, message, app_state) -> dict matching the React response con
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import re
 from datetime import datetime, timezone
@@ -31,8 +32,14 @@ from services.prompt_generation import (
     generate_seo,
 )
 from services.requirement_router import OFF_TOPIC_RESPONSE
+from tools.web_search import get_web_search_tool
 
 COST_WARNING_THRESHOLD = 100
+
+# Minimal 1x1 PNG for CMS media upload during publish
+_PREVIEW_PNG_BYTES = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+)
 
 BUDGET_CHIP_OPTIONS = [
     "Free models only (0 coins)",
@@ -48,6 +55,34 @@ def _lower(msg: Any) -> str:
 
 def _normalize(msg: Any) -> str:
     return str(msg or "").strip()
+
+
+def _has_active_context(state: ConversationState) -> bool:
+    """True when the user is mid-flow building an app (not a cold start)."""
+    extraction = state.get("extraction") or {}
+    deep_answers = state.get("deep_answers") or {}
+    return bool(
+        state.get("app_type")
+        and (
+            state.get("form_confirmed")
+            or (state.get("current_step") or 0) > 0
+            or state.get("dynamic_context")
+            or extraction.get("appPurpose")
+            or deep_answers
+        )
+    )
+
+
+def _session_has_budget(extraction: dict | None, deep_answers: dict | None) -> bool:
+    """Check budget across all known session keys."""
+    ext = extraction or {}
+    deep = deep_answers or {}
+    return bool(
+        ext.get("budget")
+        or ext.get("budgetTier")
+        or deep.get("budgetPreference")
+        or deep.get("budgetTier")
+    )
 
 
 def _parse_multi_select_payload(msg: Any) -> dict | None:
@@ -511,26 +546,27 @@ def bypass_wizard_if_ready(session_context: dict, text: str = "") -> bool:
 
 
 def prefill_dynamic_context_variables(session: dict) -> None:
-    dynamic_context = session.get("dynamicContext") or {}
-    variables = dynamic_context.get("variables") or []
-    if not variables:
-        return
+    if not session.get("dynamicContext") or not isinstance(session["dynamicContext"], dict):
+        session["dynamicContext"] = {"variables": [], "options": []}
     
+    dynamic_context = session["dynamicContext"]
+    if "variables" not in dynamic_context or not isinstance(dynamic_context["variables"], list):
+        dynamic_context["variables"] = []
+        
+    variables = dynamic_context["variables"]
     extraction = session.get("extraction") or {}
     deep_answers = session.get("deepAnswers") or {}
     
     # Create a unified lookup dictionary
     lookup = {}
-    # 1. Start with extraction fields
     for k, v in extraction.items():
         if isinstance(v, str) and v.strip():
             lookup[k.lower().replace("_", " ")] = v.strip()
-    # 2. Update/override with deep answers
     for k, v in deep_answers.items():
         if not k.startswith("_") and isinstance(v, str) and v.strip():
             lookup[k.lower().replace("_", " ")] = v.strip()
             
-    # Also add direct mappings for universal dimensions
+    # Direct mappings for universal dimensions
     universal_mappings = {
         "subject": extraction.get("PRIMARY_SUBJECT"),
         "primary subject": extraction.get("PRIMARY_SUBJECT"),
@@ -551,55 +587,51 @@ def prefill_dynamic_context_variables(session: dict) -> None:
         if v and isinstance(v, str) and v.strip():
             lookup[k] = v.strip()
             
-    app_purpose = str(extraction.get("appPurpose") or "").lower()
-            
+    # Extract existing variables, filtering out bloat
     prefilled = []
+    existing_names = set()
+    bloat_patterns = [
+        r"date\s*of\s*creation", r"jump\s*scare", r"video\s*title", r"age\s*rating",
+        r"creation\s*date", r"scare\s*frequency", r"frequency"
+    ]
+    
     for var in variables:
         if not isinstance(var, dict):
             continue
-        var_name = str(var.get("name") or "").lower().strip()
-        
-        # Filter out default/template/legacy variables that are not explicitly extracted
-        bloat_patterns = [
-            r"date\s*of\s*creation", r"jump\s*scare", r"video\s*title", r"age\s*rating",
-            r"creation\s*date", r"scare\s*frequency", r"frequency"
-        ]
-        if any(re.search(pat, var_name) for pat in bloat_patterns):
+        var_name = str(var.get("name") or "").strip()
+        var_name_lower = var_name.lower()
+        if any(re.search(pat, var_name_lower) for pat in bloat_patterns):
             continue
             
         prefilled_value = None
-        
-        # Exact match
-        if var_name in lookup:
-            prefilled_value = lookup[var_name]
+        if var_name_lower in lookup:
+            prefilled_value = lookup[var_name_lower]
         else:
-            # Fuzzy check: does any key in lookup exist in var_name or vice versa
             for lookup_key, lookup_val in lookup.items():
-                if lookup_key in var_name or var_name in lookup_key:
+                if lookup_key in var_name_lower or var_name_lower in lookup_key:
                     prefilled_value = lookup_val
                     break
+                    
+        var_copy = dict(var)
+        var_copy["test_value"] = prefilled_value or var.get("test_value") or var.get("placeholder") or ""
+        prefilled.append(var_copy)
+        existing_names.add(var_name_lower)
         
-        # Check relevance
-        is_relevant = False
-        if prefilled_value:
-            is_relevant = True
-        else:
-            purpose_words = [w for w in re.findall(r'\b[a-z]{4,}\b', app_purpose) if w not in (
-                "want", "build", "create", "make", "app", "generator", "tool", "using"
-            )]
-            for word in purpose_words:
-                if word in var_name:
-                    is_relevant = True
-                    break
-            core_keywords = ["subject", "style", "tone", "topic", "concept", "details", "theme", "prompt", "inputs", "text"]
-            if any(k in var_name for k in core_keywords):
-                is_relevant = True
-                
-        if is_relevant:
+    # Ensure extracted universal dimensions are present in dynamicContext variables
+    for dim_key, dim_name in [
+        ("PRIMARY_SUBJECT", "Primary Subject"),
+        ("ENVIRONMENT_SETTING", "Environment Setting"),
+        ("ACTION_DYNAMIC", "Action Dynamic"),
+        ("AESTHETIC_STYLE", "Aesthetic Style"),
+    ]:
+        val = extraction.get(dim_key)
+        if val and isinstance(val, str) and val.strip() and dim_name.lower() not in existing_names:
             prefilled.append({
-                **var,
-                "test_value": prefilled_value or var.get("test_value") or var.get("placeholder") or ""
+                "name": dim_name,
+                "placeholder": f"Enter {dim_name.lower()}...",
+                "test_value": val.strip()
             })
+            existing_names.add(dim_name.lower())
             
     dynamic_context["variables"] = prefilled[:4]
     session["dynamicContext"] = dynamic_context
@@ -615,7 +647,8 @@ def _get_next_deep_question(session: dict) -> dict | None:
     if not session.get("deepAnswers"):
         session["deepAnswers"] = {}
     extraction = session.get("extraction") or {}
-    if not extraction.get("budget") and not session["deepAnswers"].get("budgetPreference"):
+    deep_answers = session.get("deepAnswers") or {}
+    if not _session_has_budget(extraction, deep_answers):
         return {
             "field": "budgetPreference",
             "question": "Last step before I pick models — what's your budget per generation?",
@@ -808,7 +841,19 @@ async def _build_step0_response(session: dict, text: str, app_state: Any) -> dic
                 rag_context=rag_context,
             )
 
-            if (session.get("triageRounds") or 0) >= 3 and triage_result.get("status") in (
+            required_slots = ['PRIMARY_SUBJECT', 'ENVIRONMENT_SETTING', 'ACTION_DYNAMIC', 'AESTHETIC_STYLE']
+            filled_slots = [s for s in required_slots if ext.get(s)]
+            is_detailed_prompt = len(filled_slots) >= 2 or (ext.get("appPurpose") and len(str(ext.get("appPurpose")).split()) > 6)
+            
+            if is_detailed_prompt:
+                logger.info("[Triage] Detailed prompt detected. Bypassing triage questions to show conversational summary.")
+                triage_result = {
+                    "status": "ready",
+                    "domain": triage_result.get("domain") or session.get("domainIdentified"),
+                    "app_format": triage_result.get("corrected_app_type") or session.get("appType") or "text",
+                    "form": None,
+                }
+            elif (session.get("triageRounds") or 0) >= 3 and triage_result.get("status") in (
                 "needs_context",
                 "needs_format",
             ):
@@ -879,29 +924,88 @@ async def _build_step0_response(session: dict, text: str, app_state: Any) -> dic
             prefill_dynamic_context_variables(session)
             await _save(session, app_state)
             
+            # Show conversational summary instead of form UI during triage/ideation phase
+            app_type_str = session.get("appType") or "text"
+            subject = ext.get("PRIMARY_SUBJECT")
+            setting = ext.get("ENVIRONMENT_SETTING")
+            action = ext.get("ACTION_DYNAMIC")
+            style = ext.get("AESTHETIC_STYLE")
+            
+            summary_parts = []
+            if subject: summary_parts.append(f"- **Primary Subject:** {subject}")
+            if setting: summary_parts.append(f"- **Environment/Setting:** {setting}")
+            if action: summary_parts.append(f"- **Action/Dynamic:** {action}")
+            if style: summary_parts.append(f"- **Aesthetic Style:** {style}")
+            
+            summary_str = "\n".join(summary_parts)
+            reply = (
+                f"I've started shaping your **{app_type_str.capitalize()}** application! "
+                f"Here is what I've understood so far:\n\n{summary_str}\n\n"
+                "Does this look correct? Once confirmed, we can select the AI model and budget."
+            )
             return {
-                "reply": "I've started with your idea, let's confirm the details.",
-                "uiType": "multi_select_form",
-                "uiData": session["dynamicContext"],
+                "reply": reply,
+                "uiType": "chips",
+                "uiData": {"options": ["Yes, looks good", "No, let me change something"]},
                 "nextStep": 0,
                 "coins": None,
             }
 
     if not session.get("formConfirmed"):
-        affirmations = ["yes", "sure", "ok", "yep", "yeah", "correct", "sounds good", "exactly", "perfect", "proceed", "looks good"]
         msg_clean = re.sub(r"[!.,?]+$", "", _lower(text).strip())
-        is_affirmation = msg_clean in affirmations
+        is_negation = any(
+            msg_clean == neg or msg_clean.startswith(neg + " ") or f" {neg} " in f" {msg_clean} "
+            for neg in ["no", "nope", "not", "incorrect", "wrong", "false", "don't"]
+        )
+        is_affirmation = False
+        if not is_negation:
+            is_affirmation = any(
+                msg_clean == aff or msg_clean.startswith(aff + " ") or f" {aff} " in f" {msg_clean} "
+                for aff in ["yes", "yep", "yeah", "correct", "looks good", "sounds good", "perfect", "exactly", "proceed", "sure", "ok"]
+            )
         
         if is_affirmation:
             session["formConfirmed"] = True
+            session["lastSlotKey"] = None  # Ensure we don't save the affirmation as a slot answer
             await _save(session, app_state)
         else:
+            # Check if they just said "no" or clicked "No, let me change something"
+            is_negation_only = msg_clean in ["no", "none", "nope", "let me change something", "no let me change something", "change something", "i want to change something"]
+            if is_negation_only:
+                return {
+                    "reply": "Sure! What would you like to change? Just tell me what to update or add.",
+                    "uiType": None,
+                    "uiData": None,
+                    "nextStep": 0,
+                    "coins": None,
+                }
+                
             prefill_dynamic_context_variables(session)
             await _save(session, app_state)
+            
+            # Show updated conversational summary
+            app_type_str = session.get("appType") or "text"
+            extraction = session.get("extraction") or {}
+            subject = extraction.get("PRIMARY_SUBJECT")
+            setting = extraction.get("ENVIRONMENT_SETTING")
+            action = extraction.get("ACTION_DYNAMIC")
+            style = extraction.get("AESTHETIC_STYLE")
+            
+            summary_parts = []
+            if subject: summary_parts.append(f"- **Primary Subject:** {subject}")
+            if setting: summary_parts.append(f"- **Environment/Setting:** {setting}")
+            if action: summary_parts.append(f"- **Action/Dynamic:** {action}")
+            if style: summary_parts.append(f"- **Aesthetic Style:** {style}")
+            
+            summary_str = "\n".join(summary_parts)
+            reply = (
+                f"Got it, I've updated the details for your **{app_type_str.capitalize()}** app:\n\n{summary_str}\n\n"
+                "Does this look correct now?"
+            )
             return {
-                "reply": "I've updated the details. Let's confirm the variables below.",
-                "uiType": "multi_select_form",
-                "uiData": session["dynamicContext"],
+                "reply": reply,
+                "uiType": "chips",
+                "uiData": {"options": ["Yes, looks good", "No, let me change something"]},
                 "nextStep": 0,
                 "coins": None,
             }
@@ -918,7 +1022,7 @@ async def _build_step0_response(session: dict, text: str, app_state: Any) -> dic
 
     extraction = session.get("extraction") or {}
     deep_answers = session.get("deepAnswers") or {}
-    has_budget = extraction.get("budget") or deep_answers.get("budgetPreference")
+    has_budget = _session_has_budget(extraction, deep_answers)
     if not has_budget:
         session["currentDeepField"] = "budgetPreference"
         session["awaitingDeepAnswer"] = True
@@ -1042,6 +1146,17 @@ async def _exec_generate_preview(session: dict, text: str, app_state: Any) -> di
 
         prefill_dynamic_context_variables(session)
 
+        model_name = session.get("modelName") or selected_model.get("name") or selected_model_id
+        search_query = f"{app_type} model {model_name} prompting guidelines optimal parameters"
+        try:
+            search_tool = get_web_search_tool()
+            search_result = await search_tool.search_and_summarize(search_query)
+            session["webSearchContext"] = search_result
+            logger.info(f"[WebSearch] Grounded preview prompt for {app_type}/{model_name}")
+            await _save(session, app_state)
+        except Exception as search_err:
+            logger.warning(f"[WebSearch] Preview grounding failed: {search_err}")
+
         prompt_data, seo_data = await asyncio.gather(
             generate_prompt_template(llm, session),
             generate_seo(llm, session),
@@ -1095,6 +1210,7 @@ async def _exec_generate_preview(session: dict, text: str, app_state: Any) -> di
                 ),
                 "ui_meta": ui_meta,
                 "options": ["Approve App", "Edit App"],
+                "step": 2,
             },
             "nextStep": 2,
             "coins": session.get("modelCost"),
@@ -1164,7 +1280,7 @@ async def _exec_pivot_app(session: dict, text: str, decision: dict, app_state: A
         session["currentDeepField"] = None
         await _save(session, app_state)
 
-        has_budget = (session.get("deepAnswers") or {}).get("budgetPreference") or extraction.get("budget")
+        has_budget = _session_has_budget(extraction, session.get("deepAnswers"))
         if has_budget:
             return await _show_models(session, app_state)
 
@@ -1286,6 +1402,7 @@ async def _exec_edit_app(session: dict, text: str, decision: dict, app_state: An
             "variables": (session.get("dynamicContext") or {}).get("variables") or [],
             "acceptImageInput": safe_image_input,
             "options": ["Approve App", "Edit App"],
+            "step": 2,
         },
         "nextStep": 2,
         "coins": session.get("modelCost"),
@@ -1316,10 +1433,29 @@ async def _exec_handle_budget(session: dict, text: str, decision: dict, app_stat
         if not session.get("formConfirmed"):
             prefill_dynamic_context_variables(session)
             await _save(session, app_state)
+            
+            app_type_str = session.get("appType") or "text"
+            extraction = session.get("extraction") or {}
+            subject = extraction.get("PRIMARY_SUBJECT")
+            setting = extraction.get("ENVIRONMENT_SETTING")
+            action = extraction.get("ACTION_DYNAMIC")
+            style = extraction.get("AESTHETIC_STYLE")
+            
+            summary_parts = []
+            if subject: summary_parts.append(f"- **Primary Subject:** {subject}")
+            if setting: summary_parts.append(f"- **Environment/Setting:** {setting}")
+            if action: summary_parts.append(f"- **Action/Dynamic:** {action}")
+            if style: summary_parts.append(f"- **Aesthetic Style:** {style}")
+            
+            summary_str = "\n".join(summary_parts)
+            reply = (
+                f"Budget updated to **{tier.capitalize()}**. Here are the details for your **{app_type_str.capitalize()}** app so far:\n\n{summary_str}\n\n"
+                "Does this look correct? Once confirmed, we can select the AI model."
+            )
             return {
-                "reply": "Budget updated. Let's confirm the details for your app below.",
-                "uiType": "multi_select_form",
-                "uiData": session["dynamicContext"],
+                "reply": reply,
+                "uiType": "chips",
+                "uiData": {"options": ["Yes, looks good", "No, let me change something"]},
                 "nextStep": 0,
                 "coins": None,
             }
@@ -1350,10 +1486,29 @@ async def _exec_change_model(session: dict, text: str, decision: dict, app_state
     if not session.get("formConfirmed"):
         prefill_dynamic_context_variables(session)
         await _save(session, app_state)
+        
+        app_type_str = session.get("appType") or "text"
+        extraction = session.get("extraction") or {}
+        subject = extraction.get("PRIMARY_SUBJECT")
+        setting = extraction.get("ENVIRONMENT_SETTING")
+        action = extraction.get("ACTION_DYNAMIC")
+        style = extraction.get("AESTHETIC_STYLE")
+        
+        summary_parts = []
+        if subject: summary_parts.append(f"- **Primary Subject:** {subject}")
+        if setting: summary_parts.append(f"- **Environment/Setting:** {setting}")
+        if action: summary_parts.append(f"- **Action/Dynamic:** {action}")
+        if style: summary_parts.append(f"- **Aesthetic Style:** {style}")
+        
+        summary_str = "\n".join(summary_parts)
+        reply = (
+            f"We will select the model after confirming your app details. Here is what we have so far:\n\n{summary_str}\n\n"
+            "Does this look correct? Once confirmed, we can select the AI model."
+        )
         return {
-            "reply": "We'll pick the model after confirming your app details. Please confirm the variables below first.",
-            "uiType": "multi_select_form",
-            "uiData": session["dynamicContext"],
+            "reply": reply,
+            "uiType": "chips",
+            "uiData": {"options": ["Yes, looks good", "No, let me change something"]},
             "nextStep": 0,
             "coins": None,
         }
@@ -1387,29 +1542,146 @@ async def _exec_change_model(session: dict, text: str, decision: dict, app_state
     }
 
 
+async def _rebuild_current_step_response(session: dict, app_state: Any, step: int) -> dict:
+    """Rebuild the UI response for the current workflow step without advancing."""
+    app_type = session.get("appType") or "text"
+    prompt_data = session.get("promptData") or {}
+    seo_data = session.get("seoData") or {}
+
+    if step >= 3:
+        return await _exec_review_seo(session, app_state)
+
+    if step == 2:
+        from routers.preview import _resolve_transformation_tool
+
+        combined_context = f"{prompt_data.get('userPrompt') or ''}\n\n{prompt_data.get('systemPrompt') or ''}"
+        blueprint = await _resolve_transformation_tool(combined_context, app_state)
+        if blueprint:
+            ui_meta = {
+                "show_upload": blueprint.get("show_upload", False),
+                "show_url_input": blueprint.get("show_url_input", False),
+                "active_tool": blueprint.get("tool_id"),
+                "layout_mode": blueprint.get("layout_mode", "static"),
+                "tool_id": blueprint.get("tool_id"),
+                "config": blueprint.get("config", {}),
+            }
+        else:
+            accept_img = _sanitize_accept_image_input(prompt_data.get("acceptImageInput"), app_type)
+            show_url = any(kw in combined_context.lower() for kw in ["url", "fetch", "scrap", "external", "link"])
+            ui_meta = {
+                "show_upload": accept_img,
+                "show_url_input": show_url,
+                "active_tool": "bg_remover" if ("remove background" in combined_context.lower() or "bg_remover" in combined_context.lower()) else None,
+                "layout_mode": "interactive" if (accept_img or show_url) else "static",
+                "tool_id": "bg_remover" if ("remove background" in combined_context.lower() or "bg_remover" in combined_context.lower()) else None,
+                "config": {},
+            }
+
+        return {
+            "reply": (
+                f"## App Preview Ready\n\nI've configured the full AI logic using **{session.get('modelName') or session.get('modelId')}**.\n\n"
+                "Test it in the Live Preview below — click **Approve App** when ready!"
+            ),
+            "uiType": "app_preview",
+            "uiData": {
+                "appName": seo_data.get("appName"),
+                "appType": app_type,
+                "appDescription": seo_data.get("appDescription"),
+                "cost": session.get("modelCost"),
+                "systemPrompt": prompt_data.get("systemPrompt"),
+                "userPrompt": prompt_data.get("userPrompt"),
+                "variablesUsed": prompt_data.get("variablesUsed"),
+                "variables": (session.get("dynamicContext") or {}).get("variables") or [],
+                "acceptImageInput": _sanitize_accept_image_input(
+                    prompt_data.get("acceptImageInput"), app_type
+                ),
+                "ui_meta": ui_meta,
+                "options": ["Approve App", "Edit App"],
+                "step": 2,
+            },
+            "nextStep": 2,
+            "coins": session.get("modelCost"),
+        }
+
+    if step == 1:
+        return await _show_models(session, app_state)
+
+    return {
+        "reply": "Let's continue shaping your app — tell me what you'd like to adjust.",
+        "uiType": None,
+        "uiData": None,
+        "nextStep": 0,
+        "coins": None,
+    }
+
+
 async def _handle_seo_publish(session: dict, card_data: dict, app_state: Any) -> dict:
     prompt_data = session.get("promptData") or {}
     seo_data = {**(session.get("seoData") or {}), **card_data}
     session["seoData"] = seo_data
 
-    payload = {
-        "appType": session.get("appType"),
-        "modelId": session.get("modelId"),
-        "costPerRun": session.get("modelCost"),
-        "systemPrompt": prompt_data.get("systemPrompt"),
-        "userPrompt": prompt_data.get("userPrompt"),
-        "negativePrompt": prompt_data.get("negativePrompt"),
-        "acceptImageInput": _sanitize_accept_image_input(
-            prompt_data.get("acceptImageInput"), session.get("appType")
-        ),
-        "appName": seo_data.get("appName"),
-        "appDescription": seo_data.get("appDescription"),
-        "tags": seo_data.get("tags"),
-        "publishedAt": datetime.now(timezone.utc).isoformat(),
-    }
+    app_name = seo_data.get("appName") or "Your App"
+    alt_text = str(seo_data.get("appDescription") or app_name)[:500]
+    media_id = None
 
     try:
-        await app_state.cms.create_rapp(payload)
+        safe_filename = re.sub(r"[^a-zA-Z0-9_-]", "_", app_name)[:40] or "app-preview"
+        media_result = await app_state.cms.upload_media(
+            _PREVIEW_PNG_BYTES,
+            filename=f"{safe_filename}-preview.png",
+            content_type="image/png",
+            alt=alt_text,
+        )
+        media_id = media_result.get("id") or (media_result.get("doc") or {}).get("id")
+        logger.info(f"[route] Media uploaded for publish: {media_id}")
+    except Exception as media_err:
+        logger.warning(f"[route] Media upload failed, publishing without image: {media_err}")
+
+    is_private = bool(
+        session.get("isPrivate") or session.get("is_private") or card_data.get("isPrivate")
+    )
+    variables_used = prompt_data.get("variablesUsed") or []
+    var_descriptions = prompt_data.get("variableDescriptions") or {}
+    prompt_variables = [
+        {"name": v, "description": var_descriptions.get(v, f"Enter {str(v).replace('_', ' ')}")}
+        for v in variables_used
+    ]
+
+    if is_private:
+        payload = {
+            "systemprompt": prompt_data.get("systemPrompt"),
+            "userprompt": prompt_data.get("userPrompt"),
+            "negativeprompt": prompt_data.get("negativePrompt"),
+            "priceapplicable": session.get("modelCost"),
+            "promptVariables": prompt_variables,
+            "appName": app_name,
+            "appDescription": seo_data.get("appDescription"),
+            "appType": session.get("appType"),
+            "modelId": session.get("modelId"),
+            "tags": seo_data.get("tags"),
+        }
+    else:
+        payload = {
+            "appType": session.get("appType"),
+            "modelId": session.get("modelId"),
+            "costPerRun": session.get("modelCost"),
+            "systemPrompt": prompt_data.get("systemPrompt"),
+            "userPrompt": prompt_data.get("userPrompt"),
+            "negativePrompt": prompt_data.get("negativePrompt"),
+            "acceptImageInput": _sanitize_accept_image_input(
+                prompt_data.get("acceptImageInput"), session.get("appType")
+            ),
+            "appName": app_name,
+            "appDescription": seo_data.get("appDescription"),
+            "tags": seo_data.get("tags"),
+            "publishedAt": datetime.now(timezone.utc).isoformat(),
+        }
+
+    if media_id:
+        payload["images"] = [{"image": media_id}]
+
+    try:
+        await app_state.cms.create_rapp(payload, private=is_private)
     except Exception as err:
         logger.error(f"[route] CMS publish failed: {err}")
         return {
@@ -1428,10 +1700,11 @@ async def _handle_seo_publish(session: dict, card_data: dict, app_state: Any) ->
         await app_state.session.delete_session(session_id)
 
     app_name = seo_data.get("appName") or "Your App"
+    publish_target = "your private registry" if is_private else "the marketplace"
     return {
         "reply": (
-            f'## 🎉 Published Successfully!\n\nYour app **"{app_name}"** is now live!\n\n'
-            f"- **Cost per run:** {payload['costPerRun']} coins\n"
+            f'## 🎉 Published Successfully!\n\nYour app **"{app_name}"** is now live on {publish_target}!\n\n'
+            f"- **Cost per run:** {session.get('modelCost')} coins\n"
             "- **Status:** ✅ Live 🚀"
         ),
         "uiType": "success",
@@ -1439,7 +1712,7 @@ async def _handle_seo_publish(session: dict, card_data: dict, app_state: Any) ->
             "appName": app_name,
             "modelId": session.get("modelId"),
             "modelName": session.get("modelName") or session.get("modelId"),
-            "costPerRun": payload["costPerRun"],
+            "costPerRun": session.get("modelCost"),
             "tags": seo_data.get("tags"),
             "mockUrl": f"https://rentprompts.ai/app/demo-{int(datetime.now(timezone.utc).timestamp() * 1000)}",
         },
@@ -1691,6 +1964,43 @@ async def off_topic_handler_node(state: ConversationState, config: dict) -> dict
     return {
         "response_payload": result,
     }
+
+
+async def off_topic_inline_node(state: ConversationState, config: dict) -> dict:
+    """Answer off-topic questions inline while preserving the current workflow step."""
+    app_state = config["configurable"]["app_state"]
+    message = state.get("message", "")
+
+    system_prompt = (
+        "You are RentPrompts App Architect. The user is mid-flow building an AI app "
+        "but asked a general side question. Answer it naturally and concisely in 2-4 sentences. "
+        "Do NOT restart onboarding or ask for budget/model selection."
+    )
+    messages = [{"role": "system", "content": system_prompt}]
+    for m in state.get("history", []):
+        role = m.get("role") if isinstance(m, dict) else m.type
+        content = m.get("content") if isinstance(m, dict) else m.content
+        messages.append({"role": role, "content": content})
+    messages.append({"role": "user", "content": message})
+    messages = messages[:1] + messages[-9:]
+
+    try:
+        completion = await app_state.llm.groq_completion(messages, model="llama-3.3-70b-versatile")
+        inline_answer = completion["choices"][0]["message"]["content"]
+    except Exception as e:
+        logger.warning(f"Off-topic inline completion failed: {e}")
+        inline_answer = (
+            "Happy to help! RentPrompts lets you design, test, and publish custom AI apps. "
+            "We can pick up right where we left off on your app."
+        )
+
+    temp_session = {}
+    _state_to_session(state, temp_session)
+    step = state.get("current_step") or 0
+    step_response = await _rebuild_current_step_response(temp_session, app_state, step)
+    step_response["reply"] = f"{inline_answer.strip()}\n\n---\n\n{step_response.get('reply', '')}"
+
+    return {"response_payload": step_response}
 
 
 async def ideation_triage_node(state: ConversationState, config: dict) -> dict:
@@ -2074,12 +2384,14 @@ def route_by_conversational_intent(state: ConversationState) -> str:
     if action in ("SHOW_MODEL_CARDS", "GENERATE_PREVIEW"):
         extraction = state.get("extraction") or {}
         deep_answers = state.get("deep_answers") or {}
-        has_budget = bool(extraction.get("budget") or deep_answers.get("budgetPreference"))
-        
+        has_budget = _session_has_budget(extraction, deep_answers)
+
         if not is_form_confirmed or not has_budget:
             return "ideation_triage_node"
-            
+
     if action == "HANDLE_OFF_TOPIC":
+        if _has_active_context(state):
+            return "off_topic_inline_node"
         return "off_topic_handler_node"
     if action == "HANDLE_VIOLATION":
         return "handle_violation_node"
@@ -2124,6 +2436,7 @@ def build_orchestrator_graph() -> StateGraph:
     # Add nodes
     graph.add_node("intent_classifier_node", intent_classifier_node)
     graph.add_node("off_topic_handler_node", off_topic_handler_node)
+    graph.add_node("off_topic_inline_node", off_topic_inline_node)
     graph.add_node("ideation_triage_node", ideation_triage_node)
     graph.add_node("form_submission_node", form_submission_node)
     graph.add_node("model_selection_node", model_selection_node)
@@ -2152,6 +2465,7 @@ def build_orchestrator_graph() -> StateGraph:
         route_by_conversational_intent,
         {
             "off_topic_handler_node": "off_topic_handler_node",
+            "off_topic_inline_node": "off_topic_inline_node",
             "ideation_triage_node": "ideation_triage_node",
             "form_submission_node": "form_submission_node",
             "model_selection_node": "model_selection_node",
@@ -2175,6 +2489,7 @@ def build_orchestrator_graph() -> StateGraph:
     
     # Leaf links to END
     graph.add_edge("off_topic_handler_node", END)
+    graph.add_edge("off_topic_inline_node", END)
     graph.add_edge("ideation_triage_node", END)
     graph.add_edge("form_submission_node", END)
     graph.add_edge("model_selection_node", END)

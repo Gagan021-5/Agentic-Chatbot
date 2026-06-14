@@ -96,11 +96,13 @@ class PayloadCMSClient:
         file_bytes: bytes,
         filename: str,
         content_type: str = "image/png",
+        alt: str = "",
     ) -> dict:
         """POST /api/media — multipart file upload for preview images."""
         try:
             # Multipart upload — Payload CMS expects 'file' field
             files = {"file": (filename, file_bytes, content_type)}
+            data = {"alt": alt} if alt else None
             # Remove Content-Type header for multipart (httpx sets it with boundary)
             headers = dict(self._client.headers)
             headers.pop("Content-Type", None)
@@ -108,6 +110,7 @@ class PayloadCMSClient:
             resp = await self._client.post(
                 "/api/media",
                 files=files,
+                data=data,
                 headers=headers,
             )
             resp.raise_for_status()

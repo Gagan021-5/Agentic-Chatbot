@@ -118,8 +118,19 @@ export default function AppPreviewCard({ data, onSendMessage, sessionId, storage
 
   if (!data) return null;
 
+  const isStep2 = data?.step === 2 || data?.status === 'ready' || data?.session_status === 'ready';
+
   // Support both data.variables (new) and data.variablesUsed (existing)
-  const rawVariables = (data.variables && data.variables.length > 0) ? data.variables : (data.variablesUsed || []);
+  const rawVariables = ((data.variables && data.variables.length > 0) ? data.variables : (data.variablesUsed || []))
+    .filter(v => {
+      const varName = typeof v === 'object' ? v.name : String(v || "").replace(/^\$\$/, "").replace(/\$\$$/, "");
+      const varNameLower = varName.toLowerCase();
+      const bloatPatterns = [
+        /date\s*of\s*creation/i, /jump\s*scare/i, /video\s*title/i, /age\s*rating/i,
+        /creation\s*date/i, /scare\s*frequency/i, /frequency/i
+      ];
+      return !bloatPatterns.some(pat => pat.test(varNameLower));
+    });
   const normalizedVariables = rawVariables.map((v) => {
     if (typeof v === 'object' && v.name) return v.name;
     return String(v || "").replace(/^\$\$/, "").replace(/\$\$$/, "");
@@ -275,7 +286,7 @@ export default function AppPreviewCard({ data, onSendMessage, sessionId, storage
         )}
 
         {/* ─── Live Preview Mode ─── */}
-        {isPreviewMode && (
+        {isPreviewMode && isStep2 && (
           <div className="space-y-4 bg-[#0a0a0f] p-5 rounded-xl border border-purple-500/15">
             <div className="flex items-center justify-between flex-wrap gap-2">
               <div className="flex items-center gap-2">
@@ -616,17 +627,19 @@ export default function AppPreviewCard({ data, onSendMessage, sessionId, storage
       <div className="p-5 bg-[#0a0a0f] border-t border-white/[0.06]">
         {!isEditing ? (
           <div className="flex flex-wrap gap-2 items-center">
-            {/* Live Preview toggle always present */}
-            <button
-              onClick={() => setIsPreviewMode(!isPreviewMode)}
-              className={`px-4 py-2.5 rounded-xl text-sm font-medium transition-all duration-300 ease-in-out border ${
-                isPreviewMode
-                  ? 'bg-[#2a2238] text-white border-[#3b2d50]'
-                  : 'bg-transparent text-[#a77bf3] border-[#5a32a3] hover:bg-[#2a2238]'
-              }`}
-            >
-              {isPreviewMode ? '✕ Close Preview' : '⚡ Live Preview'}
-            </button>
+            {/* Live Preview toggle only present when on Step 2 (Live Preview) */}
+            {isStep2 && (
+              <button
+                onClick={() => setIsPreviewMode(!isPreviewMode)}
+                className={`px-4 py-2.5 rounded-xl text-sm font-medium transition-all duration-300 ease-in-out border ${
+                  isPreviewMode
+                    ? 'bg-[#2a2238] text-white border-[#3b2d50]'
+                    : 'bg-transparent text-[#a77bf3] border-[#5a32a3] hover:bg-[#2a2238]'
+                }`}
+              >
+                {isPreviewMode ? '✕ Close Preview' : '⚡ Live Preview'}
+              </button>
+            )}
 
             {/* Action buttons driven by data.options — only what the backend sends */}
             {(data.options || []).map((option) => {

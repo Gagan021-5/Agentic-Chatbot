@@ -329,5 +329,8 @@ class PollinationsVideoService:
     def generate_video_url(prompt: str) -> str:
         """Constructs the Pollinations video URL directly."""
         from urllib.parse import quote
+        import hashlib
         clean_prompt = quote(prompt.strip())
-        return f"https://pollinations.ai/p/{clean_prompt}?model=video&width=1024&height=576"
+        h = int(hashlib.md5(prompt.encode('utf-8')).hexdigest(), 16) % 1000000
+        return f"https://gen.pollinations.ai/video/{clean_prompt}?width=1024&height=576&seed={h}"
+
