@@ -609,9 +609,17 @@ async def _build_step0_response(session: dict, text: str, app_state: Any) -> dic
                 if len(question) >= 10:
                     session["triageRounds"] = (session.get("triageRounds") or 0) + 1
                     session["lastQuestion"] = question
+                    if not session.get("deepAnswers"):
+                        session["deepAnswers"] = {}
+                    session["deepAnswers"]["_lastTriageQuestion"] = question
                     await _save(session, app_state)
+                    
                     suggested = triage_result.get("suggested_options")
-                    has_chips = isinstance(suggested, list) and len(suggested) >= 2
+                    is_format_question = suggested and all(
+                        s.lower() in ("text", "image", "audio", "video", "vision") 
+                        for s in suggested
+                    )
+                    has_chips = is_format_question and isinstance(suggested, list) and len(suggested) >= 2
                     return {
                         "reply": question,
                         "uiType": "chips" if has_chips else None,

@@ -128,7 +128,7 @@ After domain is confirmed, extract 3–6 variables:
 🤖 CHATBOT BEHAVIOR & QUESTION RULE:
 - Behave like a natural, friendly chatbot (like Claude, Grok, ChatGPT). Use conversational, helpful phrasing in your questions.
 - If the output format/app type is ambiguous, or you are confused/uncertain, set status to "needs_context", confidence_score < 80, ask a friendly question to clarify the type of output they want, and return suggested_options = ["Text", "Image", "Audio", "Video", "Vision"].
-- For other domain clarifications, you can provide 2-5 simple options in suggested_options to be shown as clickable choice chips.
+- Only include suggested_options when asking about output format (text/image/audio/video/vision). For all other questions (style, audience, use-case), ask naturally in conversational prose with examples inline (e.g. "like portraits, products, or landscapes?") — do NOT return suggested_options.
 - Otherwise, if confidence >= 80, set status = "ready", question = null, and suggested_options = null.
 
 Every response must be valid JSON only and include:
@@ -543,15 +543,31 @@ async def triage_dynamic_context(
 
     answered_context = ""
     if deep_answers and len(deep_answers) > 0:
-        answered_context = f"\nAlready answered by user: {json.dumps(deep_answers)}"
+        clean = {k: v for k, v in deep_answers.items() if not k.startswith("_")}
+        last_q = deep_answers.get("_lastTriageQuestion", "")
+        answered_context = (
+            f"\nAlready answered by user: {json.dumps(clean)}"
+            f"\nLast question you asked: {last_q}"
+        ) if clean or last_q else ""
+
+    last_question_asked = ""
+    if history:
+        for m in reversed(history):
+            role = str(m.get("role","")).lower()
+            if role in ("assistant", "agent"):
+                last_question_asked = str(m.get("content",""))
+                break
 
     user_task = (
         f'Current app idea: "{safe_purpose}"\n'
-        f'Current app type: "{format_fallback}". If the conversation clearly indicates a DIFFERENT output type, correct it by including corrected_app_type.\n'
+        f'Current app type: "{format_fallback}".\n'
         f"Language: {safe_lang}.{answered_context}\n\n"
-        "Review the conversation history. If the user's description is broad or general (e.g. 'logo creator', 'resume builder'), you MUST ask exactly one friendly question with 2-3 inline bolded choices to clarify specific preferences (such as style, aesthetic, target audience, tone) and return status = 'needs_context'. Do NOT set status = 'ready' on the very first turn of a broad description.\n"
-        "Otherwise, if you already have clear, specific context on what the app does and what custom inputs it needs, return status = 'ready' with 3-6 domain-appropriate variables immediately.\n"
-        "Do NOT over-interview once details are specific."
+        f'IMPORTANT: The conversation history above already contains user answers. '
+        f'{"Last question you asked: " + last_question_asked if last_question_asked else ""}\n'
+        f'DO NOT repeat a question already answered in history.\n'
+        f'If user already answered use_case/style/target — count that as known, move to next unknown or go ready.\n'
+        "Return status='ready' once you have: use_case + at least one preference detail.\n"
+        "Otherwise ask ONE new question about something not yet answered."
     )
 
     triage_messages = [
