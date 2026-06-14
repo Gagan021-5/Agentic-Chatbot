@@ -88,8 +88,8 @@ Return ONLY valid JSON. No markdown. No explanation.
 
 ALLOWED_TRIAGE_APP_FORMATS = ["text", "image", "audio", "video", "vision"]
 
-TRIAGE_INSTRUCTION = """You are the RentPrompts Product Discovery Architect.
-Your job is to listen to the user's AI application concept and engage in a natural, high-level product engineering consultation.
+TRIAGE_INSTRUCTION = """You are the Context Triage Node inside a LangGraph framework grounded dynamically via a ChromaDB vector store.
+Your job is to check if we have enough parameters to build the custom application architecture blueprint.
 
 Act like an expert Product Manager from OpenAI or Anthropic. Your goal is to figure out the target blueprint requirements through dynamic fluid conversation.
 
@@ -99,15 +99,17 @@ CRITICAL BEHAVIOR POLICIES:
 - Always ask exactly ONE friendly, conversational, open-ended question tailored precisely to their niche. If they want a resume tool, ask about specific template goals or CV constraints. Do not ask generic SaaS boilerplate questions.
 - If the user's core intent, domain context, and functional specifications are clear, set status = "ready".
 
-Return strict JSON only:
+ANTI-LOOP PROTECTION:
+- You must read the already captured attributes. If fields like tone, length, theme, or audience are already populated from previous turns, do NOT ask for them again. Ensure you choose a different missing attribute if needed, or set status to "ready".
+
+Return strict JSON only (no markdown, no other text):
 {
   "status": "needs_context|ready",
+  "question": "Clear natural follow-up question if needs_context, else null",
+  "slot_key": "The snake_case key variable name for state mapping, else null",
+  "corrected_app_type": "Retain the incoming specialized app type string (text|image|audio|video|vision)",
   "domain_identified": "text|image|audio|video|vision|hybrid",
   "confidence_score": 0-100,
-  "corrected_app_type": "text|image|audio|video|vision|null",
-  "question": "your natural conversational question string or null",
-  "slot_key": "contextual_missing_parameter_name or null",
-  "suggested_options": null,
   "form": {
     "options": ["4 concise feature options"],
     "variables": [
@@ -212,8 +214,19 @@ def _prettify_variable_name(name: str, app_type: str) -> str:
     return " ".join(w.capitalize() for w in clean.split())
 
 
+def is_personal_boilerplate(name: str, app_purpose: str) -> bool:
+    n = name.lower()
+    p = app_purpose.lower()
+    boilerplate = ["user name", "username", "date of birth", "dob", "birth date", "age", "current date", "today's date"]
+    for kw in boilerplate:
+        if kw in n:
+            if kw not in p:
+                return True
+    return False
+
+
 def _sanitize_variable_objects(
-    items: Any, min_len: int, max_len: int, fallback: list[dict], app_type: str
+    items: Any, min_len: int, max_len: int, fallback: list[dict], app_type: str, app_purpose: str = ""
 ) -> list[dict]:
     normalized: list[dict] = []
     if isinstance(items, list):
@@ -234,6 +247,8 @@ def _sanitize_variable_objects(
             else:
                 continue
             if not obj["name"]:
+                continue
+            if is_personal_boilerplate(obj["name"], app_purpose):
                 continue
             key = obj["name"].lower()
             if key in seen:
@@ -303,7 +318,7 @@ def _parse_dynamic_context_payload(
         return {
             "options": _sanitize_string_list(parsed.get("options"), 4, 4, fallback["options"]),
             "variables": _sanitize_variable_objects(
-                parsed.get("variables"), 3, 8, fallback["variables"], app_type
+                parsed.get("variables"), 3, 8, fallback["variables"], app_type, app_purpose
             ),
         }
     except Exception:
@@ -388,7 +403,7 @@ def _parse_triage_response(
             {
                 "options": _sanitize_string_list(options_raw, 4, 4, fallback_form["options"]),
                 "variables": _sanitize_variable_objects(
-                    variables_raw, 3, 8, fallback_form["variables"], effective_type
+                    variables_raw, 3, 8, fallback_form["variables"], effective_type, safe_purpose
                 ),
             },
             confidence,
@@ -521,14 +536,12 @@ Generate compact, highly relevant runtime user input fields and variable require
 {LANGUAGE_MIRROR_DIRECTIVE}
 
 VARIABLE EXTRACTOR RULES:
-1. Analyze the application purpose and extract 3-4 highly specific runtime variables that the end-user MUST fill out to make the app work.
-2. For an Audio/Podcast news app, fields should be things like 'News Category', 'Summary Length', or 'Target Country'. 
-3. NEVER generate boilerplate personal fields like 'Date of Birth', 'User Name', 'Age', or 'Creation Date' unless explicitly demanded by the user prompt.
-4. Name constraints: Ensure every variable name is explicit human language. Avoid abstract generic keys like 'input', 'text', 'data', or 'param'.
-5. Always generate a highly relevant placeholder matching the field.
+1. ZERO PERSONAL BOILERPLATE: NEVER generate generic personal variables like 'User Name', 'Date of Birth', 'Age', or 'Current Date' unless the app specifically asks for them.
+2. DOMAIN-AWARE ATTRIBUTES: For a motivational generator, generate fields like 'Speech Length', 'Target Industry', 'Speaker Tone'. For a text-to-speech engine, generate 'Script Theme', 'Voice Accent Style'.
+3. Output variable names inside the JSON array must be explicitly formatted using alphanumeric symbols with matching descriptive placeholders.
 
-Output must be strict JSON with this exact layout shape (do not repeat the example values, make them contextual to the app purpose):
-{{"options":["4 concise feature options"],"variables":[{{"name":"Context Field Name","placeholder":"Contextual realistic sample value"}}]}}
+Output layout shape (do not use generic keys or generic text placeholders, tailor them to the custom app domain):
+{{"options":["3-4 feature flags"],"variables":[{{"name":"Context Parameter Name","placeholder":"Contextual realistic sample placeholder"}}]}}
 No markdown code fences. No conversational explanations."""
 
     user_prompt = (

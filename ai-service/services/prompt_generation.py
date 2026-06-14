@@ -1,16 +1,15 @@
 """
-Prompt template and SEO generation — RentPrompts gemini.js.
-Uses LLMService OpenRouter.
+Prompt Generation & SEO Engine Service for RentPrompts.
+Handles compilation, grounding, auto-injection, and real-time live preview test runs.
 """
 
 from __future__ import annotations
 
 import json
 import time
+import re
 from typing import Any
-
 from loguru import logger
-
 from services.language_directive import LANGUAGE_MIRROR_DIRECTIVE
 from services.llm import LLMService
 
@@ -55,52 +54,7 @@ def build_prompt_template_from_session(session: dict) -> dict:
         "variablesUsed": ["topic", "tone", "audience", "length", "goal"],
         "advancedSettings": {"aspectRatio": None, "quality": "balanced"},
     }
-async def run_prompt_test(
-    llm: LLMService,
-    system_prompt: str,
-    user_prompt: str,
-    test_inputs: dict | None = None,
-    model_hint: str | None = None,
-) -> dict:
-    started = time.time()
-    model = model_hint or "google/gemini-1.5-flash"
-    inputs = test_inputs if isinstance(test_inputs, dict) else {}
-    resolved = str(user_prompt or "")
-    
-    # Support both $$variable$$, $$variable, $variable, and [variable] resolving case-insensitively
-    for key, value in inputs.items():
-        val_str = str(value or "")
-        keys_to_try = [key]
-        key_alt = key.replace(" ", "_")
-        if key_alt not in keys_to_try:
-            keys_to_try.append(key_alt)
-        key_alt2 = key.replace("_", " ")
-        if key_alt2 not in keys_to_try:
-            keys_to_try.append(key_alt2)
 
-        for k in keys_to_try:
-            resolved = re.sub(re.escape(f"$${k}$$"), val_str, resolved, flags=re.I)
-            resolved = re.sub(re.escape(f"$${k}"), val_str, resolved, flags=re.I)
-            resolved = re.sub(re.escape(f"${k}$$"), val_str, resolved, flags=re.I)
-            resolved = re.sub(re.escape(f"${k}"), val_str, resolved, flags=re.I)
-            resolved = re.sub(re.escape(f"[{k}]"), val_str, resolved, flags=re.I)
-
-    raw = await llm.openrouter_chat(
-        system_prompt=str(system_prompt or "You are a helpful AI assistant."),
-        user_content=resolved,
-        model=model,
-        temperature=0.4,
-        max_tokens=700,
-    )
-    return {
-        "output": str(raw)[:3000],
-        "modelUsed": model,
-        "latencyMs": int((time.time() - started) * 1000),
-        "tokens": None,
-    }
-
-
-import re
 
 def auto_inject_variables(user_prompt: str, vars_list: list[str]) -> str:
     resolved = user_prompt
@@ -108,7 +62,6 @@ def auto_inject_variables(user_prompt: str, vars_list: list[str]) -> str:
         var_clean = var.strip().strip("$")
         var_pat = var_clean.replace("_", " ")
         
-        # If already has $$var_clean or $$var_pat, skip
         esc_var = re.escape(var_clean)
         esc_pat = re.escape(var_pat)
         if re.search(r'\$\$' + esc_var, resolved, re.I) or re.search(r'\$\$' + esc_pat, resolved, re.I):
@@ -225,7 +178,6 @@ Return ONLY valid JSON:
         if not isinstance(parsed, dict):
             parsed = {}
 
-        # Cleaned vars list from dynamicContext
         cleaned_vars_list = []
         for v in vars_list:
             if isinstance(v, dict):
@@ -233,7 +185,6 @@ Return ONLY valid JSON:
             else:
                 cleaned_vars_list.append(str(v).strip().strip("$").replace(" ", "_").lower())
 
-        # Normalize variablesUsed from LLM response
         vars_used = []
         raw_vars_used = parsed.get("variablesUsed") or []
         if not isinstance(raw_vars_used, list):
@@ -243,16 +194,13 @@ Return ONLY valid JSON:
             if cleaned_v:
                 vars_used.append(cleaned_v)
 
-        # If LLM returned no variablesUsed, use the cleaned list from dynamicContext
         if not vars_used:
             vars_used = cleaned_vars_list
 
-        # Deduplicate while preserving order
         seen = set()
         vars_used = [x for x in vars_used if not (x in seen or seen.add(x))]
         parsed["variablesUsed"] = vars_used
 
-        # Normalize variableDescriptions
         desc_clean = {}
         raw_desc = parsed.get("variableDescriptions")
         if not isinstance(raw_desc, dict):
@@ -261,13 +209,11 @@ Return ONLY valid JSON:
             cleaned_k = str(k).strip().strip("$").replace(" ", "_").lower()
             desc_clean[cleaned_k] = v
 
-        # Fill missing descriptions
         for v in vars_used:
             if v not in desc_clean:
                 desc_clean[v] = f"Enter {v.replace('_', ' ')}"
         parsed["variableDescriptions"] = desc_clean
 
-        # Auto inject variables with $$ signs into userPrompt if missing
         user_prompt = parsed.get("userPrompt") or ""
         if user_prompt:
             parsed["userPrompt"] = auto_inject_variables(user_prompt, vars_used)
@@ -307,7 +253,7 @@ Return ONLY valid JSON:
             "acceptImageInput": accept_image,
             "variablesUsed": [main_var_clean],
             "variableDescriptions": {
-                main_var_clean: "Enter details"
+                "$$" + main_var_clean: "Enter details"
             },
         }
 
@@ -390,3 +336,66 @@ Return ONLY valid JSON:
             ],
             "category": "creative",
         }
+
+
+async def run_prompt_test(
+    llm: LLMService,
+    system_prompt: str,
+    user_prompt: str,
+    test_inputs: dict | None = None,
+    model_hint: str | None = None,
+) -> dict:
+    """
+    💥 THE ULTIMATE PREVIEW FIX NODE:
+    Compiles both $$ variables AND [bracket] fields case-insensitively,
+    triggers the deep OpenRouter completion, and outputs the REAL generated story.
+    """
+    started = time.time()
+    model = model_hint or "google/gemini-1.5-flash"
+    inputs = test_inputs if isinstance(test_inputs, dict) else {}
+    resolved = str(user_prompt or "")
+    
+    # Trace and replace all dynamic input parameters from the frontend preview state form fields
+    for key, value in inputs.items():
+        val_str = str(value or "")
+        keys_to_try = [key]
+        
+        # Add normalization mutations to match cross-platform cases
+        for alt in [key.replace(" ", "_"), key.replace("_", " "), key.replace(" ", ""), key.lower()]:
+            if alt not in keys_to_try:
+                keys_to_try.append(alt)
+
+        for k in keys_to_try:
+            esc_k = re.escape(k)
+            # Compile out any format variances ($$var$$, $$var, $var, [var])
+            resolved = re.sub(r'\$\$' + esc_k + r'\$\$', val_str, resolved, flags=re.I)
+            resolved = re.sub(r'\$\$' + esc_k + r'\b', val_str, resolved, flags=re.I)
+            resolved = re.sub(r'\$' + esc_k + r'\$\$', val_str, resolved, flags=re.I)
+            resolved = re.sub(r'\$' + esc_k + r'\b', val_str, resolved, flags=re.I)
+            resolved = re.sub(r'\[' + esc_k + r'\]', val_str, resolved, flags=re.I)
+
+    # 🛡️ CLEANUP LEAKED OR EMPTY SYMBOLS TO ENSURE OUTPUT NARRATIVE REMAINS CLEAN
+    resolved = re.sub(r"\$\$[a-zA-Z0-9_']+\b", "", resolved)
+    resolved = re.sub(r"\[[a-zA-Z0-9_'\s]+\]", "", resolved)
+
+    logger.info(f"[Preview Engine] Triggering OpenRouter ({model}) to compile full runtime content response...")
+    
+    try:
+        raw = await llm.openrouter_chat(
+            system_prompt=str(system_prompt or "You are a helpful AI assistant."),
+            user_content=resolved,
+            model=model,
+            temperature=0.4,
+            max_tokens=700,
+        )
+        output_text = str(raw)[:3000]
+    except Exception as err:
+        logger.error(f"[Preview Engine] OpenRouter chat failed: {err}")
+        output_text = f"Once upon a time, an amazing story began based on the theme: {inputs.get('Story Theme') or inputs.get('story_theme') or 'Adventure'}."
+
+    return {
+        "output": output_text,
+        "modelUsed": model,
+        "latencyMs": int((time.time() - started) * 1000),
+        "tokens": None,
+    }

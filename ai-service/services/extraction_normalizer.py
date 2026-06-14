@@ -32,20 +32,30 @@ def detect_budget(message: str) -> tuple[str | None, str]:
 
 def infer_app_type(message: str) -> tuple[str | None, str]:
     lower = message.lower()
+    # Check compound target media conversion patterns first (e.g. text to audio, image to video)
+    if re.search(r"(text\s*to\s*(audio|speech|voice|sound|tts|music|mp3|podcast|song))", lower) or "tts" in lower or "text-to-speech" in lower or "text-to-audio" in lower:
+        return "audio", "HIGH"
+    if re.search(r"((image|photo|picture)\s*to\s*video)", lower) or "photo animation" in lower:
+        return "video", "HIGH"
+    if re.search(r"(text\s*to\s*(image|photo|picture|logo|poster|art|avatar|design))", lower):
+        return "image", "HIGH"
+    if re.search(r"((image|photo|picture)\s*to\s*(text|data|csv|json|words|ocr))", lower) or "ocr" in lower:
+        return "vision", "HIGH"
+
     if re.search(r"(video|animate|reel|cinematic|movie)", lower):
         return "video", "HIGH"
+    if re.search(r"(voice|audio|music|podcast|song|speech)", lower):
+        return "audio", "HIGH"
+    if re.search(r"(image|photo|picture|poster|thumbnail|logo|design|drawing|banner|card)", lower):
+        return "image", "HIGH"
+    if re.search(r"(vision|analy(s|z)e|ocr|scan|detect|inspect|read from image)", lower):
+        return "vision", "HIGH"
     if re.search(
         r"(blog|write|writer|copy|text|article|caption|planner|workout|meal|diet|"
         r"itinerary|guide|report|advocate|legal|lawyer|law|document|draft|summary)",
         lower,
     ):
         return "text", "HIGH"
-    if re.search(r"(image|photo|picture|poster|thumbnail|logo|design)", lower):
-        return "image", "HIGH"
-    if re.search(r"(voice|audio|music|podcast|song|speech)", lower):
-        return "audio", "HIGH"
-    if re.search(r"(vision|analy(s|z)e|ocr|scan|detect|inspect)", lower):
-        return "vision", "HIGH"
     return None, "LOW"
 
 
@@ -92,6 +102,9 @@ def normalize_extraction(raw: dict | None, fallback_message: str = "") -> dict:
     app_type = None
     if raw and raw.get("appType") in valid_types:
         app_type = raw["appType"]
+        # Override generic "text" if we inferred a more specific target media format from the user input
+        if app_type == "text" and inferred_type in ("audio", "video", "image", "vision"):
+            app_type = inferred_type
     else:
         app_type = inferred_type
 
