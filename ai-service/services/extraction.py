@@ -515,25 +515,26 @@ async def generate_dynamic_context(
     safe_purpose = str(app_purpose or "").strip() or "general assistant app"
     safe_lang = _normalize_language_hint(language_hint)
 
+    # ─── 🛡️ GENERIC CONTEXT CONSTRAINTS (NO HARDCODED DOB/BLOAT) ───
     system_prompt = f"""You are a strict JSON generator.
-Generate compact, practical setup suggestions for an AI app idea.
+Generate compact, highly relevant runtime user input fields and variable requirements for a custom AI app idea.
 {LANGUAGE_MIRROR_DIRECTIVE}
-When generating 'variables', you MUST include a 'placeholder' key.
-- If the variable name contains 'Date', placeholder MUST be 'DD/MM/YYYY'.
-- If the variable name contains 'Time', placeholder MUST be 'HH:MM AM/PM'.
-- If the variable name contains 'Place' or 'Location', placeholder MUST be 'City, Country'.
-- For everything else, use a relevant example.
-NEVER use 'Enter details...' as a placeholder for date, time, or location fields.
-- 🚨 CRITICAL SCHEMA STRUCTURING CONSTRAINT: Every extracted variable name MUST be translated into explicit human language. You are strictly prohibited from generating variables named 'input', 'text', 'data', 'variables', 'param', or 'main_input'. If the application parses legal domains, map to fields like 'incident_details' or 'dispute_context'. If editing visual elements, map strictly to fields like 'target_aesthetic' or 'canvas_dimensions'.
-Output must be strict JSON with this exact shape:
-{{"options":["4 concise feature options"],"variables":[{{"name":"Date of Birth","placeholder":"DD/MM/YYYY"}},{{"name":"Location","placeholder":"City, Country"}}]}}
-No markdown. No prose."""
+
+VARIABLE EXTRACTOR RULES:
+1. Analyze the application purpose and extract 3-4 highly specific runtime variables that the end-user MUST fill out to make the app work.
+2. For an Audio/Podcast news app, fields should be things like 'News Category', 'Summary Length', or 'Target Country'. 
+3. NEVER generate boilerplate personal fields like 'Date of Birth', 'User Name', 'Age', or 'Creation Date' unless explicitly demanded by the user prompt.
+4. Name constraints: Ensure every variable name is explicit human language. Avoid abstract generic keys like 'input', 'text', 'data', or 'param'.
+5. Always generate a highly relevant placeholder matching the field.
+
+Output must be strict JSON with this exact layout shape (do not repeat the example values, make them contextual to the app purpose):
+{{"options":["4 concise feature options"],"variables":[{{"name":"Context Field Name","placeholder":"Contextual realistic sample value"}}]}}
+No markdown code fences. No conversational explanations."""
 
     user_prompt = (
         f"The user wants to build a {safe_type} app for: {safe_purpose}.\n"
         f"Language mode: {safe_lang}.\n"
-        f"Generate 4 highly relevant specific features and 4-8 input variables needed for the app.\n"
-        f"For each variable include name and helpful placeholder."
+        f"Generate 4 highly relevant product features and 3-4 input fields strictly customized for this domain's operational targets."
     )
 
     if llm.has_groq:

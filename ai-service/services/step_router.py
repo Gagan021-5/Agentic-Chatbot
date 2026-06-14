@@ -369,7 +369,6 @@ def _rank_models(
     scored.sort(key=lambda m: (-m["_score"], m.get("cost", 0)))
     return [{k: v for k, v in m.items() if k != "_score"} for m in scored[:3]]
 
-
 def _merge_extraction(existing: dict | None, latest: dict | None, message: str) -> dict:
     if not latest:
         return existing or {}
@@ -382,6 +381,13 @@ def _merge_extraction(existing: dict | None, latest: dict | None, message: str) 
         or _parse_chip_app_type(message)
         or _is_yes(message)
     )
+    
+    # ─── 🛡️ GUARDRAIL: PROTECT SPECIFIED APP TYPE FROM FLUCTUATIONS ───
+    from services.extraction import ALLOWED_TRIAGE_APP_FORMATS
+    if existing.get("appType") in ["audio", "video", "image", "vision"] and latest.get("appType") != existing.get("appType"):
+        # Agar user ne turn 1 par specialized format set kiya hai, toh short responses use 'text' par overwrite na karein
+        latest["appType"] = existing["appType"]
+
     keep_app_type = is_control or not latest.get("appType")
     keep_purpose = is_control or not latest.get("appPurpose") or len(str(latest.get("appPurpose") or "")) < 8
 
@@ -764,262 +770,159 @@ async def _build_step0_response(session: dict, text: str, app_state: Any) -> dic
                     session["extraction"]["appType"] = app_type
                     break
 
-    if not session.get("appType"):
-        has_purpose = bool(ext.get("appPurpose") and len(str(ext.get("appPurpose"))) > 5)
-        if has_purpose:
-            if is_ambiguous_domain and not has_explicit_type_from_user:
-                logger.info("[Smart Infer] Ambiguous domain detected — NOT auto-inferring type. Triage will ask.")
+        if not session.get("appType"):
+            has_purpose = bool(ext.get("appPurpose") and len(str(ext.get("appPurpose"))) > 5)
+            if has_purpose:
+                if is_ambiguous_domain and not has_explicit_type_from_user:
+                    logger.info("[Smart Infer] Ambiguous domain detected — NOT auto-inferring type. Triage will ask.")
+                else:
+                    purpose_l = str(ext.get("appPurpose")).lower()
+                    image_signals = ["photo", "picture", "image", "card", "poster", "meme", "logo", "thumbnail"]
+                    video_signals = ["video", "animation", "animate", "reel", "clip"]
+                    audio_signals = ["audio", "voice", "music", "speech", "podcast", "tts"]
+                    vision_signals = ["detect", "analyze image", "scan", "ocr", "read from image"]
+
+                    inferred_type = "text"
+                    if any(s in purpose_l for s in image_signals): inferred_type = "image"
+                    elif any(s in purpose_l for s in video_signals): inferred_type = "video"
+                    elif any(s in purpose_l for s in audio_signals): inferred_type = "audio"
+                    elif any(s in purpose_l for s in vision_signals): inferred_type = "vision"
+
+                    session["appType"] = inferred_type
+                    if not session.get("extraction"):
+                        session["extraction"] = {}
+                    session["extraction"]["appType"] = inferred_type
+
             else:
-                purpose_l = str(ext.get("appPurpose")).lower()
-                image_signals = ["photo", "picture", "image", "card", "poster", "meme", "logo", "thumbnail"]
-                video_signals = ["video", "animation", "animate", "reel", "clip"]
-                audio_signals = ["audio", "voice", "music", "speech", "podcast", "tts"]
-                vision_signals = ["detect", "analyze image", "scan", "ocr", "read from image"]
-
-                inferred_type = "text"
-                if any(s in purpose_l for s in image_signals): inferred_type = "image"
-                elif any(s in purpose_l for s in video_signals): inferred_type = "video"
-                elif any(s in purpose_l for s in audio_signals): inferred_type = "audio"
-                elif any(s in purpose_l for s in vision_signals): inferred_type = "vision"
-
-                session["appType"] = inferred_type
-                if not session.get("extraction"):
-                    session["extraction"] = {}
-                session["extraction"]["appType"] = inferred_type
-
-        else:
-            session["step"] = 0
-            await _save(session, app_state)
-            options = ["टेक्स्ट", "इमेज", "ऑडियो", "वीडियो", "विज़न"] if _detect_language_mode(session) == "Hindi" else ["Text", "Image", "Audio", "Video", "Vision"]
-            return {
-                "reply": "What kind of output should your app produce?",
-                "uiType": "chips",
-                "uiData": {"options": options},
-                "nextStep": 0,
-                "coins": None,
-            }
+                session["step"] = 0
+                await _save(session, app_state)
+                options = ["टेक्स्ट", "इमेज", "ऑडियो", "वीडियो", "विज़न"] if _detect_language_mode(session) == "Hindi" else ["Text", "Image", "Audio", "Video", "Vision"]
+                return {
+                    "reply": "What kind of output should your app produce?",
+                    "uiType": "chips",
+                    "uiData": {"options": options},
+                    "nextStep": 0,
+                    "coins": None,
+                }
 
     session["step"] = 0
     session["awaitingConfirmation"] = False
 
-    if not session.get("dynamicContext"):
-        affirmations = ["yes", "sure", "ok", "yep", "yeah", "correct", "sounds good", "exactly", "perfect", "proceed", "looks good"]
-        msg_clean = re.sub(r"[!.,?]+$", "", _lower(text).strip())
-        is_affirmation = msg_clean in affirmations
+    # ─── LIVE RAG EXTRACTION INTEGRATION LAYER ───
+    rag_context = ""
+    vector_store = getattr(app_state, "vector_store", None)
+    if vector_store and hasattr(vector_store, "search"):
+        try:
+            matches = await vector_store.search(
+                query=ext.get("appPurpose") or text,
+                categories=["marketplace", "examples"],
+                top_k=2,
+            )
+            rag_context = "\n\n".join([m.get("content", "") for m in matches if m.get("content")])
+            logger.info(f"[RAG Grounding] Injected {len(matches)} contextual layout blueprints safely.")
+        except Exception as e:
+            logger.warning(f"Triage RAG lookup failed: {e}")
 
-        if is_affirmation and (session.get("triageRounds") or 0) > 0:
-            session["triageRounds"] = 99
-            await _save(session, app_state)
+    # Execute context triage grounded dynamically via real platform knowledge base chunks
+    triage_result = await triage_dynamic_context(
+        llm,
+        session.get("appType"),
+        (session.get("extraction") or {}).get("appPurpose") or "",
+        _detect_language_mode(session),
+        session.get("history") or [],
+        session.get("deepAnswers") or {},
+        rag_context=rag_context,
+    )
+
+    # GUARDRAIL: Prevent accidental format degradation to text
+    if triage_result.get("corrected_app_type") and triage_result["corrected_app_type"] != session.get("appType"):
+        if session.get("appType") in ["audio", "video", "image", "vision"] and triage_result["corrected_app_type"] == "text":
+            logger.info(f"[Guard] Blocked accidental degradation of appType from '{session.get('appType')}' to 'text'")
         else:
-            # ─── 🚀 LIVE RAG EXTRACTION INTEGRATION LAYER ───
-            rag_context = ""
-            vector_store = getattr(app_state, "vector_store", None)
-            if vector_store and hasattr(vector_store, "search"):
-                try:
-                    matches = await vector_store.search(
-                        query=ext.get("appPurpose") or text,
-                        categories=["marketplace", "examples"],
-                        top_k=2,
-                    )
-                    rag_context = "\n\n".join(
-                        [m.get("content", "") for m in matches if m.get("content")]
-                    )
-                    logger.info(
-                        f"[RAG Grounding] Injected {len(matches)} contextual layout blueprints safely."
-                    )
-                except Exception as e:
-                    logger.warning(f"Triage RAG lookup failed: {e}")
+            session["appType"] = triage_result["corrected_app_type"]
+            if session.get("extraction"):
+                session["extraction"]["appType"] = triage_result["corrected_app_type"]
 
-            # Execute context triage grounded dynamically via real platform knowledge base chunks
-            triage_result = await triage_dynamic_context(
-                llm,
-                session.get("appType"),
-                (session.get("extraction") or {}).get("appPurpose") or "",
-                _detect_language_mode(session),
-                session.get("history") or [],
-                session.get("deepAnswers") or {},
-                rag_context=rag_context,
-            )
+    required_slots = ['PRIMARY_SUBJECT', 'ENVIRONMENT_SETTING', 'ACTION_DYNAMIC', 'AESTHETIC_STYLE']
+    filled_slots = [s for s in required_slots if ext.get(s)]
+    
+    # ─── 🛡️ CRITICAL FIX 1: FORCE CONVERSATION ROUNDS, STOP PREMATURE BYPASS FROM POISONED RAG ───
+    if triage_result.get("status") == "ready" and len(filled_slots) < 2 and session.get("triageRounds", 0) < 2:
+        logger.info("[Guard] Poisoned RAG template forced premature ready state. Dropping to needs_context.")
+        triage_result["status"] = "needs_context"
+        if session.get("appType") == "audio":
+            triage_result["question"] = "What specific style of stories (e.g., sci-fi, fantasy, bedtime stories) and voice tone should the AI use?"
+            triage_result["slot_key"] = "visual_style"
+        elif session.get("appType") == "image":
+            triage_result["question"] = "What visual style or artistic direction (e.g., cinematic photo, vector logo, 3D render) should the images focus on?"
+            triage_result["slot_key"] = "visual_style"
+        elif session.get("appType") == "video":
+            triage_result["question"] = "What kind of video style, motion effects, or resolution requirements do you have?"
+            triage_result["slot_key"] = "visual_style"
+        else:
+            triage_result["question"] = "Could you tell me a bit more about the specific target audience or use-case for this application?"
+            triage_result["slot_key"] = "target_users"
+        triage_result["form"] = None
 
-            required_slots = ['PRIMARY_SUBJECT', 'ENVIRONMENT_SETTING', 'ACTION_DYNAMIC', 'AESTHETIC_STYLE']
-            filled_slots = [s for s in required_slots if ext.get(s)]
-            is_detailed_prompt = len(filled_slots) >= 2 or (ext.get("appPurpose") and len(str(ext.get("appPurpose")).split()) > 6)
-            
-            if is_detailed_prompt:
-                logger.info("[Triage] Detailed prompt detected. Bypassing triage questions to show conversational summary.")
-                triage_result = {
-                    "status": "ready",
-                    "domain": triage_result.get("domain") or session.get("domainIdentified"),
-                    "app_format": triage_result.get("corrected_app_type") or session.get("appType") or "text",
-                    "form": None,
-                }
-            elif (session.get("triageRounds") or 0) >= 3 and triage_result.get("status") in (
-                "needs_context",
-                "needs_format",
-            ):
-                logger.info("[Triage] Limit of 3 questions reached. Forcing status to ready.")
-                triage_result = {
-                    "status": "ready",
-                    "domain": triage_result.get("domain") or session.get("domainIdentified"),
-                    "app_format": triage_result.get("corrected_app_type") or session.get("appType") or "text",
-                    "form": None,
-                }
+    # CASE A: Still needs information -> Issue conversational clarification question directly inline
+    if triage_result.get("status") == "needs_context":
+        question = str(triage_result.get("question") or "").strip()
+        if len(question) >= 10:
+            last_q = session.get("lastQuestion") or ""
+            last_slot = session.get("lastSlotKey")
+            if last_q and text and last_slot:
+                if not session.get("deepAnswers"):
+                    session["deepAnswers"] = {}
+                if not session["deepAnswers"].get(last_slot):
+                    session["deepAnswers"][last_slot] = text
 
-            if triage_result.get("status") == "needs_context":
-                question = str(triage_result.get("question") or "").strip()
-                if len(question) >= 10:
-                    last_q = session.get("lastQuestion") or ""
-                    last_slot = session.get("lastSlotKey")
-                    if last_q and text and last_slot:
-                        if not session.get("deepAnswers"):
-                            session["deepAnswers"] = {}
-                        if not session["deepAnswers"].get(last_slot):
-                            session["deepAnswers"][last_slot] = text
+            slot_key = triage_result.get("slot_key") or _infer_slot_key_from_question(question)
+            session["lastSlotKey"] = slot_key
+            session["triageRounds"] = (session.get("triageRounds") or 0) + 1
+            session["lastQuestion"] = question
 
-                    slot_key = (
-                        triage_result.get("slot_key")
-                        or _infer_slot_key_from_question(question)
-                    )
-                    session["lastSlotKey"] = slot_key
-                    session["triageRounds"] = (session.get("triageRounds") or 0) + 1
-                    session["lastQuestion"] = question
+            if not session.get("deepAnswers"):
+                session["deepAnswers"] = {}
+            session["deepAnswers"]["_lastTriageQuestion"] = question
 
-                    if not session.get("deepAnswers"):
-                        session["deepAnswers"] = {}
-                    session["deepAnswers"]["_lastTriageQuestion"] = question
-
-                    await _save(session, app_state)
-                    suggested = triage_result.get("suggested_options")
-                    is_format_question = (
-                        isinstance(suggested, list)
-                        and len(suggested) >= 2
-                        and all(
-                            s.lower() in ("text", "image", "audio", "video", "vision")
-                            for s in suggested
-                        )
-                    )
-                    return {
-                        "reply": question,
-                        "uiType": "chips" if is_format_question else None,
-                        "uiData": {"options": suggested} if is_format_question else None,
-                        "nextStep": 0,
-                        "coins": None,
-                    }
-
-            if triage_result.get("corrected_app_type") and triage_result["corrected_app_type"] != session.get("appType"):
-                session["appType"] = triage_result["corrected_app_type"]
-                if session.get("extraction"):
-                    session["extraction"]["appType"] = triage_result["corrected_app_type"]
-
-            if triage_result.get("form"):
-                session["dynamicContext"] = triage_result["form"]
-            else:
-                session["dynamicContext"] = await generate_dynamic_context(
-                    llm,
-                    session.get("appType") or "text",
-                    (session.get("extraction") or {}).get("appPurpose") or "",
-                    _detect_language_mode(session),
-                )
-            session["triageRounds"] = 0
-            prefill_dynamic_context_variables(session)
             await _save(session, app_state)
-            
-            # Show conversational summary instead of form UI during triage/ideation phase
-            app_type_str = session.get("appType") or "text"
-            subject = ext.get("PRIMARY_SUBJECT")
-            setting = ext.get("ENVIRONMENT_SETTING")
-            action = ext.get("ACTION_DYNAMIC")
-            style = ext.get("AESTHETIC_STYLE")
-            
-            summary_parts = []
-            if subject: summary_parts.append(f"- **Primary Subject:** {subject}")
-            if setting: summary_parts.append(f"- **Environment/Setting:** {setting}")
-            if action: summary_parts.append(f"- **Action/Dynamic:** {action}")
-            if style: summary_parts.append(f"- **Aesthetic Style:** {style}")
-            
-            summary_str = "\n".join(summary_parts)
-            reply = (
-                f"I've started shaping your **{app_type_str.capitalize()}** application! "
-                f"Here is what I've understood so far:\n\n{summary_str}\n\n"
-                "Does this look correct? Once confirmed, we can select the AI model and budget."
-            )
+            suggested = triage_result.get("suggested_options")
+            is_format_question = isinstance(suggested, list) and len(suggested) >= 2 and all(s.lower() in ("text", "image", "audio", "video", "vision") for s in suggested)
             return {
-                "reply": reply,
-                "uiType": "chips",
-                "uiData": {"options": ["Yes, looks good", "No, let me change something"]},
+                "reply": question,
+                "uiType": "chips" if is_format_question else None,
+                "uiData": {"options": suggested} if is_format_question else None,
                 "nextStep": 0,
                 "coins": None,
             }
 
-    if not session.get("formConfirmed"):
-        msg_clean = re.sub(r"[!.,?]+$", "", _lower(text).strip())
-        is_negation = any(
-            msg_clean == neg or msg_clean.startswith(neg + " ") or f" {neg} " in f" {msg_clean} "
-            for neg in ["no", "nope", "not", "incorrect", "wrong", "false", "don't"]
+    # CASE B: Context scoping complete! Automatically auto-confirm and advance to budget/models
+    logger.info("[Triage System] Parameters complete. Advancing to budget qualification seamlessly.")
+    
+    # ─── 🛡️ CRITICAL FIX 2: FILTER POISONED SMART-HOME VARIABLES FROM CONTEXT FORM ───
+    if triage_result.get("form"):
+        form_vars = triage_result["form"].get("variables", [])
+        is_poisoned = any(any(k in str(v.get("name", "")).lower() for k in ["device", "integration", "priority", "task"]) for v in form_vars if isinstance(v, dict))
+        if is_poisoned:
+            logger.info("[Guard] Poisoned variables found in form payload. Re-generating clean domain-specific options.")
+            session["dynamicContext"] = await generate_dynamic_context(llm, session.get("appType") or "text", (session.get("extraction") or {}).get("appPurpose") or "", _detect_language_mode(session))
+        else:
+            session["dynamicContext"] = triage_result["form"]
+    else:
+        session["dynamicContext"] = await generate_dynamic_context(
+            llm,
+            session.get("appType") or "text",
+            (session.get("extraction") or {}).get("appPurpose") or "",
+            _detect_language_mode(session),
         )
-        is_affirmation = False
-        if not is_negation:
-            is_affirmation = any(
-                msg_clean == aff or msg_clean.startswith(aff + " ") or f" {aff} " in f" {msg_clean} "
-                for aff in ["yes", "yep", "yeah", "correct", "looks good", "sounds good", "perfect", "exactly", "proceed", "sure", "ok"]
-            )
-        
-        if is_affirmation:
-            session["formConfirmed"] = True
-            session["lastSlotKey"] = None  # Ensure we don't save the affirmation as a slot answer
-            await _save(session, app_state)
-        else:
-            # Check if they just said "no" or clicked "No, let me change something"
-            is_negation_only = msg_clean in ["no", "none", "nope", "let me change something", "no let me change something", "change something", "i want to change something"]
-            if is_negation_only:
-                return {
-                    "reply": "Sure! What would you like to change? Just tell me what to update or add.",
-                    "uiType": None,
-                    "uiData": None,
-                    "nextStep": 0,
-                    "coins": None,
-                }
-                
-            prefill_dynamic_context_variables(session)
-            await _save(session, app_state)
-            
-            # Show updated conversational summary
-            app_type_str = session.get("appType") or "text"
-            extraction = session.get("extraction") or {}
-            subject = extraction.get("PRIMARY_SUBJECT")
-            setting = extraction.get("ENVIRONMENT_SETTING")
-            action = extraction.get("ACTION_DYNAMIC")
-            style = extraction.get("AESTHETIC_STYLE")
-            
-            summary_parts = []
-            if subject: summary_parts.append(f"- **Primary Subject:** {subject}")
-            if setting: summary_parts.append(f"- **Environment/Setting:** {setting}")
-            if action: summary_parts.append(f"- **Action/Dynamic:** {action}")
-            if style: summary_parts.append(f"- **Aesthetic Style:** {style}")
-            
-            summary_str = "\n".join(summary_parts)
-            reply = (
-                f"Got it, I've updated the details for your **{app_type_str.capitalize()}** app:\n\n{summary_str}\n\n"
-                "Does this look correct now?"
-            )
-            return {
-                "reply": reply,
-                "uiType": "chips",
-                "uiData": {"options": ["Yes, looks good", "No, let me change something"]},
-                "nextStep": 0,
-                "coins": None,
-            }
-
-    last_slot = session.get("lastSlotKey")
-    if last_slot and text:
-        if not session.get("deepAnswers"):
-            session["deepAnswers"] = {}
-        if not session["deepAnswers"].get(last_slot):
-            session["deepAnswers"][last_slot] = text
-
+    
+    session["formConfirmed"] = True  # Unlock stage implicitly behind the scenes
+    session["triageRounds"] = 0
     session["lastSlotKey"] = None
+    prefill_dynamic_context_variables(session)
     await _save(session, app_state)
 
+    # Fluid execution path straight into budget gate checks
     extraction = session.get("extraction") or {}
     deep_answers = session.get("deepAnswers") or {}
     has_budget = _session_has_budget(extraction, deep_answers)
@@ -1027,10 +930,11 @@ async def _build_step0_response(session: dict, text: str, app_state: Any) -> dic
         session["currentDeepField"] = "budgetPreference"
         session["awaitingDeepAnswer"] = True
         await _save(session, app_state)
+        app_type_str = session.get("appType") or "text"
         return {
             "reply": (
-                "Got it — I have everything I need to build your app! "
-                "One last thing: **what's your budget per generation?**"
+                f"Excellent choice! I have structured the blueprint configuration for your **{app_type_str.capitalize()}** app. "
+                "One final parameter before I calculate the model suggestions: **What is your budget preference per generation?**"
             ),
             "uiType": "chips",
             "uiData": {"options": BUDGET_CHIP_OPTIONS},
