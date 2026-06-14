@@ -105,11 +105,23 @@ If the user provides ANY domain-specific intent (e.g. astrologer app, resume bui
 - VISION: image understanding, OCR, analysis
 Default priority if unclear: TEXT > IMAGE > AUDIO > VIDEO > VISION
 
- 
 📊 CONFIDENCE SYSTEM:
 Assign confidence_score (0–100):
-- ≥ 85 → all key details (style, purpose, target audience, specific features) are clear and specific. Proceed to ready (status = "ready"), question MUST be omitted or null.
-- < 85 → if the user's idea is broad (e.g. "logo creator", "resume builder", "workout planner") or some key details are missing. You MUST ask exactly one friendly clarification question about their preferences (status = "needs_context"). Never ask more than one question per turn. Omit variables in this state.
+- ≥ 85 → you have collected AT LEAST 3 specific details about: 
+  (use case / subject type, desired output style, target audience or platform).
+  ONLY then set status = "ready". Question MUST be null.
+- < 85 → Ask ONE friendly conversational question. No chips. No lists.
+  Write it like a human: "Are you thinking more portrait photos or product shots?"
+  NOT: "What type? A) Portrait B) Product C) Landscape"
+
+CONVERSATION RULE: 
+- Ask 2-4 questions naturally before going ready.
+- NEVER repeat a question already answered in history.
+- NEVER show options as a list — embed choices naturally in prose.
+  GOOD: "Should it output a transparent PNG or replace with a custom background?"
+  BAD: return suggested_options: ["Transparent", "Custom background"]
+- suggested_options: ONLY return this for output FORMAT questions 
+  (text/image/audio/video/vision). For all other questions, leave it null.
 
 🔁 ADAPTIVE INTENT RULE:
 If user changes idea mid-conversation:
@@ -125,19 +137,14 @@ After domain is confirmed, extract 3–6 variables:
 - NEVER include model names, internal parameters, legal codes, or system settings
 - 🚨 CRITICAL SCHEMA STRUCTURING CONSTRAINT: Every extracted variable name MUST be translated into explicit human language. You are strictly prohibited from generating variables named 'input', 'text', 'data', 'variables', 'param', or 'main_input'. If the application parses legal domains, map to fields like 'incident_details' or 'dispute_context'. If editing visual elements, map strictly to fields like 'target_aesthetic' or 'canvas_dimensions'.
 
-🤖 CHATBOT BEHAVIOR & QUESTION RULE:
-- Behave like a natural, friendly chatbot (like Claude, Grok, ChatGPT). Use conversational, helpful phrasing in your questions.
-- If the output format/app type is ambiguous, or you are confused/uncertain, set status to "needs_context", confidence_score < 80, ask a friendly question to clarify the type of output they want, and return suggested_options = ["Text", "Image", "Audio", "Video", "Vision"].
-- Only include suggested_options when asking about output format (text/image/audio/video/vision). For all other questions (style, audience, use-case), ask naturally in conversational prose with examples inline (e.g. "like portraits, products, or landscapes?") — do NOT return suggested_options.
-- Otherwise, if confidence >= 80, set status = "ready", question = null, and suggested_options = null.
-
 Every response must be valid JSON only and include:
 - status ("needs_context" or "ready")
 - domain_identified ("text" | "image" | "audio" | "video" | "vision" | "hybrid")
 - confidence_score (0-100)
 - corrected_app_type (optional, only if initial classification was wrong: "text" | "image" | "audio" | "video" | "vision")
 - variables (3-6 variables, each with name, placeholder, and realistic test_value)
-- question (a single conversational question when confidence is below 80, otherwise null or omit)
+- question (a single conversational question when confidence is below 85, otherwise null or omit)
+- slot_key (string, when status is "needs_context", output the name of the slot key you are asking a question for, e.g. "room_type", "visual_style", "image_type", "target_platform", "target_users", "quality_level", "batch_support", "output_style", "key_features", "use_case", etc. Otherwise null or omit)
 - suggested_options (optional, list of 2-5 simple option strings to resolve ambiguity, e.g. ["Text", "Image", "Audio", "Video", "Vision"] if format is unclear)
 
 Do not include any explanation or markdown outside the valid JSON object."""
@@ -375,11 +382,13 @@ def _parse_triage_response(
             if isinstance(parsed.get("suggested_options"), list):
                 opts = [str(o or "").strip() for o in parsed["suggested_options"] if str(o or "").strip()]
                 suggested = opts[:6] if len(opts) >= 2 else None
+            slot_key = str(parsed.get("slot_key") or "").strip().lower() or None
             return {
                 "status": "needs_context",
                 "domain": domain,
                 "confidence_score": confidence,
                 "question": question,
+                "slot_key": slot_key,
                 "suggested_options": suggested,
                 "corrected_app_type": corrected_type,
                 "form": None,

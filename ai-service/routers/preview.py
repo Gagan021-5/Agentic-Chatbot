@@ -109,6 +109,22 @@ def _preview_unavailable_svg() -> str:
     return f"data:image/svg+xml;charset=utf-8,{quote(svg)}"
 
 
+def _get_loremflickr_url(prompt: str) -> str:
+    """Extract keywords from prompt and build a LoremFlickr URL."""
+    import re
+    from urllib.parse import quote
+    # Extract words of 3+ letters
+    words = re.findall(r'\b[a-zA-Z]{3,}\b', prompt)
+    meaningful = [w.lower() for w in words if w.lower() not in (
+        "art", "direction", "high", "quality", "detailed", "illustration", "creative",
+        "photorealistic", "beautiful", "highly", "resolution", "generation", "preview",
+        "primary", "subject", "honor", "all", "user", "fields", "image", "type", "output", "format"
+    )]
+    # Use top 2-3 meaningful words as tags
+    keywords = ",".join(meaningful[:3]) or "design"
+    return f"https://loremflickr.com/{POLLINATIONS_PREVIEW_SIZE}/{POLLINATIONS_PREVIEW_SIZE}/{quote(keywords)}"
+
+
 async def _fetch_pollinations_image(prompt: str) -> str:
     """Fetch image from Pollinations and return as data URL."""
     truncated = _truncate_pollinations_prompt(prompt)
@@ -118,7 +134,7 @@ async def _fetch_pollinations_image(prompt: str) -> str:
         f"?width={POLLINATIONS_PREVIEW_SIZE}&height={POLLINATIONS_PREVIEW_SIZE}&nologo=true"
     )
 
-    async with httpx.AsyncClient(timeout=120.0) as client:
+    async with httpx.AsyncClient(timeout=5.0) as client:
         resp = await client.get(url, headers={
             "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0",
@@ -135,14 +151,17 @@ async def _fetch_pollinations_image(prompt: str) -> str:
 
 
 async def _fetch_pollinations_with_fallback(primary: str, fallback: str) -> str:
-    """Try primary prompt, fallback prompt, then generic prompt."""
+    """Try primary prompt, fallback prompt, then generic prompt. Fallback to LoremFlickr if all fail."""
     for prompt in [primary, fallback, "A beautiful creative illustration, high quality, detailed"]:
         try:
             return await _fetch_pollinations_image(prompt)
         except Exception as e:
             logger.warning(f"Pollinations failed for prompt: {e}")
             continue
-    return _preview_unavailable_svg()
+            
+    # Fallback to LoremFlickr for guaranteed display of matching images
+    logger.info("All Pollinations attempts failed. Falling back to LoremFlickr.")
+    return _get_loremflickr_url(primary or fallback)
 
 
 def _normalize_tts_script(raw: str) -> str:
@@ -343,10 +362,24 @@ async def test_preview(request: Request, body: TestPreviewRequest):
             safe_ctx = re.sub(r"[^a-zA-Z0-9 .,]", "", (body.systemPrompt or "")[:120])
             thumbnail_prompt = f"Cinematic high quality video still, 8k. Subject: {safe_ctx}. {clean_vars[:150]}"
             from urllib.parse import quote
-            thumbnail_url = (
-                f"https://image.pollinations.ai/prompt/{quote(thumbnail_prompt)}"
-                f"?width=1024&height=576&nologo=true"
-            )
+            try:
+                # Test/fetch pollinations image (which raises on 402/payment error)
+                await _fetch_pollinations_image(thumbnail_prompt)
+                thumbnail_url = (
+                    f"https://image.pollinations.ai/prompt/{quote(thumbnail_prompt)}"
+                    f"?width=1024&height=576&nologo=true"
+                )
+            except Exception:
+                logger.warning("Pollinations failed for video thumbnail. Falling back to LoremFlickr.")
+                words = re.findall(r'\b[a-zA-Z]{3,}\b', thumbnail_prompt)
+                meaningful = [w.lower() for w in words if w.lower() not in (
+                    "art", "direction", "high", "quality", "detailed", "illustration", "creative",
+                    "photorealistic", "beautiful", "highly", "resolution", "generation", "preview",
+                    "primary", "subject", "honor", "all", "user", "fields", "image", "type", "output", "format",
+                    "cinematic", "video", "still", "subject"
+                )]
+                keywords = ",".join(meaningful[:3]) or "video"
+                thumbnail_url = f"https://loremflickr.com/1024/576/{quote(keywords)}"
 
             preview_result = {"type": "video", "data": video_script, "url": thumbnail_url}
 

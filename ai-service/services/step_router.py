@@ -157,6 +157,40 @@ def _is_no(msg: Any) -> bool:
     )
 
 
+def _infer_slot_key_from_question(question: str) -> str | None:
+    """Infer slot key from triage question text as fallback when LLM doesn't return slot_key."""
+    q = question.lower()
+    if any(w in q for w in ("type of image", "kind of image", "what images", "image type", "photos")):
+        return "image_type"
+    if any(w in q for w in ("background", "replace", "output style", "transparent", "white bg")):
+        return "output_style"
+    if any(w in q for w in ("platform", "where will", "used on", "deployed")):
+        return "target_platform"
+    if any(w in q for w in ("audience", "who will", "target user", "who is this for", "users be")):
+        return "target_users"
+    if any(w in q for w in ("resolution", "quality level", "high res", "image size")):
+        return "quality_level"
+    if any(w in q for w in ("batch", "multiple images", "bulk", "many images")):
+        return "batch_support"
+    if any(w in q for w in ("style", "aesthetic", "look and feel", "visual tone")):
+        return "visual_style"
+    if any(w in q for w in ("room", "space", "interior", "area", "which rooms")):
+        return "room_type"
+    if any(w in q for w in ("square", "footage", "size of", "dimensions", "how big")):
+        return "room_dimensions"
+    if any(w in q for w in ("feature", "functionality", "should it", "capabilities")):
+        return "key_features"
+    if any(w in q for w in ("purpose", "goal", "use case", "what will", "main thing")):
+        return "use_case"
+    words = re.findall(r'\b[a-z]{4,}\b', q)
+    meaningful = [w for w in words if w not in (
+        "what", "would", "like", "your", "want", "should", "will", "have", 
+        "that", "this", "with", "from", "when", "where", "which", "about",
+        "more", "just", "also", "only", "some", "them", "they", "does"
+    )]
+    return meaningful[0] if meaningful else None
+
+
 def _detect_language_mode(session: dict) -> str:
     extraction = session.get("extraction") or {}
     lang = str(extraction.get("detectedLanguage") or session.get("languageMode") or "English").lower()
@@ -607,23 +641,42 @@ async def _build_step0_response(session: dict, text: str, app_state: Any) -> dic
             if triage_result.get("status") == "needs_context":
                 question = str(triage_result.get("question") or "").strip()
                 if len(question) >= 10:
+                    # Store the PREVIOUS user answer against the PREVIOUS question's slot
+                    last_q = session.get("lastQuestion") or ""
+                    last_slot = session.get("lastSlotKey")
+                    if last_q and text and last_slot:
+                        if not session.get("deepAnswers"):
+                            session["deepAnswers"] = {}
+                        # Don't overwrite already-set slots
+                        if not session["deepAnswers"].get(last_slot):
+                            session["deepAnswers"][last_slot] = text
+
+                    # Store current question's slot key for next round
+                    slot_key = (
+                        triage_result.get("slot_key") 
+                        or _infer_slot_key_from_question(question)
+                    )
+                    session["lastSlotKey"] = slot_key
                     session["triageRounds"] = (session.get("triageRounds") or 0) + 1
                     session["lastQuestion"] = question
+                    
+                    # Store in deepAnswers so triage sees it next round
                     if not session.get("deepAnswers"):
                         session["deepAnswers"] = {}
                     session["deepAnswers"]["_lastTriageQuestion"] = question
-                    await _save(session, app_state)
                     
+                    await _save(session, app_state)
                     suggested = triage_result.get("suggested_options")
-                    is_format_question = suggested and all(
-                        s.lower() in ("text", "image", "audio", "video", "vision") 
-                        for s in suggested
+                    # Only show chips for output FORMAT questions (text/image/audio/video/vision)
+                    is_format_question = (
+                        isinstance(suggested, list) and
+                        len(suggested) >= 2 and
+                        all(s.lower() in ("text", "image", "audio", "video", "vision") for s in suggested)
                     )
-                    has_chips = is_format_question and isinstance(suggested, list) and len(suggested) >= 2
                     return {
                         "reply": question,
-                        "uiType": "chips" if has_chips else None,
-                        "uiData": {"options": suggested} if has_chips else None,
+                        "uiType": "chips" if is_format_question else None,
+                        "uiData": {"options": suggested} if is_format_question else None,
                         "nextStep": 0,
                         "coins": None,
                     }
@@ -648,47 +701,34 @@ async def _build_step0_response(session: dict, text: str, app_state: Any) -> dic
             session["triageRounds"] = 0
             await _save(session, app_state)
 
-    is_form_confirmed = bool(session.get("formConfirmed"))
-    if is_form_confirmed:
-        extraction = session.get("extraction") or {}
-        deep_answers = session.get("deepAnswers") or {}
-        if not extraction.get("budget") and not deep_answers.get("budgetPreference"):
-            session["currentDeepField"] = "budgetPreference"
-            session["awaitingDeepAnswer"] = True
-            await _save(session, app_state)
-            return {
-                "reply": (
-                    "Got everything I need to build your app! One last thing — "
-                    "**what's your budget per generation?** This helps me pick the right AI model."
-                ),
-                "uiType": "chips",
-                "uiData": {"options": BUDGET_CHIP_OPTIONS},
-                "nextStep": 0,
-                "coins": None,
-            }
-    else:
-        dynamic_context = session.get("dynamicContext") or {}
-        if not isinstance(dynamic_context.get("variables"), list) or not isinstance(
-            dynamic_context.get("options"), list
-        ):
-            session["dynamicContext"] = build_dynamic_context_fallback(
-                session.get("appType") or "text",
-                (session.get("extraction") or {}).get("appPurpose") or "",
-                _detect_language_mode(session),
-            )
-        dynamic_context = session.get("dynamicContext") or {}
+    # Store last user answer before going ready
+    last_slot = session.get("lastSlotKey")
+    if last_slot and text:
+        if not session.get("deepAnswers"):
+            session["deepAnswers"] = {}
+        if not session["deepAnswers"].get(last_slot):
+            session["deepAnswers"][last_slot] = text
+
+    # Mark form as confirmed — skip form UI entirely
+    session["formConfirmed"] = True
+    session["lastSlotKey"] = None
+    await _save(session, app_state)
+
+    # Check budget and proceed
+    extraction = session.get("extraction") or {}
+    deep_answers = session.get("deepAnswers") or {}
+    has_budget = extraction.get("budget") or deep_answers.get("budgetPreference")
+    if not has_budget:
+        session["currentDeepField"] = "budgetPreference"
+        session["awaitingDeepAnswer"] = True
+        await _save(session, app_state)
         return {
-            "reply": _localized_text(
-                session,
-                "## 📋 Customize Your App Configuration\n\nI've generated a draft of key features and input fields based on our conversation.\n\nVerify or adjust the options below, then click **Confirm options**!",
-                "## 📋 आपके ऐप का सेटअप\n\nमैंने हमारी बातचीत के आधार पर प्रमुख विशेषताओं और इनपुट फ़ील्ड्स का एक ड्राफ़्ट तैयार किया है।\n\nकृपया नीचे दिए विकल्पों की जाँच करें, फिर **Confirm options** पर क्लिक करें!",
-                "## 📋 App Configuration Customise Karein\n\nMaine humari conversation ke basis par key features aur input fields ka ek draft generate kiya hai.\n\nNeeche diye options ko check/adjust karein, fir **Confirm options** par click karein!",
+            "reply": (
+                "Got it — I have everything I need to build your app! "
+                "One last thing: **what's your budget per generation?**"
             ),
-            "uiType": "multi_select_form",
-            "uiData": {
-                "options": dynamic_context.get("options") or [],
-                "variables": dynamic_context.get("variables") or [],
-            },
+            "uiType": "chips",
+            "uiData": {"options": BUDGET_CHIP_OPTIONS},
             "nextStep": 0,
             "coins": None,
         }
@@ -787,6 +827,45 @@ async def _exec_generate_preview(session: dict, text: str, app_state: Any) -> di
     await _save(session, app_state)
 
     try:
+        # Prefill dynamicContext variables from conversational slot answers
+        dynamic_context = session.get("dynamicContext") or {}
+        deep_answers = session.get("deepAnswers") or {}
+        extraction = session.get("extraction") or {}
+        variables = dynamic_context.get("variables") or []
+
+        if variables and (deep_answers or extraction):
+            prefilled = []
+            for var in variables:
+                var_name = str(var.get("name") or "").lower().replace(" ", "_")
+                # Try exact slot key match first
+                prefilled_value = None
+                for slot_key, slot_val in deep_answers.items():
+                    if slot_key.startswith("_"):
+                        continue
+                    if slot_key in var_name or var_name in slot_key:
+                        prefilled_value = str(slot_val)
+                        break
+                # Fallback: fuzzy match on keywords
+                if not prefilled_value:
+                    keywords = re.findall(r'[a-z]{4,}', var_name)
+                    for kw in keywords:
+                        for slot_key, slot_val in deep_answers.items():
+                            if slot_key.startswith("_"):
+                                continue
+                            if kw in slot_key:
+                                prefilled_value = str(slot_val)
+                                break
+                        if prefilled_value:
+                            break
+                prefilled.append({
+                    **var,
+                    "test_value": prefilled_value or var.get("test_value") or var.get("placeholder") or ""
+                })
+            
+            if not session.get("dynamicContext"):
+                session["dynamicContext"] = {}
+            session["dynamicContext"]["variables"] = prefilled
+
         prompt_data, seo_data = await asyncio.gather(
             generate_prompt_template(llm, session),
             generate_seo(llm, session),
@@ -809,6 +888,7 @@ async def _exec_generate_preview(session: dict, text: str, app_state: Any) -> di
                 "systemPrompt": prompt_data.get("systemPrompt"),
                 "userPrompt": prompt_data.get("userPrompt"),
                 "variablesUsed": prompt_data.get("variablesUsed"),
+                "variables": (session.get("dynamicContext") or {}).get("variables") or [],
                 "acceptImageInput": _sanitize_accept_image_input(
                     prompt_data.get("acceptImageInput"), app_type
                 ),
@@ -989,6 +1069,7 @@ async def _exec_edit_app(session: dict, text: str, decision: dict, app_state: An
             "systemPrompt": prompt_data.get("systemPrompt") or "",
             "userPrompt": prompt_data.get("userPrompt") or "",
             "variablesUsed": prompt_data.get("variablesUsed") or [],
+            "variables": (session.get("dynamicContext") or {}).get("variables") or [],
             "acceptImageInput": safe_image_input,
             "options": ["Approve App", "Edit App"],
         },
@@ -1166,6 +1247,7 @@ class ConversationState(TypedDict, total=False):
     user_type: Optional[str]
     is_pivot: bool
     decision_payload: Dict[str, Any]
+    last_slot_key: Optional[str]
 
 
 # Helper state translators
@@ -1206,6 +1288,7 @@ def _session_to_state(session: dict, message: str) -> ConversationState:
         "user_type": session.get("userType"),
         "is_pivot": session.get("isPivot") or False,
         "decision_payload": {},
+        "last_slot_key": session.get("lastSlotKey"),
     }
 
 
@@ -1230,6 +1313,7 @@ def _state_to_session(state: ConversationState, session: dict) -> None:
     session["enterpriseSignals"] = state.get("enterprise_signals")
     session["userType"] = state.get("user_type")
     session["isPivot"] = state.get("is_pivot") or False
+    session["lastSlotKey"] = state.get("last_slot_key")
     
     session_history = []
     for m in state.get("history", []):
