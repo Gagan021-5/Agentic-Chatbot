@@ -54,6 +54,12 @@ class Settings(BaseSettings):
     # --- Tavily Search ---
     tavily_api_key: str = Field(default="", description="Tavily API key for web search")
 
+    # --- Hugging Face ---
+    huggingface_api_key: str = Field(default="", description="Hugging Face API token")
+
+    # --- Remove.bg ---
+    removebg_api_key: str = Field(default="", description="Remove.bg API Key")
+
     # --- Service ---
     host: str = Field(default="0.0.0.0")
     port: int = Field(default=8000)

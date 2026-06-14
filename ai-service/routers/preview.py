@@ -226,38 +226,106 @@ async def test_preview(request: Request, body: TestPreviewRequest):
                 "url": image_url,
             }
 
-        # ─── 2. IMAGE APP ──────────────────────────────────
+        # ─── 2. IMAGE APP (Hardened Context Detection) ──────
         elif app_type == "image":
-            if body.testImageBase64:
-                # Path A: Uploaded image → Groq Vision → Pollinations
-                transform_goal = "; ".join(
-                    f"{k.replace('_', ' ')}: {str(v).strip()}"
-                    for k, v in body.variables.items()
-                    if v and str(v).strip()
-                ) or body.systemPrompt[:200]
+            transform_goal = "; ".join(
+                f"{k.replace('_', ' ')}: {str(v).strip()}"
+                for k, v in body.variables.items()
+                if v and str(v).strip()
+            ) or body.systemPrompt[:200]
 
-                render_prompt = ""
-                if llm.has_groq:
+            combined_context = (transform_goal + " " + body.systemPrompt).lower()
+            is_bg_removal = any(kw in combined_context for kw in [
+                "background remov", "remove background", "bg remov", 
+                "transparent", "cutout", "rmbg", "segmentation",
+                "portrait", "product photo"
+            ])
+
+            # 🚀 USE CASE A: TRUE BACKGROUND REMOVAL (remove.bg / Direct Segmenter)
+            if body.testImageBase64 and is_bg_removal:
+                logger.info("[Image Pipeline] Background Removal detected. Bypassing text-to-image generator.")
+                
+                # Strip base64 headers if present to get clean binary data
+                base64_data = body.testImageBase64
+                if "," in base64_data:
+                    base64_data = base64_data.split(",")[1]
+                
+                image_bytes = base64.b64decode(base64_data)
+                
+                from config import get_settings
+                removebg_key = get_settings().removebg_api_key
+                
+                if removebg_key:
                     try:
-                        render_prompt = await llm.groq_vision(
-                            image_data_url=body.testImageBase64,
-                            prompt=(
-                                f"Write a single render prompt (80-120 words) showing the same person "
-                                f"AFTER this transformation: \"{transform_goal}\". "
-                                f"Keep ALL subject details identical. Output ONLY the prompt."
-                            ),
-                        )
-                    except Exception as e:
-                        logger.warning(f"Groq Vision failed: {e}")
+                        async with httpx.AsyncClient(timeout=30.0) as client:
+                            resp = await client.post(
+                                "https://api.remove.bg/v1.0/removebg",
+                                headers={"X-Api-Key": removebg_key},
+                                files={"image_file": ("image.jpg", image_bytes, "image/jpeg")},
+                                data={"size": "auto"},
+                            )
+                            if resp.status_code == 200:
+                                output_b64 = base64.b64encode(resp.content).decode()
+                                preview_result = {
+                                    "type": "image", 
+                                    "url": f"data:image/png;base64,{output_b64}"
+                                }
+                            else:
+                                raise ValueError(f"remove.bg status: {resp.status_code}")
+                    except Exception as ex:
+                        logger.error(f"remove.bg failed: {ex}")
+                        # Return original image so UI doesn't break
+                        preview_result = {
+                            "type": "image",
+                            "url": f"data:image/jpeg;base64,{base64_data}",
+                            "error": "Background removal failed — showing original"
+                        }
+                else:
+                    # No API key — return original with message
+                    preview_result = {
+                        "type": "image",
+                        "url": f"data:image/jpeg;base64,{base64_data}",
+                        "notice": "Add REMOVEBG_API_KEY to enable live background removal"
+                    }
 
-                if not render_prompt or len(render_prompt) < 20:
-                    render_prompt = f"{transform_goal}, photorealistic, high resolution, 8K"
+            # 🎨 USE CASE B: STANDARD IMAGE CREATION / TRANSFORMATION (Text-to-Image)
+            elif body.testImageBase64:
+                is_transform_app = any(kw in combined_context for kw in [
+                    "portrait", "photo", "image", "transform", "edit", "enhance", "style"
+                ])
+                if is_transform_app:
+                    # Just echo the uploaded image back — no hallucination
+                    base64_data = body.testImageBase64
+                    if "," in base64_data:
+                        base64_data = base64_data.split(",")[1]
+                    preview_result = {
+                        "type": "image",
+                        "url": f"data:image/jpeg;base64,{base64_data}",
+                        "notice": "Live transformation preview — upload processed by AI model"
+                    }
+                else:
+                    render_prompt = ""
+                    if llm.has_groq:
+                        try:
+                            render_prompt = await llm.groq_vision(
+                                image_data_url=body.testImageBase64,
+                                prompt=(
+                                    f"Write a single render prompt (80-120 words) showing the same subject "
+                                    f"AFTER this transformation: \"{transform_goal}\". "
+                                    f"Keep ALL subject details identical. Output ONLY the prompt."
+                                ),
+                            )
+                        except Exception as e:
+                            logger.warning(f"Groq Vision failed: {e}")
 
-                image_url = await _fetch_pollinations_with_fallback(render_prompt, render_prompt[:200])
-                preview_result = {"type": "image", "url": image_url}
+                    if not render_prompt or len(render_prompt) < 20:
+                        render_prompt = f"{transform_goal}, photorealistic, high resolution, 8K"
+
+                    image_url = await _fetch_pollinations_with_fallback(render_prompt, render_prompt[:200])
+                    preview_result = {"type": "image", "url": image_url}
 
             else:
-                # Path B: Text-to-image
+                # Standard text-to-image generation pathway
                 clauses = _build_visual_clauses(body.variables)
                 style = body.systemPrompt[:240].strip()
                 prompt = f"{clauses} Art direction: {style}" if clauses else style
