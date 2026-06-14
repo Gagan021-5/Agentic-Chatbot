@@ -851,6 +851,31 @@ async def _exec_generate_preview(session: dict, text: str, app_state: Any) -> di
             generate_prompt_template(llm, session),
             generate_seo(llm, session),
         )
+        # Resolve initial ui_meta for frontend dynamic layout
+        from routers.preview import _resolve_transformation_tool
+        combined_context = f"{prompt_data.get('userPrompt') or ''}\n\n{prompt_data.get('systemPrompt') or ''}"
+        blueprint = await _resolve_transformation_tool(combined_context, app_state)
+        if blueprint:
+            ui_meta = {
+                "show_upload": blueprint.get("show_upload", False),
+                "show_url_input": blueprint.get("show_url_input", False),
+                "active_tool": blueprint.get("tool_id"),
+                "layout_mode": blueprint.get("layout_mode", "static"),
+                "tool_id": blueprint.get("tool_id"),
+                "config": blueprint.get("config", {})
+            }
+        else:
+            accept_img = _sanitize_accept_image_input(prompt_data.get("acceptImageInput"), app_type)
+            show_url = any(kw in combined_context.lower() for kw in ["url", "fetch", "scrap", "external", "link"])
+            ui_meta = {
+                "show_upload": accept_img,
+                "show_url_input": show_url,
+                "active_tool": "bg_remover" if ("remove background" in combined_context.lower() or "bg_remover" in combined_context.lower()) else None,
+                "layout_mode": "interactive" if (accept_img or show_url) else "static",
+                "tool_id": "bg_remover" if ("remove background" in combined_context.lower() or "bg_remover" in combined_context.lower()) else None,
+                "config": {}
+            }
+
         session["promptData"] = prompt_data
         session["seoData"] = seo_data
         session["step"] = 2
@@ -873,6 +898,7 @@ async def _exec_generate_preview(session: dict, text: str, app_state: Any) -> di
                 "acceptImageInput": _sanitize_accept_image_input(
                     prompt_data.get("acceptImageInput"), app_type
                 ),
+                "ui_meta": ui_meta,
                 "options": ["Approve App", "Edit App"],
             },
             "nextStep": 2,

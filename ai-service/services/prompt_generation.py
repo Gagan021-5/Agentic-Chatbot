@@ -67,18 +67,23 @@ async def run_prompt_test(
     inputs = test_inputs if isinstance(test_inputs, dict) else {}
     resolved = str(user_prompt or "")
     
-    # Support both $$variable$$ / $$variable and [variable] resolving case-insensitively
+    # Support both $$variable$$, $$variable, $variable, and [variable] resolving case-insensitively
     for key, value in inputs.items():
         val_str = str(value or "")
-        resolved = re.sub(re.escape(f"$${key}$$"), val_str, resolved, flags=re.I)
-        resolved = re.sub(re.escape(f"$${key}"), val_str, resolved, flags=re.I)
-        resolved = re.sub(re.escape(f"[{key}]"), val_str, resolved, flags=re.I)
-        
-        # Also try replacing underscores in key to cover both styles
+        keys_to_try = [key]
         key_alt = key.replace(" ", "_")
-        resolved = re.sub(re.escape(f"$${key_alt}$$"), val_str, resolved, flags=re.I)
-        resolved = re.sub(re.escape(f"$${key_alt}"), val_str, resolved, flags=re.I)
-        resolved = re.sub(re.escape(f"[{key_alt}]"), val_str, resolved, flags=re.I)
+        if key_alt not in keys_to_try:
+            keys_to_try.append(key_alt)
+        key_alt2 = key.replace("_", " ")
+        if key_alt2 not in keys_to_try:
+            keys_to_try.append(key_alt2)
+
+        for k in keys_to_try:
+            resolved = re.sub(re.escape(f"$${k}$$"), val_str, resolved, flags=re.I)
+            resolved = re.sub(re.escape(f"$${k}"), val_str, resolved, flags=re.I)
+            resolved = re.sub(re.escape(f"${k}$$"), val_str, resolved, flags=re.I)
+            resolved = re.sub(re.escape(f"${k}"), val_str, resolved, flags=re.I)
+            resolved = re.sub(re.escape(f"[{k}]"), val_str, resolved, flags=re.I)
 
     raw = await llm.openrouter_chat(
         system_prompt=str(system_prompt or "You are a helpful AI assistant."),
@@ -103,11 +108,9 @@ def auto_inject_variables(user_prompt: str, vars_list: list[str]) -> str:
         var_clean = var.strip().strip("$")
         var_pat = var_clean.replace("_", " ")
         
-        # If already has $$var_clean$$ or $$var_pat$$, skip
+        # If already has $$var_clean or $$var_pat, skip
         esc_var = re.escape(var_clean)
         esc_pat = re.escape(var_pat)
-        if re.search(r'\$\$' + esc_var + r'\$\$', resolved, re.I) or re.search(r'\$\$' + esc_pat + r'\$\$', resolved, re.I):
-            continue
         if re.search(r'\$\$' + esc_var, resolved, re.I) or re.search(r'\$\$' + esc_pat, resolved, re.I):
             continue
             
@@ -122,7 +125,7 @@ def auto_inject_variables(user_prompt: str, vars_list: list[str]) -> str:
             pat_esc = re.escape(pat)
             match = re.search(r'\b' + pat_esc + r'\b', resolved, re.I)
             if match:
-                resolved = resolved[:match.start()] + f"$${var_clean}$$" + resolved[match.end():]
+                resolved = resolved[:match.start()] + f"$${var_clean}" + resolved[match.end():]
                 break
     return resolved
 
@@ -142,18 +145,18 @@ QUALITY RULES:
 1. systemPrompt: Define a tight AI persona. Include: role, domain expertise, tone, output format rules, and constraints. 3-5 sentences. It MUST be written in the second-person ("You are...") rather than first-person ("I am...").
 2. userPrompt — FORMAT DEPENDS ON APP TYPE:
    ▸ For TEXT and AUDIO apps: Must be HIGHLY DETAILED (200-400 words). Structure it as:
-     a) Instructions for the LLM using the $$Variable_Name$$ variables in the first-person perspective ("I want to generate based on my $$Variable_Name$$...", "I want my $$Variable_Name$$ to be...")
+     a) Instructions for the LLM using the $$Variable_Name variables in the first-person perspective ("I want to generate based on my $$Variable_Name...", "I want my $$Variable_Name to be...")
      b) Step-by-step processing logic
      c) Output format specification (headings, bullets, structure)
      d) Constraints (what NOT to do)
      DO NOT use markdown headers (##) inside the prompt — write it as flowing prose with labeled sections.
    ▸ For IMAGE and VIDEO apps: Must be a CONCISE VISUAL DESCRIPTION (50-120 words). Write it as:
      - A single flowing visual prompt describing the desired output
-     - Incorporate $$Variable_Name$$ variables naturally: "A $$style$$ $$subject$$ with $$details$$"
+     - Incorporate $$Variable_Name variables naturally: "A $$style $$subject with $$details"
      - Include art direction: lighting, camera angle, color palette, mood
      - End with quality keywords: "professional photography, 8K, ultra-detailed"
      - DO NOT use ## headers, numbered steps, or "Processing Logic" — image generators don't read structured prompts
-3. Use $$Variable_Name$$ double-dollar syntax ONLY for the REQUIRED INPUT VARIABLES listed below. Do not use [Variable_Name] or invent extra variables.
+3. Use $$Variable_Name double-dollar prefix syntax (starts with $$, does not end with $$) ONLY for the REQUIRED INPUT VARIABLES listed below. Do not use [Variable_Name] or invent extra variables.
 4. negativePrompt: For image/video apps, write a detailed negative prompt. For text/audio/vision, set to null.
 5. acceptImageInput: SMART DETECTION — do NOT blindly set true for all image apps.
 6. NO META-PLATFORM DETAILS: NEVER mention the user's budget, coin cost, or model name in the systemPrompt or userPrompt.
@@ -162,26 +165,26 @@ QUALITY RULES:
 9. NEVER include in prompts: model names, coin costs, budget tiers, platform names ("RentPrompts"), or any internal metadata.
 10. USER PERSPECTIVE PRINCIPLE (CRITICAL): Variables must reflect what a NON-EXPERT end-user can actually provide.
 11. CONFLICT DETECTION & ANTI-HALLUCINATION (CRITICAL for legal/medical/expert apps).
-12. FIRST-PERSON DECLARATIONS (CRITICAL): The userPrompt must be written in the first-person perspective (using "I", "my", "me", e.g. "I want to configure a Lead Generation Machine. Base the scoring on $$Company_Size$$..."). Do NOT write the prompt in passive third-person instructions (do NOT write "Analyze the input...", "Generate a...").
+12. FIRST-PERSON DECLARATIONS (CRITICAL): The userPrompt must be written in the first-person perspective (using "I", "my", "me", e.g. "I want to configure a Lead Generation Machine. Base the scoring on $$Company_Size..."). Do NOT write the prompt in passive third-person instructions (do NOT write "Analyze the input...", "Generate a...").
 
 Return ONLY valid JSON:
 {{
   "reasoning": "Brief explanation of your design choices.",
   "systemPrompt": "Tight 3-5 sentence AI persona with role, domain, tone, format rules.",
-  "userPrompt": "Highly detailed prompt in first-person perspective with double-dollar variable syntax, context, processing logic, output format, and constraints.",
+  "userPrompt": "Highly detailed prompt in first-person perspective with double-dollar variable prefix syntax (starts with $$, does not end with $$), context, processing logic, output format, and constraints.",
   "negativePrompt": "Detailed negative prompt or null",
   "acceptImageInput": true or false,
-  "variablesUsed": ["$$var1$$", "$$var2$$"],
-  "variableDescriptions": {{ "$$var1$$": "What the user enters here" }}
+  "variablesUsed": ["$$var1", "$$var2"],
+  "variableDescriptions": {{ "$$var1": "What the user enters here" }}
 }}"""
 
     vars_list = (session.get("dynamicContext") or {}).get("variables") or []
     var_lines = []
     for v in vars_list:
         if isinstance(v, dict):
-            var_lines.append(f"$${v.get('name', '')}$$: {v.get('placeholder', '')}")
+            var_lines.append(f"$${v.get('name', '')}: {v.get('placeholder', '')}")
         else:
-            var_lines.append(f"$${v}$$")
+            var_lines.append(f"$${v}")
     var_list = "\n".join(var_lines)
 
     extraction = session.get("extraction") or {}
@@ -273,7 +276,7 @@ Return ONLY valid JSON:
             ),
             "userPrompt": (
                 "I want to perform the requested task precisely based on the following inputs:\n\n"
-                f"$${main_var_clean}$$\n\n"
+                f"$${main_var_clean}\n\n"
                 "Provide a detailed, well-structured response that directly addresses the request. "
                 "Do not add unrelated information."
             ),

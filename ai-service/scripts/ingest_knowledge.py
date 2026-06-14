@@ -26,6 +26,7 @@ KNOWLEDGE_DIRS = {
     "examples": "knowledge/examples",
     "seo": "knowledge/seo",
     "marketplace": "knowledge/marketplace",
+    "blueprints": "rag/blueprints",
 }
 
 

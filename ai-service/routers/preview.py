@@ -34,6 +34,7 @@ class TestPreviewResponse(BaseModel):
     success: bool = True
     preview: dict[str, Any] | None = None
     error: str | None = None
+    ui_meta: dict[str, Any] | None = None
 
 
 class TestPromptRequest(BaseModel):
@@ -180,6 +181,80 @@ def _normalize_tts_script(raw: str) -> str:
     return s
 
 
+def _extract_image_url_from_html(html: str) -> str | None:
+    # Try og:image
+    match = re.search(r'<meta[^>]*property=["\']og:image["\'][^>]*content=["\']([^"\']+)["\']', html, re.I)
+    if match:
+        return match.group(1)
+    match = re.search(r'<meta[^>]*content=["\']([^"\']+)["\'][^>]*property=["\']og:image["\']', html, re.I)
+    if match:
+        return match.group(1)
+    # Try twitter:image
+    match = re.search(r'<meta[^>]*name=["\']twitter:image["\'][^>]*content=["\']([^"\']+)["\']', html, re.I)
+    if match:
+        return match.group(1)
+    # Try link image_src
+    match = re.search(r'<link[^>]*rel=["\']image_src["\'][^>]*href=["\']([^"\']+)["\']', html, re.I)
+    if match:
+        return match.group(1)
+    return None
+
+
+async def _fetch_image_from_url_to_base64(url: str) -> str | None:
+    try:
+        async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
+            resp = await client.get(url, headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            })
+            if resp.status_code == 200:
+                content_type = resp.headers.get("content-type", "").lower()
+                if "image" in content_type:
+                    b64 = base64.b64encode(resp.content).decode()
+                    return f"data:{content_type};base64,{b64}"
+                elif "text/html" in content_type or "text/plain" in content_type:
+                    # Try to extract from HTML
+                    img_url = _extract_image_url_from_html(resp.text)
+                    if img_url:
+                        # Fetch the actual image URL
+                        return await _fetch_image_from_url_to_base64(img_url)
+    except Exception as e:
+        logger.warning(f"Failed to fetch image from URL {url}: {e}")
+    return None
+
+
+def _parse_blueprint_json(content: str) -> dict | None:
+    # Look for ```json ... ``` or try parsing directly
+    match = re.search(r"```json\s*([\s\S]+?)\s*```", content)
+    if match:
+        try:
+            return json.loads(match.group(1).strip())
+        except Exception:
+            pass
+    try:
+        return json.loads(content.strip())
+    except Exception:
+        pass
+    return None
+
+
+async def _resolve_transformation_tool(prompt: str, app_state: Any) -> dict | None:
+    vector_store = getattr(app_state, "vector_store", None)
+    if not vector_store or not hasattr(vector_store, "search"):
+        return None
+    try:
+        matches = await vector_store.search(
+            query=prompt,
+            categories=["blueprints"],
+            top_k=1
+        )
+        if matches:
+            content = matches[0].get("content", "")
+            return _parse_blueprint_json(content)
+    except Exception as e:
+        logger.warning(f"Failed to resolve transformation tool from RAG: {e}")
+    return None
+
+
 # ─── POST /api/test-preview ────────────────────────────────
 
 @router.post("/test-preview", response_model=TestPreviewResponse)
@@ -190,6 +265,50 @@ async def test_preview(request: Request, body: TestPreviewRequest):
     """
     llm = request.app.state.llm
     app_type = (body.appType or "text").lower()
+
+    # Construct combined context to query RAG blueprints
+    transform_goal = "; ".join(
+        f"{k}: {v}" for k, v in body.variables.items() if v
+    )
+    combined_context = f"{transform_goal}\n\n{body.systemPrompt}"
+
+    # Resolve transformation tool using RAG
+    blueprint = await _resolve_transformation_tool(combined_context, request.app.state)
+
+    if blueprint:
+        ui_meta = {
+            "show_upload": blueprint.get("show_upload", False),
+            "show_url_input": blueprint.get("show_url_input", False),
+            "active_tool": blueprint.get("tool_id"),
+            "layout_mode": blueprint.get("layout_mode", "static"),
+            "tool_id": blueprint.get("tool_id"),
+            "config": blueprint.get("config", {})
+        }
+    else:
+        # Heuristics-based fallback
+        show_upload = (
+            body.appType in ("image", "vision")
+            or any(kw in combined_context.lower() for kw in ["image", "photo", "portrait", "design", "style transfer", "remove background", "utensil"])
+        )
+        show_url_input = any(kw in combined_context.lower() for kw in ["url", "fetch", "scrap", "external", "link"])
+        ui_meta = {
+            "show_upload": show_upload,
+            "show_url_input": show_url_input,
+            "active_tool": "bg_remover" if ("remove background" in combined_context.lower() or "bg_remover" in combined_context.lower()) else None,
+            "layout_mode": "interactive" if (show_upload or show_url_input) else "static",
+            "tool_id": "bg_remover" if ("remove background" in combined_context.lower() or "bg_remover" in combined_context.lower()) else None,
+            "config": {}
+        }
+
+    # If testImageBase64 is not provided, check if any of the variables contain an image URL
+    if not body.testImageBase64 and body.variables:
+        for k, v in body.variables.items():
+            if isinstance(v, str) and (v.startswith("http://") or v.startswith("https://")):
+                b64_img = await _fetch_image_from_url_to_base64(v)
+                if b64_img:
+                    body.testImageBase64 = b64_img
+                    logger.info(f"Resolved variable {k} image URL to testImageBase64")
+                    break
 
     try:
         preview_result = None
@@ -234,12 +353,7 @@ async def test_preview(request: Request, body: TestPreviewRequest):
                 if v and str(v).strip()
             ) or body.systemPrompt[:200]
 
-            combined_context = (transform_goal + " " + body.systemPrompt).lower()
-            is_bg_removal = any(kw in combined_context for kw in [
-                "background remov", "remove background", "bg remov", 
-                "transparent", "cutout", "rmbg", "segmentation",
-                "portrait", "product photo"
-            ])
+            is_bg_removal = (ui_meta.get("tool_id") == "bg_remover")
 
             # 🚀 USE CASE A: TRUE BACKGROUND REMOVAL (remove.bg / Direct Segmenter)
             if body.testImageBase64 and is_bg_removal:
@@ -464,7 +578,7 @@ async def test_preview(request: Request, body: TestPreviewRequest):
                 "content": vision_text,
             }
 
-        return TestPreviewResponse(success=True, preview=preview_result)
+        return TestPreviewResponse(success=True, preview=preview_result, ui_meta=ui_meta)
 
     except Exception as e:
         logger.error(f"test_preview error: {e}")
@@ -485,16 +599,20 @@ async def test_prompt(request: Request, body: TestPromptRequest):
         resolved = body.userPrompt
         for key, value in (body.testInputs or {}).items():
             val_str = str(value or "")
-            resolved = re.sub(re.escape(f"$${key}"), val_str, resolved, flags=re.I)
-            resolved = re.sub(re.escape(f"[{key}]"), val_str, resolved, flags=re.I)
-            
+            keys_to_try = [key]
             key_alt1 = key.replace(" ", "_")
-            resolved = re.sub(re.escape(f"$${key_alt1}"), val_str, resolved, flags=re.I)
-            resolved = re.sub(re.escape(f"[{key_alt1}]"), val_str, resolved, flags=re.I)
-            
+            if key_alt1 not in keys_to_try:
+                keys_to_try.append(key_alt1)
             key_alt2 = key.replace("_", " ")
-            resolved = re.sub(re.escape(f"$${key_alt2}"), val_str, resolved, flags=re.I)
-            resolved = re.sub(re.escape(f"[{key_alt2}]"), val_str, resolved, flags=re.I)
+            if key_alt2 not in keys_to_try:
+                keys_to_try.append(key_alt2)
+
+            for k in keys_to_try:
+                resolved = re.sub(re.escape(f"$${k}$$"), val_str, resolved, flags=re.I)
+                resolved = re.sub(re.escape(f"$${k}"), val_str, resolved, flags=re.I)
+                resolved = re.sub(re.escape(f"${k}$$"), val_str, resolved, flags=re.I)
+                resolved = re.sub(re.escape(f"${k}"), val_str, resolved, flags=re.I)
+                resolved = re.sub(re.escape(f"[{k}]"), val_str, resolved, flags=re.I)
 
         raw = await llm.openrouter_chat(
             system_prompt=body.systemPrompt or "You are a helpful AI assistant.",

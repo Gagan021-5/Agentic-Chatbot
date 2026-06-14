@@ -23,6 +23,7 @@ COLLECTION_NAMES = {
     "examples": "kb_examples",
     "seo": "kb_seo",
     "marketplace": "kb_marketplace",
+    "blueprints": "kb_blueprints",
 }
 
 

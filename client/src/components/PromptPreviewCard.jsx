@@ -1,7 +1,34 @@
 import { useState } from "react";
 
-function renderPromptWithHighlights(text) {
-  const parts = String(text || "").split(/(\$\$[a-zA-Z_]+)/g);
+function renderPromptWithHighlights(text, variables = []) {
+  if (!text) return null;
+  const rawVars = variables || [];
+  if (rawVars.length === 0) {
+    const parts = String(text).split(/(\$\$[\w\-]+(?:\$\$)?)/g);
+    return parts.map((part, i) =>
+      part.startsWith("$$") ? (
+        <span key={`${part}-${i}`} className="rounded-md bg-rent-purple/15 px-1.5 py-0.5 font-bold text-rent-purple">{part}</span>
+      ) : (
+        <span key={`${part}-${i}`}>{part}</span>
+      )
+    );
+  }
+
+  // Sort variables by length descending to match longer ones first
+  const sortedVars = [...rawVars].sort((a, b) => b.length - a.length);
+
+  const varPatterns = sortedVars.map(v => {
+    const clean = String(v).replace(/^\$\$/, "").replace(/\$\$$/, "");
+    const escaped = clean.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&');
+    const flexible = escaped.split(/[_\s\-]+/).join('[_\\s\\-]+');
+    return `\\$\\$${flexible}(?:\\$\\$)?`;
+  });
+
+  // Generic fallback pattern to match word variables
+  varPatterns.push('\\$\\$[a-zA-Z0-9_\\-]+(?:\\$\\$)?');
+
+  const regex = new RegExp(`(${varPatterns.join('|')})`, 'gi');
+  const parts = String(text).split(regex);
   return parts.map((part, i) =>
     part.startsWith("$$") ? (
       <span key={`${part}-${i}`} className="rounded-md bg-rent-purple/15 px-1.5 py-0.5 font-bold text-rent-purple">{part}</span>
@@ -37,7 +64,7 @@ function PromptPreviewCard({ data, onSendMessage }) {
       </div>
 
       <div className="mt-4 rounded-xl border border-rent-border bg-rent-surface/80 p-3 font-mono text-xs leading-6 text-white/80 sm:mt-5 sm:rounded-2xl sm:p-4 sm:text-sm sm:leading-7">
-        {renderPromptWithHighlights(data.userPrompt)}
+        {renderPromptWithHighlights(data.userPrompt, data.variablesUsed)}
       </div>
 
       {data.negativePrompt ? (

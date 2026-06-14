@@ -27,6 +27,14 @@ export default function AppPreviewCard({ data, onSendMessage, sessionId, storage
   const [imageError, setImageError] = useState(false);
   const [testImage, setTestImage] = useState(null);
   const [testImageInfo, setTestImageInfo] = useState(null); // { w, h, kb }
+  const [uiMeta, setUiMeta] = useState(() => {
+    return data?.ui_meta || {
+      show_upload: data?.acceptImageInput || false,
+      show_url_input: false,
+      active_tool: null,
+      layout_mode: data?.acceptImageInput ? 'interactive' : 'static'
+    };
+  });
 
   const storageKey = useMemo(
     () => livePreviewStorageKey(sessionId, storageMessageId),
@@ -101,10 +109,39 @@ export default function AppPreviewCard({ data, onSendMessage, sessionId, storage
 
   if (!data) return null;
 
+  // Support both data.variables (new) and data.variablesUsed (existing)
+  const rawVariables = (data.variables && data.variables.length > 0) ? data.variables : (data.variablesUsed || []);
+  const normalizedVariables = rawVariables.map((v) => {
+    if (typeof v === 'object' && v.name) return v.name;
+    return String(v || "").replace(/^\$\$/, "").replace(/\$\$$/, "");
+  }).filter(Boolean);
+
   // Format variables beautifully
   const formatPrompt = (text) => {
     if (!text) return null;
-    const parts = text.split(/(\$\$[\w\s]+?\$\$|\$\$\w+)/g);
+    if (!normalizedVariables || normalizedVariables.length === 0) {
+      const parts = text.split(/(\$\$[\w\s\-]+?\$\$|\$\$[\w\-]+)/g);
+      return parts.map((part, i) =>
+        part.startsWith('$$') ? <span key={i} className="text-rent-purple font-semibold">{part}</span> : part
+      );
+    }
+
+    // Sort variables by length descending to match longer ones first
+    const sortedVars = [...normalizedVariables].sort((a, b) => b.length - a.length);
+
+    // Create regex patterns for each variable
+    const varPatterns = sortedVars.map(v => {
+      const clean = String(v).replace(/^\$\$/, "").replace(/\$\$$/, "");
+      const escaped = clean.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&');
+      const flexible = escaped.split(/[_\s\-]+/).join('[_\\s\\-]+');
+      return `\\$\\$${flexible}(?:\\$\\$)?`;
+    });
+
+    // Generic fallback pattern
+    varPatterns.push('\\$\\$[a-zA-Z0-9_\\-]+(?:\\$\\$)?');
+
+    const regex = new RegExp(`(${varPatterns.join('|')})`, 'g');
+    const parts = text.split(regex);
     return parts.map((part, i) =>
       part.startsWith('$$') ? <span key={i} className="text-rent-purple font-semibold">{part}</span> : part
     );
@@ -126,12 +163,11 @@ export default function AppPreviewCard({ data, onSendMessage, sessionId, storage
     }
   };
 
-  // Support both data.variables (new) and data.variablesUsed (existing)
-  const rawVariables = (data.variables && data.variables.length > 0) ? data.variables : (data.variablesUsed || []);
-  const normalizedVariables = rawVariables.map((v) => {
-    if (typeof v === 'object' && v.name) return v.name;
-    return String(v || "").replace(/^\$\$/, "").replace(/\$\$$/, "");
-  }).filter(Boolean);
+  const adjustHeight = (el) => {
+    if (!el) return;
+    el.style.height = 'auto';
+    el.style.height = el.scrollHeight + 'px';
+  };
 
   const handleTestInputChange = (name, value) => {
     setTestInputs(prev => ({ ...prev, [name]: value }));
@@ -164,6 +200,9 @@ export default function AppPreviewCard({ data, onSendMessage, sessionId, storage
       });
       if (json.success) {
         setPreviewResult(json.preview);
+        if (json.ui_meta) {
+          setUiMeta(json.ui_meta);
+        }
       } else {
         setPreviewError(json.error || "Preview generation failed.");
       }
@@ -228,9 +267,16 @@ export default function AppPreviewCard({ data, onSendMessage, sessionId, storage
         {/* ─── Live Preview Mode ─── */}
         {isPreviewMode && (
           <div className="space-y-4 bg-[#0a0a0f] p-5 rounded-xl border border-purple-500/15">
-            <div className="flex items-center gap-2">
-              <div className="h-2 w-2 rounded-full bg-[#7c3aed] animate-pulse" />
-              <h4 className="text-sm font-semibold text-white">Live Preview — Test Your App</h4>
+            <div className="flex items-center justify-between flex-wrap gap-2">
+              <div className="flex items-center gap-2">
+                <div className="h-2 w-2 rounded-full bg-[#7c3aed] animate-pulse" />
+                <h4 className="text-sm font-semibold text-white">Live Preview — Test Your App</h4>
+              </div>
+              {uiMeta.active_tool && (
+                <span className="text-[9px] bg-purple-500/15 text-[#a77bf3] border border-purple-500/20 px-2.5 py-0.5 rounded-full font-bold uppercase tracking-wider">
+                  🛠️ {uiMeta.active_tool.replace('_', ' ')}
+                </span>
+              )}
             </div>
             <p className="text-xs text-gray-400 mb-3">
               Enter sample data below to see how your <span className="font-bold text-[#a77bf3] uppercase">{data.appType || 'TEXT'}</span> app will respond.
@@ -248,12 +294,12 @@ export default function AppPreviewCard({ data, onSendMessage, sessionId, storage
                 <div key={i} className="flex flex-col gap-1.5">
                   <label className="text-xs text-gray-300 ml-1 font-medium">{toLabel(varName)}</label>
                   <textarea
+                    ref={adjustHeight}
                     rows={1}
                     value={testInputs[varName] || ''}
-                    onChange={(e) => handleTestInputChange(varName, e.target.value)}
-                    onInput={(e) => {
-                      e.target.style.height = 'auto';
-                      e.target.style.height = e.target.scrollHeight + 'px';
+                    onChange={(e) => {
+                      handleTestInputChange(varName, e.target.value);
+                      adjustHeight(e.target);
                     }}
                     placeholder={placeholderText}
                     className="w-full bg-[#121018] border border-white/[0.06] rounded-xl px-4 py-2.5 text-sm text-gray-200 outline-none focus:outline-none focus:ring-1 focus:ring-purple-500/50 focus:border-purple-500/30 transition-all duration-200 placeholder:text-gray-600 resize-none overflow-hidden leading-relaxed"
@@ -293,28 +339,23 @@ export default function AppPreviewCard({ data, onSendMessage, sessionId, storage
               </div>
             )}
 
-            {/* Image upload — shown ONLY when the app needs user to provide a source image.
-                acceptImageInput is set by the LLM based on app purpose:
-                  TRUE:  background removal, room redesign, portrait editing, style transfer
-                  FALSE: logo generator, poster creator, text-to-image art generator
-                HARD GUARD: Only image and vision apps can ever show upload — audio/text/video NEVER need it. */}
-            {data.acceptImageInput && ['image', 'vision'].includes(data.appType?.toLowerCase()) && (
-              <div className="flex flex-col gap-1.5 mb-3">
+            {/* Decoupled Image Upload Zone */}
+            {uiMeta.show_upload && (
+              <div className="flex flex-col gap-1.5 mb-3 bg-purple-500/5 p-4 rounded-xl border border-purple-500/10">
                 <label className="text-xs text-[#a77bf3] font-semibold uppercase tracking-wider ml-1">
-                  {data.appType?.toLowerCase() === 'vision'
-                    ? '📷 Upload Image to Analyze'
-                    : '🖼 Upload Your Source Image'}
+                  🖼️ Upload Your Source Image
                 </label>
                 <p className="text-xs text-gray-500 ml-1 -mt-0.5">
-                  {data.appType?.toLowerCase() === 'vision'
-                    ? 'Upload the image this app will analyze'
-                    : 'Upload the photo you want to transform'}
+                  Upload the photo you want to analyze or transform
                 </p>
                 {testImage && (
-                  <div className="relative w-full rounded-xl overflow-hidden border border-purple-500/20 mb-2">
+                  <div className="relative w-full rounded-xl overflow-hidden border border-purple-500/20 mb-2 mt-1">
                     <img src={testImage} alt="Preview" className="w-full max-h-48 object-contain bg-black/40" />
                     <button
-                      onClick={() => setTestImage(null)}
+                      onClick={() => {
+                        setTestImage(null);
+                        setTestImageInfo(null);
+                      }}
                       className="absolute top-2 right-2 bg-black/70 text-white rounded-full w-6 h-6 flex items-center justify-center text-xs hover:bg-red-500/80 transition-colors"
                     >✕</button>
                   </div>
@@ -336,7 +377,26 @@ export default function AppPreviewCard({ data, onSendMessage, sessionId, storage
                       reader.readAsDataURL(file);
                     }
                   }}
-                  className="text-xs text-gray-400 file:mr-4 file:py-2 file:px-4 file:rounded-lg file:border-0 file:text-xs file:font-semibold file:bg-[#2a2238] file:text-[#a77bf3] hover:file:bg-[#3b2d50] cursor-pointer"
+                  className="text-xs text-gray-400 file:mr-4 file:py-2 file:px-4 file:rounded-lg file:border-0 file:text-xs file:font-semibold file:bg-[#2a2238] file:text-[#a77bf3] hover:file:bg-[#3b2d50] cursor-pointer mt-1"
+                />
+              </div>
+            )}
+
+            {/* Decoupled URL Fetching Zone */}
+            {uiMeta.show_url_input && (
+              <div className="flex flex-col gap-1.5 mb-3 bg-blue-500/5 p-4 rounded-xl border border-blue-500/10">
+                <label className="text-xs text-[#3b82f6] font-semibold uppercase tracking-wider ml-1">
+                  🌐 Source Resource URL
+                </label>
+                <p className="text-xs text-gray-500 ml-1 -mt-0.5">
+                  Enter an external image or webpage URL to fetch and process
+                </p>
+                <input
+                  type="text"
+                  value={testInputs['source_url'] || ''}
+                  onChange={(e) => handleTestInputChange('source_url', e.target.value)}
+                  placeholder="https://example.com/image.jpg"
+                  className="w-full bg-[#121018] border border-white/[0.06] rounded-xl px-4 py-2.5 text-sm text-gray-200 outline-none focus:outline-none focus:ring-1 focus:ring-blue-500/50 focus:border-blue-500/30 transition-all duration-200 placeholder:text-gray-600 mt-1"
                 />
               </div>
             )}
