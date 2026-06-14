@@ -1,8 +1,8 @@
 """
 Conversational State Machine using LangGraph.
-Refactored from the legacy procedural step router.
+Routed through the battle-tested step_router.
 """
 
-from graphs.pipeline import route, PipelineState as ConversationState, compiled_graph
+from services.step_router import route, ConversationState, compiled_graph
 
 __all__ = ["route", "ConversationState", "compiled_graph"]

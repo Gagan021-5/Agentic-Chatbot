@@ -564,7 +564,7 @@ async def triage_dynamic_context(
         try:
             result = await llm.groq_completion(
                 messages=triage_messages,
-                model="llama-3.1-8b-instant",
+                model="llama-3.3-70b-versatile",
                 response_format={"type": "json_object"},
             )
             content = result.get("choices", [{}])[0].get("message", {}).get("content", "{}")

@@ -15,7 +15,7 @@ from schemas.api_schemas import (
     PromptOptimizeResponse,
     VariableSchema,
 )
-from graphs.pipeline import compiled_graph, PipelineState
+from graphs.orchestrator import compiled_graph, ConversationState as PipelineState
 
 logger = structlog.get_logger(__name__)
 router = APIRouter()
