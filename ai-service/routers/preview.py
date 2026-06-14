@@ -277,6 +277,19 @@ async def test_preview(request: Request, body: TestPreviewRequest):
     app_type = (body.appType or "text").lower()
     is_ready = body.status == "ready" or getattr(body, "status", None) == "ready"
 
+    # Filter out any "default" or "template" variables that are not explicitly extracted
+    bloat_patterns = [
+        r"date\s*of\s*creation", r"jump\s*scare", r"video\s*title", r"age\s*rating",
+        r"creation\s*date", r"scare\s*frequency", r"frequency"
+    ]
+    sanitized_variables = {}
+    for k, v in body.variables.items():
+        k_lower = k.lower()
+        if any(re.search(pat, k_lower) for pat in bloat_patterns):
+            continue
+        sanitized_variables[k] = v
+    body.variables = sanitized_variables
+
     # Construct combined context to query RAG blueprints
     transform_goal = "; ".join(
         f"{k}: {v}" for k, v in body.variables.items() if v
@@ -572,6 +585,10 @@ async def test_preview(request: Request, body: TestPreviewRequest):
                 "url": body.testImageBase64 or "https://via.placeholder.com/400x200.png?text=No+Image",
                 "content": vision_text,
             }
+
+        if ui_meta is None:
+            ui_meta = {}
+        ui_meta["variables"] = list(body.variables.keys())
 
         return TestPreviewResponse(success=True, preview=preview_result, ui_meta=ui_meta)
 

@@ -507,77 +507,106 @@ def _is_ready_to_generate(session_context: dict) -> bool:
 
 
 def bypass_wizard_if_ready(session_context: dict, text: str = "") -> bool:
-    required_slots = ['PRIMARY_SUBJECT', 'ENVIRONMENT_SETTING', 'ACTION_DYNAMIC', 'AESTHETIC_STYLE']
-    
-    # Generic extraction check
-    filled_slots = []
-    for slot in required_slots:
-        val = session_context.get(slot) or (session_context.get("extraction") or {}).get(slot)
-        if val:
-            filled_slots.append(slot)
-            
-    # Count words in prompt text
-    prompt_text = text or session_context.get("message") or ""
-    words = [w for w in prompt_text.split() if w]
-    word_count = len(words)
-
-    # Bypass if we have at least 3 slots filled OR (word_count > 8 and clear entities)
-    has_clear_entities = (
-        (session_context.get("extraction") or {}).get("PRIMARY_SUBJECT") is not None and
-        (session_context.get("extraction") or {}).get("ENVIRONMENT_SETTING") is not None and
-        (session_context.get("extraction") or {}).get("ACTION_DYNAMIC") is not None
-    )
-    
-    should_bypass = len(filled_slots) >= 3 or (word_count > 8 and has_clear_entities)
-    
-    if should_bypass:
-        session_context["status"] = "ready"
-        session_context["session_status"] = "ready"
-        session_context["awaitingDeepAnswer"] = False
-        session_context["artisticPriority"] = True
-        session_context["formConfirmed"] = True
-        
-        # Populate session["dynamicContext"]["variables"] if not done
-        extraction = session_context.get("extraction") or session_context
-        
-        sub = extraction.get("PRIMARY_SUBJECT")
-        env = extraction.get("ENVIRONMENT_SETTING")
-        act = extraction.get("ACTION_DYNAMIC")
-        aes = extraction.get("AESTHETIC_STYLE")
-        
-        variables = []
-        if sub:
-            variables.append({"name": "PRIMARY_SUBJECT", "placeholder": "Primary Subject", "test_value": sub})
-        if env:
-            variables.append({"name": "ENVIRONMENT_SETTING", "placeholder": "Environment Setting", "test_value": env})
-        if act:
-            variables.append({"name": "ACTION_DYNAMIC", "placeholder": "Action Dynamic", "test_value": act})
-        if aes:
-            variables.append({"name": "AESTHETIC_STYLE", "placeholder": "Aesthetic Style", "test_value": aes})
-            
-        if not session_context.get("dynamicContext"):
-            session_context["dynamicContext"] = {}
-        session_context["dynamicContext"]["variables"] = variables
-        session_context["dynamicContext"]["options"] = ["Dynamic UI Blueprint", "Multi-Slot Extraction", "Artistic Override", "Ready Canvas"]
-        
-        if not session_context.get("deepAnswers"):
-            session_context["deepAnswers"] = {}
-        session_context["deepAnswers"]["budgetPreference"] = "Premium"
-        session_context["currentDeepField"] = None
-        session_context["lastSlotKey"] = None
-        session_context["triageRounds"] = 0
-        
-        if not session_context.get("appType"):
-            session_context["appType"] = "image"
-            if "extraction" in session_context:
-                session_context["extraction"]["appType"] = "image"
-                
-        return True
     return False
 
 
+def prefill_dynamic_context_variables(session: dict) -> None:
+    dynamic_context = session.get("dynamicContext") or {}
+    variables = dynamic_context.get("variables") or []
+    if not variables:
+        return
+    
+    extraction = session.get("extraction") or {}
+    deep_answers = session.get("deepAnswers") or {}
+    
+    # Create a unified lookup dictionary
+    lookup = {}
+    # 1. Start with extraction fields
+    for k, v in extraction.items():
+        if isinstance(v, str) and v.strip():
+            lookup[k.lower().replace("_", " ")] = v.strip()
+    # 2. Update/override with deep answers
+    for k, v in deep_answers.items():
+        if not k.startswith("_") and isinstance(v, str) and v.strip():
+            lookup[k.lower().replace("_", " ")] = v.strip()
+            
+    # Also add direct mappings for universal dimensions
+    universal_mappings = {
+        "subject": extraction.get("PRIMARY_SUBJECT"),
+        "primary subject": extraction.get("PRIMARY_SUBJECT"),
+        "setting": extraction.get("ENVIRONMENT_SETTING"),
+        "environment setting": extraction.get("ENVIRONMENT_SETTING"),
+        "environment": extraction.get("ENVIRONMENT_SETTING"),
+        "location": extraction.get("ENVIRONMENT_SETTING"),
+        "action": extraction.get("ACTION_DYNAMIC"),
+        "action dynamic": extraction.get("ACTION_DYNAMIC"),
+        "activity": extraction.get("ACTION_DYNAMIC"),
+        "style": extraction.get("AESTHETIC_STYLE"),
+        "aesthetic": extraction.get("AESTHETIC_STYLE"),
+        "aesthetic style": extraction.get("AESTHETIC_STYLE"),
+        "visual style": extraction.get("AESTHETIC_STYLE"),
+        "preferred style": extraction.get("AESTHETIC_STYLE"),
+    }
+    for k, v in universal_mappings.items():
+        if v and isinstance(v, str) and v.strip():
+            lookup[k] = v.strip()
+            
+    app_purpose = str(extraction.get("appPurpose") or "").lower()
+            
+    prefilled = []
+    for var in variables:
+        if not isinstance(var, dict):
+            continue
+        var_name = str(var.get("name") or "").lower().strip()
+        
+        # Filter out default/template/legacy variables that are not explicitly extracted
+        bloat_patterns = [
+            r"date\s*of\s*creation", r"jump\s*scare", r"video\s*title", r"age\s*rating",
+            r"creation\s*date", r"scare\s*frequency", r"frequency"
+        ]
+        if any(re.search(pat, var_name) for pat in bloat_patterns):
+            continue
+            
+        prefilled_value = None
+        
+        # Exact match
+        if var_name in lookup:
+            prefilled_value = lookup[var_name]
+        else:
+            # Fuzzy check: does any key in lookup exist in var_name or vice versa
+            for lookup_key, lookup_val in lookup.items():
+                if lookup_key in var_name or var_name in lookup_key:
+                    prefilled_value = lookup_val
+                    break
+        
+        # Check relevance
+        is_relevant = False
+        if prefilled_value:
+            is_relevant = True
+        else:
+            purpose_words = [w for w in re.findall(r'\b[a-z]{4,}\b', app_purpose) if w not in (
+                "want", "build", "create", "make", "app", "generator", "tool", "using"
+            )]
+            for word in purpose_words:
+                if word in var_name:
+                    is_relevant = True
+                    break
+            core_keywords = ["subject", "style", "tone", "topic", "concept", "details", "theme", "prompt", "inputs", "text"]
+            if any(k in var_name for k in core_keywords):
+                is_relevant = True
+                
+        if is_relevant:
+            prefilled.append({
+                **var,
+                "test_value": prefilled_value or var.get("test_value") or var.get("placeholder") or ""
+            })
+            
+    dynamic_context["variables"] = prefilled[:4]
+    session["dynamicContext"] = dynamic_context
+
+
 def _check_and_apply_artistic_priority(session: dict, text: str) -> None:
-    bypass_wizard_if_ready(session, text)
+    pass
 
 
 def _get_next_deep_question(session: dict) -> dict | None:
@@ -653,16 +682,6 @@ async def _show_models(session: dict, app_state: Any) -> dict:
 async def _build_step0_response(session: dict, text: str, app_state: Any) -> dict:
     llm = app_state.llm
     ext = session.get("extraction") or {}
-
-    _check_and_apply_artistic_priority(session, text)
-    if session.get("artisticPriority"):
-        session["formConfirmed"] = True
-        session["awaitingDeepAnswer"] = False
-        session["currentDeepField"] = None
-        session["lastSlotKey"] = None
-        session["triageRounds"] = 0
-        await _save(session, app_state)
-        return await _show_models(session, app_state)
 
     ambiguous_domain_signals = [
         "birthday", "greeting", "certificate", "diploma", "award",
@@ -857,7 +876,35 @@ async def _build_step0_response(session: dict, text: str, app_state: Any) -> dic
                     _detect_language_mode(session),
                 )
             session["triageRounds"] = 0
+            prefill_dynamic_context_variables(session)
             await _save(session, app_state)
+            
+            return {
+                "reply": "I've started with your idea, let's confirm the details.",
+                "uiType": "multi_select_form",
+                "uiData": session["dynamicContext"],
+                "nextStep": 0,
+                "coins": None,
+            }
+
+    if not session.get("formConfirmed"):
+        affirmations = ["yes", "sure", "ok", "yep", "yeah", "correct", "sounds good", "exactly", "perfect", "proceed", "looks good"]
+        msg_clean = re.sub(r"[!.,?]+$", "", _lower(text).strip())
+        is_affirmation = msg_clean in affirmations
+        
+        if is_affirmation:
+            session["formConfirmed"] = True
+            await _save(session, app_state)
+        else:
+            prefill_dynamic_context_variables(session)
+            await _save(session, app_state)
+            return {
+                "reply": "I've updated the details. Let's confirm the variables below.",
+                "uiType": "multi_select_form",
+                "uiData": session["dynamicContext"],
+                "nextStep": 0,
+                "coins": None,
+            }
 
     last_slot = session.get("lastSlotKey")
     if last_slot and text:
@@ -866,7 +913,6 @@ async def _build_step0_response(session: dict, text: str, app_state: Any) -> dic
         if not session["deepAnswers"].get(last_slot):
             session["deepAnswers"][last_slot] = text
 
-    session["formConfirmed"] = True
     session["lastSlotKey"] = None
     await _save(session, app_state)
 
@@ -897,15 +943,6 @@ async def _exec_gather_requirements(session: dict, text: str, app_state: Any) ->
     latest_extraction = await extract_requirements(app_state.llm, text, session["history"])
     session["extraction"] = _merge_extraction(session.get("extraction"), latest_extraction, text)
     
-    _check_and_apply_artistic_priority(session, text)
-    if session.get("artisticPriority"):
-        session["formConfirmed"] = True
-        session["awaitingDeepAnswer"] = False
-        session["currentDeepField"] = None
-        session["lastSlotKey"] = None
-        session["triageRounds"] = 0
-        await _save(session, app_state)
-        return await _show_models(session, app_state)
     session["languageMode"] = _detect_language_mode(session)
     extraction = session.get("extraction") or {}
     if extraction.get("enterpriseSignals") is not None:
@@ -1003,43 +1040,7 @@ async def _exec_generate_preview(session: dict, text: str, app_state: Any) -> di
             )
             session["dynamicContext"] = dynamic_context
 
-        # Prefill dynamicContext variables from conversational slot answers
-        deep_answers = session.get("deepAnswers") or {}
-        extraction = session.get("extraction") or {}
-        variables = dynamic_context.get("variables") or []
-
-        if variables and (deep_answers or extraction):
-            prefilled = []
-            for var in variables:
-                var_name = str(var.get("name") or "").lower().replace(" ", "_")
-                # Try exact slot key match first
-                prefilled_value = None
-                for slot_key, slot_val in deep_answers.items():
-                    if slot_key.startswith("_"):
-                        continue
-                    if slot_key in var_name or var_name in slot_key:
-                        prefilled_value = str(slot_val)
-                        break
-                # Fallback: fuzzy match on keywords
-                if not prefilled_value:
-                    keywords = re.findall(r'[a-z]{4,}', var_name)
-                    for kw in keywords:
-                        for slot_key, slot_val in deep_answers.items():
-                            if slot_key.startswith("_"):
-                                continue
-                            if kw in slot_key:
-                                prefilled_value = str(slot_val)
-                                break
-                        if prefilled_value:
-                            break
-                prefilled.append({
-                    **var,
-                    "test_value": prefilled_value or var.get("test_value") or var.get("placeholder") or ""
-                })
-            
-            if not session.get("dynamicContext"):
-                session["dynamicContext"] = {}
-            session["dynamicContext"]["variables"] = prefilled
+        prefill_dynamic_context_variables(session)
 
         prompt_data, seo_data = await asyncio.gather(
             generate_prompt_template(llm, session),
@@ -1311,6 +1312,17 @@ async def _exec_handle_budget(session: dict, text: str, decision: dict, app_stat
         session["awaitingDeepAnswer"] = False
         session["currentDeepField"] = None
         await _save(session, app_state)
+        
+        if not session.get("formConfirmed"):
+            prefill_dynamic_context_variables(session)
+            await _save(session, app_state)
+            return {
+                "reply": "Budget updated. Let's confirm the details for your app below.",
+                "uiType": "multi_select_form",
+                "uiData": session["dynamicContext"],
+                "nextStep": 0,
+                "coins": None,
+            }
         return await _show_models(session, app_state)
 
     return {
@@ -1331,6 +1343,17 @@ async def _exec_change_model(session: dict, text: str, decision: dict, app_state
             ),
             "uiType": None,
             "uiData": None,
+            "nextStep": 0,
+            "coins": None,
+        }
+
+    if not session.get("formConfirmed"):
+        prefill_dynamic_context_variables(session)
+        await _save(session, app_state)
+        return {
+            "reply": "We'll pick the model after confirming your app details. Please confirm the variables below first.",
+            "uiType": "multi_select_form",
+            "uiData": session["dynamicContext"],
             "nextStep": 0,
             "coins": None,
         }
@@ -1677,18 +1700,6 @@ async def ideation_triage_node(state: ConversationState, config: dict) -> dict:
     temp_session = {}
     _state_to_session(state, temp_session)
     
-    _check_and_apply_artistic_priority(temp_session, text)
-    if temp_session.get("artisticPriority"):
-        temp_session["awaitingDeepAnswer"] = False
-        temp_session["currentDeepField"] = None
-        temp_session["formConfirmed"] = True
-        temp_session["lastSlotKey"] = None
-        temp_session["triageRounds"] = 0
-        result = await _show_models(temp_session, app_state)
-        new_state = _session_to_state(temp_session, text)
-        new_state["response_payload"] = result
-        return new_state
-        
     # Check format input from chip override
     chip_type = _parse_chip_app_type(text)
     if chip_type:
@@ -1755,6 +1766,7 @@ async def form_submission_node(state: ConversationState, config: dict) -> dict:
             for v in (payload.get("variables") or [])
             if isinstance(v, dict)
         ]
+        prefill_dynamic_context_variables(temp_session)
         temp_session["formConfirmed"] = True
         if not temp_session.get("extraction"):
             temp_session["extraction"] = {}
@@ -2047,21 +2059,24 @@ async def handle_gibberish_node(state: ConversationState, config: dict) -> dict:
 def route_by_conversational_intent(state: ConversationState) -> str:
     """Dynamic routing logic determining target execution state."""
     action = state.get("recommended_action")
-    
-    # ─── CONTEXT CHECK ───
     is_form_confirmed = bool(state.get("form_confirmed"))
-    extraction = state.get("extraction") or {}
-    deep_answers = state.get("deep_answers") or {}
-    budget_pref = deep_answers.get("budgetPreference") or extraction.get("budget")
-    
-    if is_form_confirmed and budget_pref:
-        if action == "GENERATE_PREVIEW" or state.get("current_step") == 2:
-            return "app_preview_node"
-        return "model_selection_node"
 
+    # Sequential Enforcement: Do NOT allow a jump to model selection/preview nodes unless form is confirmed
+    if not is_form_confirmed:
+        allowed_pre_confirmation = {
+            "GATHER_REQUIREMENTS", "PROCESS_FORM", "HANDLE_GREETING", "HANDLE_OFF_TOPIC",
+            "HANDLE_VIOLATION", "HANDLE_GIBBERISH", "PIVOT_APP"
+        }
+        if action not in allowed_pre_confirmation:
+            return "ideation_triage_node"
+    
     # If the state variables indicate requirements are incomplete, bypass advance attempts
     if action in ("SHOW_MODEL_CARDS", "GENERATE_PREVIEW"):
-        if not is_form_confirmed or not budget_pref:
+        extraction = state.get("extraction") or {}
+        deep_answers = state.get("deep_answers") or {}
+        has_budget = bool(extraction.get("budget") or deep_answers.get("budgetPreference"))
+        
+        if not is_form_confirmed or not has_budget:
             return "ideation_triage_node"
             
     if action == "HANDLE_OFF_TOPIC":
