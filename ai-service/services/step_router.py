@@ -498,53 +498,27 @@ async def _build_step0_response(session: dict, text: str, app_state: Any) -> dic
             "image": [
                 "background remov", "remove background", "bg remov", "image generat", "generate image",
                 "photo generat", "interior design", "room design", "logo generat", "logo maker",
-                "portrait", "art generat", "image creat", "photo edit", "image edit",
-                "visual generat", "thumbnail", "product photo", "banner maker", "illustration",
-                "greeting card", "birthday card", "card maker", "card generat", "poster",
-                "meme", "photo frame", "photo filter", "in the photo", "on the image",
-                "text on image", "text overlay", "image with text", "invitation",
-                "flyer", "avatar", "wallpaper", "sticker", "with photo", "with picture",
-                "birthday card with photo", "birthday image", "birthday poster",
+                "portrait", "art generat", "image edit", "greeting card", "birthday card", "poster", "meme"
             ],
             "video": [
-                "video generat", "generate video", "video creat", "animate", "animation",
-                "photo to video", "image to video", "text to video", "reel generat", "short film",
-                "video ad", "cinematic", "motion graphic",
+                "video generat", "generate video", "video creat", "animate", "animation", "reel generat"
             ],
             "audio": [
-                "audio generat", "voiceover", "voice over", "text to speech", "tts", "speech generat",
-                "music generat", "podcast", "narration", "voice cloning", "sound effect",
-                "audio app", "speak text", "spoken audio", "verbal briefing", "audio briefing",
-                "spoken summary", "audio log", "spoken log", "verbal report", "spoken report",
-                "convert to audio", "read aloud", "audio file", "voice briefing", "tts app",
+                "audio generat", "voiceover", "text to speech", "tts", "music generat", "podcast"
             ],
             "vision": [
-                "crop disease", "plant disease", "detect disease", "object detect", "image analys",
-                "ocr", "read text from image", "invoice scan", "document scan", "quality inspect",
-                "medical image", "x-ray", "analyze image", "image recognit", "face detect",
+                "crop disease", "object detect", "image analys", "ocr", "read text from image", "analyze image"
             ],
             "text": [
-                "advocate", "legal", "lawyer", "law", "blog", "article", "content", "email",
-                "lesson plan", "quiz", "teacher", "educat", "farm advisor", "crop advisor",
-                "chatbot", "chat assistant", "writing", "summarize", "translate", "script",
-                "seo", "description generat", "report generat", "story generat",
-                "resume", "cover letter", "proposal", "invoice", "contract", "newsletter",
-                "recipe", "itinerary", "planner", "workout", "meal plan", "diet plan",
-                "study guide", "flashcard", "essay", "thesis", "assignment", "homework",
-                "letter", "memo", "document", "template", "form generat", "bio generat",
-                "caption", "tagline", "slogan", "headline", "ad copy", "copywriting",
-                "product description", "review generat", "feedback generat", "response generat",
-                "text generat", "write", "draft", "compose", "author",
-                "birthday wishes", "birthday message", "birthday poem", "birthday quote",
+                "blog", "article", "content", "email", "chatbot", "chat assistant", "resume", "cover letter",
+                "proposal", "contract", "recipe", "itinerary", "planner", "workout", "meal plan", "birthday wishes"
             ],
         }
 
         purpose_lower = str(ext.get("appPurpose") or ext.get("oneLineUnderstanding") or "").lower()
 
         if is_ambiguous_domain and not has_explicit_type_from_user:
-            logger.info(
-                f'[Ambiguous Domain] "{purpose_lower[:60]}" matches ambiguous signals — skipping local inference'
-            )
+            logger.info(f'[Ambiguous Domain] "{purpose_lower[:60]}" matches ambiguous signals — skipping local inference')
         else:
             for app_type, signals in local_type_signals.items():
                 if any(sig in purpose_lower for sig in signals):
@@ -561,39 +535,26 @@ async def _build_step0_response(session: dict, text: str, app_state: Any) -> dic
                 logger.info("[Smart Infer] Ambiguous domain detected — NOT auto-inferring type. Triage will ask.")
             else:
                 purpose_l = str(ext.get("appPurpose")).lower()
-                image_signals = [
-                    "photo", "picture", "image", "card", "poster", "meme", "frame", "banner",
-                    "flyer", "invitation", "greeting", "visual", "avatar", "portrait", "logo",
-                    "thumbnail", "in the photo", "on the image", "with picture", "wallpaper", "sticker",
-                ]
-                video_signals = ["video", "animation", "animate", "reel", "clip", "cinematic"]
-                audio_signals = ["audio", "voice", "music", "speech", "podcast", "sound", "tts"]
+                image_signals = ["photo", "picture", "image", "card", "poster", "meme", "logo", "thumbnail"]
+                video_signals = ["video", "animation", "animate", "reel", "clip"]
+                audio_signals = ["audio", "voice", "music", "speech", "podcast", "tts"]
                 vision_signals = ["detect", "analyze image", "scan", "ocr", "read from image"]
 
                 inferred_type = "text"
-                if any(s in purpose_l for s in image_signals):
-                    inferred_type = "image"
-                elif any(s in purpose_l for s in video_signals):
-                    inferred_type = "video"
-                elif any(s in purpose_l for s in audio_signals):
-                    inferred_type = "audio"
-                elif any(s in purpose_l for s in vision_signals):
-                    inferred_type = "vision"
+                if any(s in purpose_l for s in image_signals): inferred_type = "image"
+                elif any(s in purpose_l for s in video_signals): inferred_type = "video"
+                elif any(s in purpose_l for s in audio_signals): inferred_type = "audio"
+                elif any(s in purpose_l for s in vision_signals): inferred_type = "vision"
 
                 session["appType"] = inferred_type
                 if not session.get("extraction"):
                     session["extraction"] = {}
                 session["extraction"]["appType"] = inferred_type
-                logger.info(
-                    f'[Smart Infer] No explicit type for "{str(ext.get("appPurpose"))[:50]}" — inferred {inferred_type}'
-                )
+
         else:
             session["step"] = 0
             await _save(session, app_state)
-            if _detect_language_mode(session) == "Hindi":
-                options = ["टेक्स्ट", "इमेज", "ऑडियो", "वीडियो", "विज़न"]
-            else:
-                options = ["Text", "Image", "Audio", "Video", "Vision"]
+            options = ["टेक्स्ट", "इमेज", "ऑडियो", "वीडियो", "विज़न"] if _detect_language_mode(session) == "Hindi" else ["Text", "Image", "Audio", "Video", "Vision"]
             return {
                 "reply": "What kind of output should your app produce?",
                 "uiType": "chips",
@@ -606,10 +567,7 @@ async def _build_step0_response(session: dict, text: str, app_state: Any) -> dic
     session["awaitingConfirmation"] = False
 
     if not session.get("dynamicContext"):
-        affirmations = [
-            "yes", "sure", "ok", "yep", "yeah", "correct", "sounds good", "exactly",
-            "perfect", "go ahead", "proceed", "that's right", "looks good", "right", "agreed", "great",
-        ]
+        affirmations = ["yes", "sure", "ok", "yep", "yeah", "correct", "sounds good", "exactly", "perfect", "proceed", "looks good"]
         msg_clean = re.sub(r"[!.,?]+$", "", _lower(text).strip())
         is_affirmation = msg_clean in affirmations
 
@@ -617,6 +575,26 @@ async def _build_step0_response(session: dict, text: str, app_state: Any) -> dic
             session["triageRounds"] = 99
             await _save(session, app_state)
         else:
+            # ─── 🚀 LIVE RAG EXTRACTION INTEGRATION LAYER ───
+            rag_context = ""
+            vector_store = getattr(app_state, "vector_store", None)
+            if vector_store and hasattr(vector_store, "search"):
+                try:
+                    matches = await vector_store.search(
+                        query=ext.get("appPurpose") or text,
+                        categories=["marketplace", "examples"],
+                        top_k=2,
+                    )
+                    rag_context = "\n\n".join(
+                        [m.get("content", "") for m in matches if m.get("content")]
+                    )
+                    logger.info(
+                        f"[RAG Grounding] Injected {len(matches)} contextual layout blueprints safely."
+                    )
+                except Exception as e:
+                    logger.warning(f"Triage RAG lookup failed: {e}")
+
+            # Execute context triage grounded dynamically via real platform knowledge base chunks
             triage_result = await triage_dynamic_context(
                 llm,
                 session.get("appType"),
@@ -624,7 +602,7 @@ async def _build_step0_response(session: dict, text: str, app_state: Any) -> dic
                 _detect_language_mode(session),
                 session.get("history") or [],
                 session.get("deepAnswers") or {},
-                rag_context=session.get("ragContext") or "",
+                rag_context=rag_context,
             )
 
             if (session.get("triageRounds") or 0) >= 3 and triage_result.get("status") in (
@@ -642,37 +620,35 @@ async def _build_step0_response(session: dict, text: str, app_state: Any) -> dic
             if triage_result.get("status") == "needs_context":
                 question = str(triage_result.get("question") or "").strip()
                 if len(question) >= 10:
-                    # Store the PREVIOUS user answer against the PREVIOUS question's slot
                     last_q = session.get("lastQuestion") or ""
                     last_slot = session.get("lastSlotKey")
                     if last_q and text and last_slot:
                         if not session.get("deepAnswers"):
                             session["deepAnswers"] = {}
-                        # Don't overwrite already-set slots
                         if not session["deepAnswers"].get(last_slot):
                             session["deepAnswers"][last_slot] = text
 
-                    # Store current question's slot key for next round
                     slot_key = (
-                        triage_result.get("slot_key") 
+                        triage_result.get("slot_key")
                         or _infer_slot_key_from_question(question)
                     )
                     session["lastSlotKey"] = slot_key
                     session["triageRounds"] = (session.get("triageRounds") or 0) + 1
                     session["lastQuestion"] = question
-                    
-                    # Store in deepAnswers so triage sees it next round
+
                     if not session.get("deepAnswers"):
                         session["deepAnswers"] = {}
                     session["deepAnswers"]["_lastTriageQuestion"] = question
-                    
+
                     await _save(session, app_state)
                     suggested = triage_result.get("suggested_options")
-                    # Only show chips for output FORMAT questions (text/image/audio/video/vision)
                     is_format_question = (
-                        isinstance(suggested, list) and
-                        len(suggested) >= 2 and
-                        all(s.lower() in ("text", "image", "audio", "video", "vision") for s in suggested)
+                        isinstance(suggested, list)
+                        and len(suggested) >= 2
+                        and all(
+                            s.lower() in ("text", "image", "audio", "video", "vision")
+                            for s in suggested
+                        )
                     )
                     return {
                         "reply": question,
@@ -683,9 +659,6 @@ async def _build_step0_response(session: dict, text: str, app_state: Any) -> dic
                     }
 
             if triage_result.get("corrected_app_type") and triage_result["corrected_app_type"] != session.get("appType"):
-                logger.info(
-                    f'[Triage] Type correction: {session.get("appType")} → {triage_result["corrected_app_type"]}'
-                )
                 session["appType"] = triage_result["corrected_app_type"]
                 if session.get("extraction"):
                     session["extraction"]["appType"] = triage_result["corrected_app_type"]
@@ -695,14 +668,13 @@ async def _build_step0_response(session: dict, text: str, app_state: Any) -> dic
             else:
                 session["dynamicContext"] = await generate_dynamic_context(
                     llm,
-                    session.get("appType") or (session.get("extraction") or {}).get("appType") or "text",
+                    session.get("appType") or "text",
                     (session.get("extraction") or {}).get("appPurpose") or "",
                     _detect_language_mode(session),
                 )
             session["triageRounds"] = 0
             await _save(session, app_state)
 
-    # Store last user answer before going ready
     last_slot = session.get("lastSlotKey")
     if last_slot and text:
         if not session.get("deepAnswers"):
@@ -710,12 +682,10 @@ async def _build_step0_response(session: dict, text: str, app_state: Any) -> dic
         if not session["deepAnswers"].get(last_slot):
             session["deepAnswers"][last_slot] = text
 
-    # Mark form as confirmed — skip form UI entirely
     session["formConfirmed"] = True
     session["lastSlotKey"] = None
     await _save(session, app_state)
 
-    # Check budget and proceed
     extraction = session.get("extraction") or {}
     deep_answers = session.get("deepAnswers") or {}
     has_budget = extraction.get("budget") or deep_answers.get("budgetPreference")
