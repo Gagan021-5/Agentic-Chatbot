@@ -426,9 +426,27 @@ export default function AppPreviewCard({ data, onSendMessage, sessionId, storage
             )}
 
             {/* PREVIEW RESULTS DISPLAY */}
-            {previewResult && (
+            {(isGenerating || previewResult) && (
               <div className="mt-4 pt-4 border-t border-[#2a2238] animate-fade-in-up">
                 <span className="text-xs font-semibold text-[#a77bf3] uppercase tracking-wider mb-3 block">Result</span>
+
+                {isGenerating && (
+                  <div className="w-full aspect-video rounded-xl border border-[#3b2d50] bg-black flex flex-col items-center justify-center p-4 mb-3 animate-pulse">
+                    <svg className="animate-spin h-8 w-8 text-[#a77bf3] mb-3" viewBox="0 0 24 24" fill="none">
+                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z" />
+                    </svg>
+                    <p className="text-sm text-gray-300">
+                      {data?.appType === 'video' ? 'Generating video preview...' : 'Generating preview...'}
+                    </p>
+                    <p className="text-xs text-gray-500 mt-1">
+                      {data?.appType === 'video' ? 'This typically takes 5-10 seconds.' : 'Please wait while we call the AI models.'}
+                    </p>
+                  </div>
+                )}
+
+                {previewResult && !isGenerating && (
+                  <>
 
                 {(previewResult.type === 'image' || previewResult.type === 'multimodal') &&
                   !previewResult.url &&
@@ -550,6 +568,7 @@ export default function AppPreviewCard({ data, onSendMessage, sessionId, storage
                       previewResult.data ? "rounded-t-xl border-b-0" : "rounded-xl"
                     }`}>
                       <video
+                        key={previewResult.url}
                         src={previewResult.url}
                         controls
                         autoPlay
@@ -574,6 +593,8 @@ export default function AppPreviewCard({ data, onSendMessage, sessionId, storage
                   <div className="bg-[#1a1525] p-3 rounded-lg border border-[#2a2238]">
                     <p className="text-sm text-gray-200 whitespace-pre-wrap leading-relaxed">{previewResult.content}</p>
                   </div>
+                )}
+                  </>
                 )}
               </div>
             )}

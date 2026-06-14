@@ -55,6 +55,12 @@ Enterprise detection rules:
 - userType = "normal" if message describes personal or creator use case with no business/developer signals
 - userType = "unknown" if no clear signals detected
 
+UNIVERSAL DIMENSIONS:
+- PRIMARY_SUBJECT: Who/What is the main focus (e.g. Motor racing, Kaito Yamato)
+- ENVIRONMENT_SETTING: Where is the scene taking place (e.g. Beach, Mumbai streets)
+- ACTION_DYNAMIC: What is happening - fighting, racing, sleeping, fire power (e.g. High-speed driving, Fire manipulation)
+- AESTHETIC_STYLE: The visual mood - cinematic, 8k, hyper-realistic, sketch, anime, Naruto style (e.g. Cinematic, Naruto style)
+
 Return ONLY valid JSON. No markdown. No explanation.
 {{
   "appType": "text|image|audio|video|vision|null",
@@ -73,7 +79,11 @@ Return ONLY valid JSON. No markdown. No explanation.
   }},
   "missingFields": [],
   "oneLineUnderstanding": "only rephrase what user said",
-  "suggestedReply": "one warm follow-up question"
+  "suggestedReply": "one warm follow-up question",
+  "PRIMARY_SUBJECT": "string or null",
+  "ENVIRONMENT_SETTING": "string or null",
+  "ACTION_DYNAMIC": "string or null",
+  "AESTHETIC_STYLE": "string or null"
 }}"""
 
 ALLOWED_TRIAGE_APP_FORMATS = ["text", "image", "audio", "video", "vision"]

@@ -224,31 +224,67 @@ def _find_model(app_type: str | None, model_id: str) -> dict | None:
     return None
 
 
-def _rank_models(available_models: list | None, user_input: str, budget_str: str) -> list:
+async def _find_artistic_models_from_catalog(app_state: Any) -> list[str]:
+    """Queries model_catalog.md via ChromaDB to find model names with artistic or editing capabilities."""
+    vector_store = getattr(app_state, "vector_store", None)
+    if not vector_store:
+        return []
+    try:
+        # Search models collection in ChromaDB
+        matches = await vector_store.search(
+            query="artistic pro-edit creative cinematic editing drawing style",
+            categories=["models"],
+            top_k=5
+        )
+        artistic_models = []
+        for match in matches:
+            content = match.get("content", "")
+            # Locate headers (e.g. ## Model Name)
+            lines = content.split("\n")
+            for line in lines:
+                if line.startswith("## "):
+                    model_name = line.replace("## ", "").strip()
+                    if model_name not in artistic_models:
+                        artistic_models.append(model_name)
+        return artistic_models
+    except Exception as e:
+        logger.warning(f"Failed to find artistic models from RAG: {e}")
+        return []
+
+
+def _rank_models(
+    available_models: list | None, 
+    user_input: str, 
+    budget_str: str, 
+    artistic_priority: bool = False, 
+    artistic_model_names: list[str] | None = None
+) -> list:
     if not available_models:
         return []
 
     filtered = list(available_models)
-    b = (budget_str or "").lower()
-
-    if b:
-        if any(x in b for x in ("medium", "5-20", "5 - 20")):
-            filtered = [m for m in filtered if 5 <= m.get("cost", 0) <= 20]
-        elif any(x in b for x in ("low", "under 5", "< 5")):
-            filtered = [m for m in filtered if 0 < m.get("cost", 0) < 5]
-        elif any(x in b for x in ("premium", "best", "> 20")):
-            filtered = [m for m in filtered if m.get("cost", 0) >= 20]
-        elif any(x in b for x in ("free", "0 coins")):
-            filtered = [m for m in filtered if m.get("cost", 0) == 0]
-        else:
-            number_match = re.search(r"\d+(?:\.\d+)?", b)
-            if number_match:
-                limit = float(number_match.group(0))
-                filtered = [m for m in filtered if m.get("cost", 0) <= limit]
+    
+    # Ignore generic budget filtering if artistic_priority is active
+    if not artistic_priority:
+        b = (budget_str or "").lower()
+        if b:
+            if any(x in b for x in ("medium", "5-20", "5 - 20")):
+                filtered = [m for m in filtered if 5 <= m.get("cost", 0) <= 20]
+            elif any(x in b for x in ("low", "under 5", "< 5")):
+                filtered = [m for m in filtered if 0 < m.get("cost", 0) < 5]
+            elif any(x in b for x in ("premium", "best", "> 20")):
+                filtered = [m for m in filtered if m.get("cost", 0) >= 20]
+            elif any(x in b for x in ("free", "0 coins")):
+                filtered = [m for m in filtered if m.get("cost", 0) == 0]
+            else:
+                number_match = re.search(r"\d+(?:\.\d+)?", b)
+                if number_match:
+                    limit = float(number_match.group(0))
+                    filtered = [m for m in filtered if m.get("cost", 0) <= limit]
 
     if not filtered:
-        is_premium_intent = any(x in b for x in ("premium", "best", "> 20"))
-        is_medium_intent = any(x in b for x in ("medium", "5-20", "5 - 20"))
+        is_premium_intent = any(x in b for x in ("premium", "best", "> 20")) if not artistic_priority else True
+        is_medium_intent = any(x in b for x in ("medium", "5-20", "5 - 20")) if not artistic_priority else False
         if is_premium_intent or is_medium_intent:
             return sorted(available_models, key=lambda m: m.get("cost", 0), reverse=True)[:3]
         return sorted(available_models, key=lambda m: m.get("cost", 0))[:3]
@@ -257,17 +293,41 @@ def _rank_models(available_models: list | None, user_input: str, budget_str: str
 
     def score_model(model: dict) -> dict:
         score = 0
+        model_id = str(model.get("id") or "").lower()
+        model_name = str(model.get("name") or "").lower()
+        
+        # Check if matched by RAG catalog search
+        if artistic_priority and artistic_model_names:
+            for name in artistic_model_names:
+                name_lower = name.lower()
+                if name_lower in model_id or name_lower in model_name or model_id in name_lower or model_name in name_lower:
+                    score += 50
+                    
+        # Check tags for artistic / pro-edit / creative / detailed / editing / cinematic
+        model_tags = [str(t).lower() for t in (model.get("tags") or [])]
+        if any(t in model_tags for t in ("artistic", "pro-edit", "creative", "detailed", "editing", "cinematic", "design")):
+            if artistic_priority:
+                score += 30
+            else:
+                score += 5
+        
+        # Standard tag matching from user input
         for tag in model.get("tags") or []:
             if str(tag).lower() in input_lower:
                 score += 5
+                
+        # Standard tier matching
         if any(w in input_lower for w in ("fast", "quick", "speed")):
             if model.get("tier") == "fast":
                 score += 5
         if any(w in input_lower for w in ("quality", "best", "advanced")):
             if model.get("tier") in ("premium", "ultra"):
                 score += 5
-        if any(w in input_lower for w in ("cheap", "affordable")):
-            score += 20 - model.get("cost", 0)
+                
+        if not artistic_priority:
+            if any(w in input_lower for w in ("cheap", "affordable")):
+                score += 20 - model.get("cost", 0)
+                
         return {**model, "_score": score}
 
     scored = [score_model(m) for m in filtered]
@@ -296,6 +356,10 @@ def _merge_extraction(existing: dict | None, latest: dict | None, message: str) 
     return {
         **existing,
         **latest,
+        "PRIMARY_SUBJECT": latest.get("PRIMARY_SUBJECT") or existing.get("PRIMARY_SUBJECT"),
+        "ENVIRONMENT_SETTING": latest.get("ENVIRONMENT_SETTING") or existing.get("ENVIRONMENT_SETTING"),
+        "ACTION_DYNAMIC": latest.get("ACTION_DYNAMIC") or existing.get("ACTION_DYNAMIC"),
+        "AESTHETIC_STYLE": latest.get("AESTHETIC_STYLE") or existing.get("AESTHETIC_STYLE"),
         "appType": existing.get("appType") if keep_app_type else latest.get("appType"),
         "appPurpose": existing.get("appPurpose") if keep_purpose else latest.get("appPurpose"),
         "targetUsers": (
@@ -428,7 +492,70 @@ def _apply_edit_to_session(session: dict, edit_instruction: str) -> None:
         history.append({"role": "user", "content": f"[EDIT REQUEST]: {edit_instruction.strip()}"})
 
 
+def _is_ready_to_generate(session_context: dict) -> bool:
+    # Check if the 4 universal dimensions are filled
+    required_slots = ['PRIMARY_SUBJECT', 'ENVIRONMENT_SETTING', 'ACTION_DYNAMIC', 'AESTHETIC_STYLE']
+    
+    # Generic extraction check
+    filled_slots = []
+    for slot in required_slots:
+        val = session_context.get(slot) or (session_context.get("extraction") or {}).get(slot)
+        if val:
+            filled_slots.append(slot)
+            
+    return len(filled_slots) >= 3 # Agar 3/4 found then bypass!
+
+
+def _check_and_apply_artistic_priority(session: dict, text: str) -> None:
+    extraction = session.get("extraction") or {}
+    
+    # Check if 3/4 universal slots are filled
+    if _is_ready_to_generate(session):
+        session["status"] = "ready"
+        session["session_status"] = "ready"
+        session["artisticPriority"] = True
+        
+        # Prepopulate budget to Premium to bypass budget question
+        if not session.get("deepAnswers"):
+            session["deepAnswers"] = {}
+        session["deepAnswers"]["budgetPreference"] = "Premium"
+        session["extraction"]["budget"] = "Premium"
+        session["formConfirmed"] = True
+        session["awaitingDeepAnswer"] = False
+        session["currentDeepField"] = None
+        session["lastSlotKey"] = None
+        session["triageRounds"] = 0
+        
+        # Populate dynamicContext variables with values of filled slots
+        sub = extraction.get("PRIMARY_SUBJECT")
+        env = extraction.get("ENVIRONMENT_SETTING")
+        act = extraction.get("ACTION_DYNAMIC")
+        aes = extraction.get("AESTHETIC_STYLE")
+        
+        variables = []
+        if sub:
+            variables.append({"name": "PRIMARY_SUBJECT", "placeholder": "Primary Subject", "test_value": sub})
+        if env:
+            variables.append({"name": "ENVIRONMENT_SETTING", "placeholder": "Environment Setting", "test_value": env})
+        if act:
+            variables.append({"name": "ACTION_DYNAMIC", "placeholder": "Action Dynamic", "test_value": act})
+        if aes:
+            variables.append({"name": "AESTHETIC_STYLE", "placeholder": "Aesthetic Style", "test_value": aes})
+            
+        if not session.get("dynamicContext"):
+            session["dynamicContext"] = {}
+        session["dynamicContext"]["variables"] = variables
+        session["dynamicContext"]["options"] = ["Dynamic UI Blueprint", "Multi-Slot Extraction", "Artistic Override", "Ready Canvas"]
+        
+        # If app type is not set, default to image for style-heavy inputs
+        if not session.get("appType"):
+            session["appType"] = "image"
+            session["extraction"]["appType"] = "image"
+
+
 def _get_next_deep_question(session: dict) -> dict | None:
+    if session.get("artisticPriority"):
+        return None
     if not session.get("deepAnswers"):
         session["deepAnswers"] = {}
     extraction = session.get("extraction") or {}
@@ -457,11 +584,31 @@ async def _show_models(session: dict, app_state: Any) -> dict:
         (session.get("extraction") or {}).get("budget")
     )
     model_collection = MODELS.get(session.get("appType") or "", MODELS.get("text", []))
-    models = _rank_models(model_collection, full_text, str(budget or ""))
+    
+    artistic_priority = bool(session.get("artisticPriority"))
+    artistic_model_names = []
+    if artistic_priority:
+        artistic_model_names = await _find_artistic_models_from_catalog(app_state)
+        
+    models = _rank_models(
+        model_collection, 
+        full_text, 
+        str(budget or ""), 
+        artistic_priority=artistic_priority, 
+        artistic_model_names=artistic_model_names
+    )
 
     session["step"] = 1
     session["awaitingConfirmation"] = False
     await _save(session, app_state)
+
+    ui_data = {
+        "appType": session.get("appType"), 
+        "models": models
+    }
+    if artistic_priority:
+        ui_data["artistic_priority"] = True
+        ui_data["style_tags"] = session.get("styleTags") or []
 
     return {
         "reply": (
@@ -470,7 +617,7 @@ async def _show_models(session: dict, app_state: Any) -> dict:
             "Each card shows the model's strengths, speed, and cost per run — **click any card** to select it."
         ),
         "uiType": "models",
-        "uiData": {"appType": session.get("appType"), "models": models},
+        "uiData": ui_data,
         "nextStep": 1,
         "coins": None,
     }
@@ -479,6 +626,16 @@ async def _show_models(session: dict, app_state: Any) -> dict:
 async def _build_step0_response(session: dict, text: str, app_state: Any) -> dict:
     llm = app_state.llm
     ext = session.get("extraction") or {}
+
+    _check_and_apply_artistic_priority(session, text)
+    if session.get("artisticPriority"):
+        session["formConfirmed"] = True
+        session["awaitingDeepAnswer"] = False
+        session["currentDeepField"] = None
+        session["lastSlotKey"] = None
+        session["triageRounds"] = 0
+        await _save(session, app_state)
+        return await _show_models(session, app_state)
 
     ambiguous_domain_signals = [
         "birthday", "greeting", "certificate", "diploma", "award",
@@ -712,6 +869,16 @@ async def _exec_gather_requirements(session: dict, text: str, app_state: Any) ->
         session["history"] = []
     latest_extraction = await extract_requirements(app_state.llm, text, session["history"])
     session["extraction"] = _merge_extraction(session.get("extraction"), latest_extraction, text)
+    
+    _check_and_apply_artistic_priority(session, text)
+    if session.get("artisticPriority"):
+        session["formConfirmed"] = True
+        session["awaitingDeepAnswer"] = False
+        session["currentDeepField"] = None
+        session["lastSlotKey"] = None
+        session["triageRounds"] = 0
+        await _save(session, app_state)
+        return await _show_models(session, app_state)
     session["languageMode"] = _detect_language_mode(session)
     extraction = session.get("extraction") or {}
     if extraction.get("enterpriseSignals") is not None:
@@ -1243,6 +1410,10 @@ class ConversationState(TypedDict, total=False):
     app_purpose: Optional[str]
     extraction: Dict[str, Any]
     deep_answers: Dict[str, Any]
+    primary_subject: Optional[str]
+    environment_setting: Optional[str]
+    action_dynamic: Optional[str]
+    aesthetic_style: Optional[str]
     dynamic_context: Optional[Dict[str, Any]]
     model_id: Optional[str]
     model_name: Optional[str]
@@ -1267,6 +1438,8 @@ class ConversationState(TypedDict, total=False):
     is_pivot: bool
     decision_payload: Dict[str, Any]
     last_slot_key: Optional[str]
+    artistic_priority: Optional[bool]
+    style_tags: Optional[list[str]]
 
 
 # Helper state translators
@@ -1286,6 +1459,10 @@ def _session_to_state(session: dict, message: str) -> ConversationState:
         "app_purpose": (session.get("extraction") or {}).get("appPurpose"),
         "extraction": session.get("extraction") or {},
         "dynamic_context": session.get("dynamicContext"),
+        "primary_subject": (session.get("extraction") or {}).get("PRIMARY_SUBJECT"),
+        "environment_setting": (session.get("extraction") or {}).get("ENVIRONMENT_SETTING"),
+        "action_dynamic": (session.get("extraction") or {}).get("ACTION_DYNAMIC"),
+        "aesthetic_style": (session.get("extraction") or {}).get("AESTHETIC_STYLE"),
         "deep_answers": session.get("deepAnswers") or {},
         "current_step": session.get("step") or 0,
         "recommended_action": "",
@@ -1308,6 +1485,8 @@ def _session_to_state(session: dict, message: str) -> ConversationState:
         "is_pivot": session.get("isPivot") or False,
         "decision_payload": {},
         "last_slot_key": session.get("lastSlotKey"),
+        "artistic_priority": session.get("artisticPriority") or False,
+        "style_tags": session.get("styleTags") or [],
     }
 
 
@@ -1315,6 +1494,12 @@ def _state_to_session(state: ConversationState, session: dict) -> None:
     session["step"] = state.get("current_step", 0)
     session["appType"] = state.get("app_type")
     session["extraction"] = state.get("extraction") or {}
+    
+    session["extraction"]["PRIMARY_SUBJECT"] = state.get("primary_subject")
+    session["extraction"]["ENVIRONMENT_SETTING"] = state.get("environment_setting")
+    session["extraction"]["ACTION_DYNAMIC"] = state.get("action_dynamic")
+    session["extraction"]["AESTHETIC_STYLE"] = state.get("aesthetic_style")
+    
     session["dynamicContext"] = state.get("dynamic_context")
     session["deepAnswers"] = state.get("deep_answers") or {}
     session["awaitingConfirmation"] = state.get("awaiting_confirmation") or False
@@ -1333,6 +1518,8 @@ def _state_to_session(state: ConversationState, session: dict) -> None:
     session["userType"] = state.get("user_type")
     session["isPivot"] = state.get("is_pivot") or False
     session["lastSlotKey"] = state.get("last_slot_key")
+    session["artisticPriority"] = state.get("artistic_priority") or False
+    session["styleTags"] = state.get("style_tags") or []
     
     session_history = []
     for m in state.get("history", []):
@@ -1463,6 +1650,18 @@ async def ideation_triage_node(state: ConversationState, config: dict) -> dict:
     temp_session = {}
     _state_to_session(state, temp_session)
     
+    _check_and_apply_artistic_priority(temp_session, text)
+    if temp_session.get("artisticPriority"):
+        temp_session["awaitingDeepAnswer"] = False
+        temp_session["currentDeepField"] = None
+        temp_session["formConfirmed"] = True
+        temp_session["lastSlotKey"] = None
+        temp_session["triageRounds"] = 0
+        result = await _show_models(temp_session, app_state)
+        new_state = _session_to_state(temp_session, text)
+        new_state["response_payload"] = result
+        return new_state
+        
     # Check format input from chip override
     chip_type = _parse_chip_app_type(text)
     if chip_type:
