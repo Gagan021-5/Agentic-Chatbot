@@ -78,37 +78,45 @@ async def agent_chat(request: Request, body: AgentChatRequest):
         from graphs.orchestrator import route
         result = await route(session, body.message, request.app.state)
 
+        # Extract response payload and updated session from the graph route output
+        response = result.get("response", {})
+        updated_session = result.get("session", session)
+
+        # Merge updated session fields back into session in-place to preserve reference and save correctly
+        session.clear()
+        session.update(updated_session)
+
         # 4. Update session state
-        session["step"] = result.get("nextStep", session.get("step", 0))
+        session["step"] = response.get("nextStep", session.get("step", 0))
 
         # Push agent response to history
         session["history"].append({
             "role": "agent",
-            "content": result.get("reply", ""),
-            "uiType": result.get("uiType"),
-            "uiData": result.get("uiData"),
+            "content": response.get("reply", ""),
+            "uiType": response.get("uiType"),
+            "uiData": response.get("uiData"),
         })
 
         # 5. Save or clear session
-        if result.get("clearSession"):
+        if response.get("clearSession") or result.get("clearSession"):
             await session_svc.delete_session(body.sessionId)
         else:
             await session_svc.save_session(session)
 
         duration_ms = round((time.time() - start) * 1000, 2)
         logger.info(
-            f"agent_chat | session={body.sessionId[:8]} | step={result.get('nextStep')} "
-            f"| uiType={result.get('uiType')} | {duration_ms}ms"
+            f"agent_chat | session={body.sessionId[:8]} | step={response.get('nextStep')} "
+            f"| uiType={response.get('uiType')} | {duration_ms}ms"
         )
 
         # 6. Return in React's expected format
         return AgentChatResponse(
-            reply=result.get("reply", "Something went wrong."),
-            uiType=result.get("uiType"),
-            uiData=result.get("uiData"),
-            step=result.get("nextStep", 0),
-            coins=result.get("coins"),
-            confirm=result.get("confirm"),
+            reply=response.get("reply", "Something went wrong."),
+            uiType=response.get("uiType"),
+            uiData=response.get("uiData"),
+            step=response.get("nextStep", 0),
+            coins=response.get("coins"),
+            confirm=response.get("confirm"),
         )
 
     except Exception as e:

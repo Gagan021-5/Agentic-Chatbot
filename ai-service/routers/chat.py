@@ -19,7 +19,7 @@ from schemas.api_schemas import (
     RetrievedDocument,
     VariableSchema,
 )
-from graphs.pipeline import build_pipeline_graph, PipelineState
+from graphs.pipeline import compiled_graph, PipelineState
 
 logger = structlog.get_logger(__name__)
 router = APIRouter()
@@ -129,9 +129,8 @@ async def chat(request: Request, body: ChatRequest):
             "similar_apps": session.get("similar_apps") or [],
         }
 
-        # 5. Invoke conversational state pipeline
-        graph = build_pipeline_graph()
-        final_state = await graph.ainvoke(
+        # 5. Invoke conversational state pipeline using the compiled graph
+        final_state = await compiled_graph.ainvoke(
             initial_state,
             config={"configurable": {"app_state": request.app.state}}
         )

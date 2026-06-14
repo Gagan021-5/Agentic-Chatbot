@@ -15,7 +15,7 @@ from schemas.api_schemas import (
     PromptOptimizeResponse,
     VariableSchema,
 )
-from graphs.pipeline import build_pipeline_graph, PipelineState
+from graphs.pipeline import compiled_graph, PipelineState
 
 logger = structlog.get_logger(__name__)
 router = APIRouter()
@@ -68,9 +68,11 @@ async def optimize_prompt(request: Request, body: PromptOptimizeRequest):
             "enhanced_user_prompt": body.existing_user_prompt,
         }
 
-        # Run LangGraph pipeline
-        graph = build_pipeline_graph(vector_store)
-        final_state = await graph.ainvoke(initial_state)
+        # Run LangGraph pipeline using the compiled graph and dependency context
+        final_state = await compiled_graph.ainvoke(
+            initial_state,
+            config={"configurable": {"app_state": request.app.state}}
+        )
 
         # Build response
         variables = [

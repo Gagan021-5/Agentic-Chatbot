@@ -197,6 +197,31 @@ export default function AppPreviewCard({ data, onSendMessage, sessionId, storage
                 </div>
               </div>
             )}
+
+            {/* Pollinations.ai Live Image Preview for image apps */}
+            {(data.appType?.toLowerCase() === 'image') && (
+              <div className="mt-4">
+                <span className="text-xs font-semibold text-gray-500 uppercase tracking-wider">Live Image Preview</span>
+                <div className="mt-1.5 rounded-xl border border-zinc-800 overflow-hidden bg-[#0a0a0f]">
+                  <img
+                    src={`https://image.pollinations.ai/p/${encodeURIComponent(
+                      (data.userPrompt || data.systemPrompt || 'beautiful AI generated artwork')
+                        .split('\n')[0]
+                        .replace(/\[.*?\]/g, 'sample input')
+                        .slice(0, 200)
+                    )}?width=600&height=400&nologo=true`}
+                    alt="AI Image Preview"
+                    className="rounded-xl border border-zinc-800 object-cover w-full h-48 mt-0"
+                    loading="lazy"
+                    onError={(e) => {
+                      e.target.onerror = null;
+                      e.target.src = 'https://placehold.co/600x400/18181b/ffffff?text=Image+Preview+Ready';
+                    }}
+                  />
+                </div>
+                <p className="text-[10px] text-gray-600 mt-1.5 text-center">Preview powered by Pollinations.ai · Variables replaced with sample data</p>
+              </div>
+            )}
           </div>
         )}
 
