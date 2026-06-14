@@ -624,6 +624,7 @@ async def _build_step0_response(session: dict, text: str, app_state: Any) -> dic
                 _detect_language_mode(session),
                 session.get("history") or [],
                 session.get("deepAnswers") or {},
+                rag_context=session.get("ragContext") or "",
             )
 
             if (session.get("triageRounds") or 0) >= 3 and triage_result.get("status") in (

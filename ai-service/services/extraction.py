@@ -78,76 +78,49 @@ Return ONLY valid JSON. No markdown. No explanation.
 
 ALLOWED_TRIAGE_APP_FORMATS = ["text", "image", "audio", "video", "vision"]
 
-TRIAGE_INSTRUCTION = """You are RentPrompts App Intelligence Engine. Your job is to convert any user idea into a structured AI application definition using strict domain-first reasoning.
+TRIAGE_INSTRUCTION = """You are the RentPrompts Product Discovery Architect.
+Your job is to listen to the user's AI application concept and engage in a natural, high-level product engineering consultation.
 
-You MUST classify the application into one of these domains: text, image, audio, video, vision, or hybrid.
-You must NOT use generic assistant categories as a fallback under any circumstance.
+Act like an expert Product Manager from OpenAI or Anthropic. Your goal is to figure out the target blueprint requirements through dynamic fluid conversation.
 
-🚨 HARD RULE: NO GENERIC ASSISTANT MODE
-You are strictly forbidden from using or displaying generic assistant templates such as:
-- basic tasks (calendar, reminders, notes)
-- translation
-- summarization
-- general productivity assistant
-- chatbot assistant menus
-These are INVALID unless the user explicitly requests a "general assistant app".
+CRITICAL BEHAVIOR POLICIES:
+- NEVER format your question as a multiple-choice menu, numbered checklist, or structured option bracket.
+- NEVER append mechanical directive text strings like "Pick one option" or "Choose from below".
+- Always ask exactly ONE friendly, conversational, open-ended question tailored precisely to their niche. If they want a resume tool, ask about specific template goals or CV constraints. Do not ask generic SaaS boilerplate questions.
+- If the user's core intent, domain context, and functional specifications are clear, set status = "ready".
 
-If the user provides ANY domain-specific intent (e.g. astrologer app, resume builder, legal advisor, logo generator, fitness planner, text-to-audio tool), you must immediately:
-1. Identify the correct domain
-2. Ignore all generic assistant flows
-3. Build domain-specific variables only
+Return strict JSON only:
+{
+  "status": "needs_context|ready",
+  "domain_identified": "text|image|audio|video|vision|hybrid",
+  "confidence_score": 0-100,
+  "corrected_app_type": "text|image|audio|video|vision|null",
+  "question": "your natural conversational question string or null",
+  "slot_key": "contextual_missing_parameter_name or null",
+  "suggested_options": null,
+  "form": {
+    "options": ["4 concise feature options"],
+    "variables": [
+      {
+        "name": "variable name",
+        "placeholder": "realistic placeholder",
+        "test_value": "realistic test value"
+      }
+    ]
+  }
+}
 
-🧠 DOMAIN CLASSIFICATION RULES:
-- TEXT: resume builders, legal apps, astrologers, chatbots, planners, analyzers, document tools
-- IMAGE: generation, editing, design, logos, visuals
-- AUDIO: speech, TTS, music, voice
-- VIDEO: motion generation, clips, animations
-- VISION: image understanding, OCR, analysis
-Default priority if unclear: TEXT > IMAGE > AUDIO > VIDEO > VISION
-
-📊 CONFIDENCE SYSTEM:
-Assign confidence_score (0–100):
-- ≥ 85 → you have collected AT LEAST 3 specific details about: 
-  (use case / subject type, desired output style, target audience or platform).
-  ONLY then set status = "ready". Question MUST be null.
-- < 85 → Ask ONE friendly conversational question. No chips. No lists.
-  Write it like a human: "Are you thinking more portrait photos or product shots?"
-  NOT: "What type? A) Portrait B) Product C) Landscape"
-
-CONVERSATION RULE: 
-- Ask 2-4 questions naturally before going ready.
-- NEVER repeat a question already answered in history.
-- NEVER show options as a list — embed choices naturally in prose.
-  GOOD: "Should it output a transparent PNG or replace with a custom background?"
-  BAD: return suggested_options: ["Transparent", "Custom background"]
-- suggested_options: ONLY return this for output FORMAT questions 
-  (text/image/audio/video/vision). For all other questions, leave it null.
-
-🔁 ADAPTIVE INTENT RULE:
-If user changes idea mid-conversation:
-- Discard previous domain
-- Recompute domain + confidence immediately
-- Never continue old flow
-
-🧾 VARIABLE EXTRACTION RULES:
-After domain is confirmed, extract 3–6 variables:
-- Must be user-facing (non-technical)
-- Must be independent inputs
-- Must directly affect output
-- NEVER include model names, internal parameters, legal codes, or system settings
-- 🚨 CRITICAL SCHEMA STRUCTURING CONSTRAINT: Every extracted variable name MUST be translated into explicit human language. You are strictly prohibited from generating variables named 'input', 'text', 'data', 'variables', 'param', or 'main_input'. If the application parses legal domains, map to fields like 'incident_details' or 'dispute_context'. If editing visual elements, map strictly to fields like 'target_aesthetic' or 'canvas_dimensions'.
-
-Every response must be valid JSON only and include:
-- status ("needs_context" or "ready")
-- domain_identified ("text" | "image" | "audio" | "video" | "vision" | "hybrid")
-- confidence_score (0-100)
-- corrected_app_type (optional, only if initial classification was wrong: "text" | "image" | "audio" | "video" | "vision")
-- variables (3-6 variables, each with name, placeholder, and realistic test_value)
-- question (a single conversational question when confidence is below 85, otherwise null or omit)
-- slot_key (string, when status is "needs_context", output the name of the slot key you are asking a question for, e.g. "room_type", "visual_style", "image_type", "target_platform", "target_users", "quality_level", "batch_support", "output_style", "key_features", "use_case", etc. Otherwise null or omit)
-- suggested_options (optional, list of 2-5 simple option strings to resolve ambiguity, e.g. ["Text", "Image", "Audio", "Video", "Vision"] if format is unclear)
-
-Do not include any explanation or markdown outside the valid JSON object."""
+VARIABLE CONFIGURATION RULES (when status is "ready"):
+- Extract 3–6 variables. They must be user-facing (non-technical) and directly affect output.
+- NEVER include model names, internal parameters, or system settings.
+- Variable name constraint: Every variable name MUST be translated into explicit human language. You are strictly prohibited from generating variables named 'input', 'text', 'data', 'variables', 'param', or 'main_input'.
+- Placeholders:
+  - If the variable name contains 'Date', placeholder MUST be 'DD/MM/YYYY'.
+  - If the variable name contains 'Time', placeholder MUST be 'HH:MM AM/PM'.
+  - If the variable name contains 'Place' or 'Location', placeholder MUST be 'City, Country'.
+  - For everything else, use a relevant example.
+  - NEVER use 'Enter details...' as a placeholder for date, time, or location fields.
+"""
 
 
 def _is_rate_limit_error(error: Exception) -> bool:
@@ -541,6 +514,7 @@ async def triage_dynamic_context(
     language_hint: str = "English",
     conversation_history: list | None = None,
     deep_answers: dict | None = None,
+    rag_context: str = "", # 🚀 ADDED: Dynamic grounding database parameter slot
 ) -> dict:
     committed = None
     if app_type and str(app_type).strip().lower() in ALLOWED_TRIAGE_APP_FORMATS:
@@ -550,33 +524,15 @@ async def triage_dynamic_context(
     safe_lang = _normalize_language_hint(language_hint)
     history = conversation_history or []
 
-    answered_context = ""
-    if deep_answers and len(deep_answers) > 0:
-        clean = {k: v for k, v in deep_answers.items() if not k.startswith("_")}
-        last_q = deep_answers.get("_lastTriageQuestion", "")
-        answered_context = (
-            f"\nAlready answered by user: {json.dumps(clean)}"
-            f"\nLast question you asked: {last_q}"
-        ) if clean or last_q else ""
-
-    last_question_asked = ""
-    if history:
-        for m in reversed(history):
-            role = str(m.get("role","")).lower()
-            if role in ("assistant", "agent"):
-                last_question_asked = str(m.get("content",""))
-                break
+    clean_answers = {k: v for k, v in deep_answers.items() if not k.startswith("_")} if deep_answers else {}
+    answered_context = f"\nAlready captured attributes: {json.dumps(clean_answers)}" if clean_answers else ""
+    rag_metadata = f"\nMarketplace Reference Guidelines:\n{rag_context}" if rag_context else ""
 
     user_task = (
-        f'Current app idea: "{safe_purpose}"\n'
-        f'Current app type: "{format_fallback}".\n'
-        f"Language: {safe_lang}.{answered_context}\n\n"
-        f'IMPORTANT: The conversation history above already contains user answers. '
-        f'{"Last question you asked: " + last_question_asked if last_question_asked else ""}\n'
-        f'DO NOT repeat a question already answered in history.\n'
-        f'If user already answered use_case/style/target — count that as known, move to next unknown or go ready.\n'
-        "Return status='ready' once you have: use_case + at least one preference detail.\n"
-        "Otherwise ask ONE new question about something not yet answered."
+        f"Active App Concept: {safe_purpose}\n"
+        f"Format Type: {format_fallback}\n"
+        f"Language: {safe_lang}.{answered_context}{rag_metadata}\n\n"
+        "Evaluate the history. If the operational target is clear, mark ready. Otherwise issue ONE open-ended inquiry."
     )
 
     triage_messages = [
