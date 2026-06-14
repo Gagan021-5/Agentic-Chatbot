@@ -51,6 +51,13 @@ class TestPromptResponse(BaseModel):
     tokens: int | None = None
 
 
+def _generate_video_preview(prompt: str) -> str:
+    """Constructs the Pollinations video URL directly."""
+    from urllib.parse import quote
+    clean_prompt = quote(prompt.strip())
+    return f"https://pollinations.ai/p/{clean_prompt}?model=video&width=1024&height=576"
+
+
 # ─── Pollinations Helpers ───────────────────────────────────
 
 def _build_visual_clauses(variables: dict) -> str:
@@ -526,44 +533,25 @@ async def test_preview(request: Request, body: TestPreviewRequest):
 
         # ─── 4. VIDEO APP ──────────────────────────────────
         elif app_type == "video":
-            # Step 1: Generate screenplay
-            result = await llm.groq_chat(
-                system_prompt=(
-                    "You are an AI video director. Generate a short video concept with "
-                    "'Scene 1: [Visual]' and voiceover. Under 150 words. Plain text only."
-                ),
-                user_content=f"{body.systemPrompt}\n\nInputs: {json.dumps(body.variables)}",
-            )
-            video_script = result["choices"][0]["message"]["content"].replace("**", "").replace("*", "")
+            clauses = _build_visual_clauses(body.variables)
+            style = body.systemPrompt[:240].strip()
+            prompt = f"{clauses} Art direction: {style}" if clauses else style
+            prompt = prompt or "High quality cinematic video."
 
-            # Step 2: Cinematic thumbnail
-            clean_vars = ", ".join(
-                f"{k}: {v}" for k, v in body.variables.items()
-                if v and str(v).strip()
-            )
-            safe_ctx = re.sub(r"[^a-zA-Z0-9 .,]", "", (body.systemPrompt or "")[:120])
-            thumbnail_prompt = f"Cinematic high quality video still, 8k. Subject: {safe_ctx}. {clean_vars[:150]}"
-            from urllib.parse import quote
-            try:
-                # Test/fetch pollinations image (which raises on 402/payment error)
-                await _fetch_pollinations_image(thumbnail_prompt)
-                thumbnail_url = (
-                    f"https://image.pollinations.ai/prompt/{quote(thumbnail_prompt)}"
-                    f"?width=1024&height=576&nologo=true"
-                )
-            except Exception:
-                logger.warning("Pollinations failed for video thumbnail. Falling back to LoremFlickr.")
-                words = re.findall(r'\b[a-zA-Z]{3,}\b', thumbnail_prompt)
-                meaningful = [w.lower() for w in words if w.lower() not in (
-                    "art", "direction", "high", "quality", "detailed", "illustration", "creative",
-                    "photorealistic", "beautiful", "highly", "resolution", "generation", "preview",
-                    "primary", "subject", "honor", "all", "user", "fields", "image", "type", "output", "format",
-                    "cinematic", "video", "still", "subject"
-                )]
-                keywords = ",".join(meaningful[:3]) or "video"
-                thumbnail_url = f"https://loremflickr.com/1024/576/{quote(keywords)}"
+            video_url = await llm.route_model_request("video", prompt)
+            if not video_url:
+                video_url = _generate_video_preview(prompt)
 
-            preview_result = {"type": "video", "data": video_script, "url": thumbnail_url}
+            preview_result = {
+                "type": "video",
+                "url": video_url
+            }
+            ui_meta = {
+                "layout_mode": "static",
+                "is_streamable": True,
+                "show_upload": False,
+                "show_url_input": False
+            }
 
         # ─── 5. VISION APP ─────────────────────────────────
         elif app_type == "vision":

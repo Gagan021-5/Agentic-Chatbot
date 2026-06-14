@@ -1717,10 +1717,29 @@ async def save_draft_node(state: ConversationState, config: dict) -> dict:
     temp_session["seoData"] = {**(temp_session.get("seoData") or {}), **card_data}
     temp_session["status"] = "draft"
     app_name = (temp_session.get("seoData") or {}).get("appName") or "Your App"
+    
+    # Extract model and cost from card_data or session
+    model_id = card_data.get("modelId") or temp_session.get("modelId") or "unknown"
+    cost_per_run = card_data.get("costPerRun")
+    if cost_per_run is None:
+        cost_per_run = temp_session.get("modelCost")
+    if cost_per_run is None:
+        cost_per_run = 0
+        
+    tags = card_data.get("tags") or (temp_session.get("seoData") or {}).get("tags") or []
+    
     result = {
         "reply": f'## 📋 Draft Saved\n\n**"{app_name}"** saved. Resume anytime from your dashboard.',
         "uiType": "success",
-        "uiData": {"appName": app_name, "status": "Draft"},
+        "uiData": {
+            "appName": app_name,
+            "status": "Draft",
+            "modelId": model_id,
+            "costPerRun": cost_per_run,
+            "selectedPlan": "draft",
+            "tags": tags,
+            "mockUrl": f"https://rentprompts.ai/app/demo-{int(datetime.now(timezone.utc).timestamp() * 1000)}",
+        },
         "nextStep": 0,
         "coins": None,
         "clearSession": True,

@@ -314,3 +314,20 @@ class LLMService:
     @property
     def has_openrouter(self) -> bool:
         return self._openrouter_client is not None
+
+    async def route_model_request(self, app_type: str, prompt: str) -> str | None:
+        """Route model request based on appType dynamically."""
+        if str(app_type).strip().lower() == "video":
+            return PollinationsVideoService.generate_video_url(prompt)
+        return None
+
+
+class PollinationsVideoService:
+    """Helper service to interact with Pollinations video generator."""
+
+    @staticmethod
+    def generate_video_url(prompt: str) -> str:
+        """Constructs the Pollinations video URL directly."""
+        from urllib.parse import quote
+        clean_prompt = quote(prompt.strip())
+        return f"https://pollinations.ai/p/{clean_prompt}?model=video&width=1024&height=576"

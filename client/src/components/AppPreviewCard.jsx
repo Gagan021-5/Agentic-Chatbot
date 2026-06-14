@@ -545,32 +545,27 @@ export default function AppPreviewCard({ data, onSendMessage, sessionId, storage
                 {/* Video Output */}
                 {previewResult.type === 'video' && (
                   <div className="mb-3 animate-fade-in">
-                    {/* Fake Video Player Frame */}
-                    <div className="relative w-full aspect-video rounded-t-xl overflow-hidden shadow-lg border border-[#3b2d50] border-b-0 group cursor-pointer bg-black">
-                      <img
+                    {/* Video Player Frame */}
+                    <div className={`relative w-full aspect-video overflow-hidden shadow-lg border border-[#3b2d50] bg-black ${
+                      previewResult.data ? "rounded-t-xl border-b-0" : "rounded-xl"
+                    }`}>
+                      <video
                         src={previewResult.url}
-                        alt="Video Thumbnail"
-                        className="w-full h-full object-cover opacity-70 group-hover:opacity-90 transition-opacity duration-500"
-                        referrerPolicy="no-referrer"
-                        onError={(e) => {
-                          e.target.src =
-                            "https://via.placeholder.com/1024x576/1a1525/a77bf3?text=Video+Thumbnail";
-                        }}
+                        controls
+                        autoPlay
+                        loop
+                        muted
+                        playsInline
+                        className="w-full h-full object-cover"
                       />
-                      <div className="absolute inset-0 flex items-center justify-center">
-                        <div className="w-16 h-16 bg-black/60 backdrop-blur-md border border-white/20 rounded-full flex items-center justify-center text-white text-2xl shadow-2xl pl-1 group-hover:scale-110 transition-transform">
-                          ▶
-                        </div>
-                      </div>
-                      <div className="absolute top-3 left-3 bg-red-500 text-[10px] font-bold px-2 py-0.5 rounded text-white tracking-wider animate-pulse">
-                        LIVE
-                      </div>
                     </div>
                     {/* Screenplay text block */}
-                    <div className="p-4 bg-[#1a1525] border border-[#3b2d50] rounded-b-xl text-sm text-gray-300 whitespace-pre-wrap leading-relaxed shadow-lg">
-                      <h4 className="text-[#a77bf3] font-bold mb-3 uppercase tracking-wide text-xs">Video Concept & Screenplay</h4>
-                      {previewResult.data}
-                    </div>
+                    {previewResult.data && (
+                      <div className="p-4 bg-[#1a1525] border border-[#3b2d50] rounded-b-xl text-sm text-gray-300 whitespace-pre-wrap leading-relaxed shadow-lg">
+                        <h4 className="text-[#a77bf3] font-bold mb-3 uppercase tracking-wide text-xs">Video Concept & Screenplay</h4>
+                        {previewResult.data}
+                      </div>
+                    )}
                   </div>
                 )}
 

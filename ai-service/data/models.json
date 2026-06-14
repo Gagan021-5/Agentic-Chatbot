@@ -409,6 +409,18 @@
         "cinematic"
       ],
       "desc": "Most advanced video AI"
+    },
+    {
+      "id": "pollinations-video",
+      "name": "Pollinations Video",
+      "cost": 0.0,
+      "tier": "fast",
+      "tags": [
+        "free",
+        "fast",
+        "pollinations"
+      ],
+      "desc": "Fully dynamic video generation model"
     }
   ],
   "vision": [

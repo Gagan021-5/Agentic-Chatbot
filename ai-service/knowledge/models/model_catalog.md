@@ -132,3 +132,14 @@
 - Prompt Style: Genre, tempo (BPM), mood, instruments, duration.
 - Best For: Background music, jingles, podcast intros, ambient tracks
 - Tags: music, creative, google
+
+## Pollinations Video
+- Provider: Pollinations.ai
+- Type: Video Generation
+- Cost: 0.0 coins/run
+- Tier: Fast
+- Strengths: Fully dynamic video generation
+- Prompt Style: Describe the motion and scene in detail.
+- Best For: Real-time dynamic video preview
+- Limitations: Short duration clips.
+- Tags: free, fast, pollinations
