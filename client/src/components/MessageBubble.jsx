@@ -12,6 +12,7 @@ import PublishSuccessCard from "./PublishSuccessCard";
 import RequirementSummaryCard from "./RequirementSummaryCard";
 import SEOPreviewCard from "./SEOPreviewCard";
 import AppPreviewCard from "./AppPreviewCard";
+import FinalBlueprintCard from "./FinalBlueprintCard";
 import MultiSelectFormCard from "./MultiSelectFormCard";
 function IconCopy() {
   return (
@@ -187,6 +188,7 @@ function AgentUI(props) {
       />
     );
   if (uiType === "multi_select_form") return <MultiSelectFormCard data={uiData} onSendMessage={onSendMessage} isLoading={isLoading} />;
+  if (uiType === "final_blueprint") return <FinalBlueprintCard data={uiData} />;
   return null;
 }
 

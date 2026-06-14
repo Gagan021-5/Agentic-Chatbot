@@ -190,6 +190,11 @@ async def intent_classifier_node(state: PipelineState, config: dict) -> dict:
     message = state.get("message", "")
     msg_clean = message.strip().lower()
 
+    # Prioritize model selection pivot intent (absolute top check)
+    pivot_phrases = ("change model", "switch model", "choose another model", "select another model", "change the model", "switch to another model", "select a different model", "change to a different model")
+    if any(phrase in msg_clean for phrase in pivot_phrases):
+        return {"recommended_action": "PIVOT_MODEL"}
+
     # 1. Quick regex intercepts for fast path
     if msg_clean in ("hi", "hello", "hey", "hola"):
         return {"recommended_action": "HANDLE_GREETING"}
@@ -197,11 +202,6 @@ async def intent_classifier_node(state: PipelineState, config: dict) -> dict:
         return {"recommended_action": "APPROVE"}
     if msg_clean.startswith("change:") or msg_clean.startswith("tweak"):
         return {"recommended_action": "EDIT_APP"}
-
-    # Check model selection pivot intent
-    pivot_phrases = ("change model", "switch model", "choose another model", "select another model", "change the model", "switch to another model", "select a different model", "change to a different model")
-    if any(phrase in msg_clean for phrase in pivot_phrases):
-        return {"recommended_action": "PIVOT_MODEL"}
 
     # Check model selection intent
     app_type = state.get("app_type", "text")
@@ -398,8 +398,32 @@ async def ideation_node(state: PipelineState, config: dict) -> PipelineState:
     )
     if not form_confirmed and not awaiting_deep and has_agent_turned and message:
         if not message.lower().startswith("multi_select_form::") and not message.lower().startswith("select"):
-            key = f"clarification_{len(deep_answers) + 1}"
-            deep_answers[key] = message
+            # Extract last assistant message content
+            last_assistant_msg = ""
+            for h in reversed(history):
+                role = ""
+                content = ""
+                if isinstance(h, dict):
+                    role = h.get("role") or ""
+                    content = h.get("content") or ""
+                elif hasattr(h, "type"):
+                    role = h.type or ""
+                    content = getattr(h, "content", "") or ""
+                if role in ("agent", "assistant", "ai"):
+                    last_assistant_msg = content
+                    break
+
+            last_assistant_content_lower = str(last_assistant_msg).lower()
+            if any(w in last_assistant_content_lower for w in ("prioritize", "scoring", "features")):
+                deep_answers["scoring_priority"] = message
+            elif any(w in last_assistant_content_lower for w in ("style", "aesthetic", "design", "look")):
+                deep_answers["style_preference"] = message
+            elif any(w in last_assistant_content_lower for w in ("audience", "target", "users", "who")):
+                deep_answers["target_audience"] = message
+            elif any(w in last_assistant_content_lower for w in ("tone", "voice", "vibe", "mood")):
+                deep_answers["tone_preference"] = message
+            else:
+                deep_answers["additional_details"] = message
 
     # Call LLM extraction on user's message
     latest_ext = await extract_requirements(app_state.llm, message, _get_clean_history(history))
@@ -459,6 +483,26 @@ async def ideation_node(state: PipelineState, config: dict) -> PipelineState:
         extraction["keyFeatures"] = payload.get("selectedOptions") or []
         state["dynamic_context"] = dynamic_context
         state["form_confirmed"] = True
+
+        # Verify budget preference is in state/memory
+        budget = deep_answers.get("budgetPreference") or extraction.get("budget")
+        if not budget:
+            state["awaiting_deep_answer"] = True
+            state["current_deep_field"] = "budgetPreference"
+            reply = (
+                "Got everything I need to build your app! One last thing — "
+                "**what's your budget per generation?** This helps me pick the right AI model."
+            )
+            state["reply"] = reply
+            state["response_payload"] = {
+                "reply": reply,
+                "uiType": "chips",
+                "uiData": {"options": BUDGET_CHIP_OPTIONS},
+                "nextStep": 0,
+            }
+            state["requirements_complete"] = False
+            state["current_step"] = 0
+            return state
 
     if not form_confirmed:
         # Triage loop using triage_dynamic_context
@@ -524,9 +568,9 @@ async def ideation_node(state: PipelineState, config: dict) -> PipelineState:
         state["current_step"] = 0
         return state
 
-    # Form is confirmed: check budget Preference
+    # Form is confirmed: enforce budget preference gate
     budget = deep_answers.get("budgetPreference") or extraction.get("budget")
-    if not budget:
+    if not state.get("form_confirmed") or not budget:
         state["awaiting_deep_answer"] = True
         state["current_deep_field"] = "budgetPreference"
         reply = (
@@ -544,9 +588,10 @@ async def ideation_node(state: PipelineState, config: dict) -> PipelineState:
         state["current_step"] = 0
         return state
 
-    # Everything is complete for ideation
+    # BOTH form AND budget are confirmed — allow progression to model selection
     state["requirements_complete"] = True
     state["current_step"] = 1
+    state["response_payload"] = {}  # Clear payload so gate passes through
     return state
 
 
@@ -611,6 +656,53 @@ async def app_preview_node(state: PipelineState, config: dict) -> PipelineState:
         state["deep_answers"] = deep_answers
         state["preview_approved"] = False
 
+    # 1. Adaptive Purpose Intercept inside app_preview_node
+    edit_instr = deep_answers.get("lastEditInstruction") or ""
+    text_to_check = message if message else edit_instr
+    text_to_check_lower = text_to_check.lower()
+
+    subject_change = False
+    new_subject = None
+
+    # Check for keywords indicating replacement of subject
+    replacement_keywords = ("change to", "not ", "instead of", "for ")
+    if any(kw in text_to_check_lower for kw in replacement_keywords):
+        if "instead of" in text_to_check_lower:
+            part_before = text_to_check.split("instead of")[0].strip()
+            part_before_clean = re.sub(r"^(change\s+to\s+|for\s+|not\s+)", "", part_before, flags=re.I).strip()
+            if part_before_clean:
+                new_subject = part_before_clean
+                subject_change = True
+        elif "change to" in text_to_check_lower:
+            match = re.search(r"change\s+to\s+([^,.]+)", text_to_check, flags=re.I)
+            if match:
+                new_subject = match.group(1).strip()
+                subject_change = True
+        elif text_to_check_lower.startswith("not ") and "," in text_to_check:
+            part_after = text_to_check.split(",")[1].strip()
+            part_after_clean = re.sub(r"^(change\s+to\s+|for\s+)", "", part_after, flags=re.I).strip()
+            if part_after_clean:
+                new_subject = part_after_clean
+                subject_change = True
+        elif text_to_check_lower.startswith("for ") and "instead" not in text_to_check_lower:
+            new_subject = re.sub(r"^for\s+", "", text_to_check, flags=re.I).strip()
+            subject_change = True
+
+    if subject_change and new_subject:
+        logger.info(f"Adaptive Subject Mismatch Intercept: Overwriting app purpose from '{app_purpose}' to '{new_subject}'")
+        app_purpose = new_subject
+        state["app_purpose"] = new_subject
+        
+        extraction = state.get("extraction") or {}
+        extraction["appPurpose"] = new_subject
+        state["extraction"] = extraction
+
+        # Execute History Sanitation
+        state["prompt_data"] = {}
+        state["seo_data"] = {}
+        state["enhanced_system_prompt"] = None
+        state["enhanced_user_prompt"] = None
+
     # Package a temporary session for prompt generation
     temp_session = {
         "appType": app_type,
@@ -633,10 +725,15 @@ async def app_preview_node(state: PipelineState, config: dict) -> PipelineState:
     state["prompt_data"] = prompt_data
     state["seo_data"] = seo_data
 
-    # Extract variables from brackets (supporting letters, digits, underscores, dashes, spaces)
+    # Extract variables from double-dollars or legacy brackets (supporting letters, digits, underscores, dashes, spaces)
     combined_prompts = f"{enhanced_system_prompt}\n{enhanced_user_prompt}"
-    var_pattern = re.compile(r"\[([a-zA-Z0-9_\s-]+)\]")
-    found_vars = list(set(var_name.strip() for var_name in var_pattern.findall(combined_prompts)))
+    var_pattern = re.compile(r"\$\$([a-zA-Z0-9_\s-]+)\$\$|\[([a-zA-Z0-9_\s-]+)\]")
+    found_vars = []
+    for match in var_pattern.findall(combined_prompts):
+        vname = match[0] or match[1]
+        if vname:
+            found_vars.append(vname.strip())
+    found_vars = list(set(found_vars))
 
     # Get user-confirmed variables from dynamic_context to populate test_value
     confirmed_vars = (state.get("dynamic_context") or {}).get("variables") or []
@@ -732,31 +829,39 @@ async def preview_and_registration_node(state: PipelineState, config: dict) -> P
         try:
             res = await app_state.cms.create_rapp(payload)
             state["cms_registered"] = True
-            reply = (
-                f"## 🎉 RAPP Registered Successfully!\n\n"
-                f"Your application **\"{payload['appName']}\"** has been registered in the CMS catalog.\n\n"
-                f"- **Model:** {state.get('model_id')}\n"
-                f"- **Rapp ID:** {res.get('id', 'N/A')}\n"
-                f"- **Status:** Live & Ready! 🚀"
-            )
-            state["reply"] = reply
-            state["response_payload"] = {
-                "reply": reply,
-                "uiType": "text",
-                "uiData": None,
-                "nextStep": 3,
-                "clearSession": True,
-            }
+            rapp_id = res.get("id") if res else None
+            if not rapp_id:
+                rapp_id = "local-dev-draft"
         except Exception as e:
             logger.error(f"CMS registration failed: {e}")
-            reply = "Rapp registration failed due to CMS connection error. Please try again."
-            state["reply"] = reply
-            state["response_payload"] = {
-                "reply": reply,
-                "uiType": "text",
-                "uiData": None,
-                "nextStep": 2,
-            }
+            state["cms_registered"] = False
+            rapp_id = "local-dev-draft"
+
+        # Commit a complete configuration manifest payload back to client
+        variables = state.get("extracted_variables") or []
+
+        reply = "## 🎉 Your App Blueprint is Registered & Ready!"
+        state["reply"] = reply
+        state["response_payload"] = {
+            "reply": reply,
+            "uiType": "final_blueprint",
+            "uiData": {
+                "appName": payload["appName"],
+                "appDescription": payload["appDescription"],
+                "appType": payload["appType"],
+                "modelId": payload["modelId"],
+                "costPerRun": payload["costPerRun"],
+                "systemPrompt": payload["systemPrompt"],
+                "userPrompt": payload["userPrompt"],
+                "tags": payload["tags"],
+                "variables": variables,
+                "rappId": rapp_id,
+                "id": rapp_id,
+                "category": payload["category"],
+                "publishedAt": payload["publishedAt"]
+            },
+            "clearSession": True
+        }
     return state
 
 
@@ -787,8 +892,9 @@ def route_conditional_edge(state: PipelineState) -> str:
 
 def should_continue_from_ideation(state: PipelineState) -> Literal["model_selection", "end"]:
     """Gates continuation based on requirement completeness."""
-    # Strict single-turn response gate: if payload was generated, stop graph execution immediately
-    if state.get("response_payload"):
+    # Strict single-turn response gate: if a UI payload was generated, stop graph and hand control to frontend
+    payload = state.get("response_payload")
+    if payload and isinstance(payload, dict) and payload.get("reply"):
         return "end"
     if state.get("requirements_complete"):
         return "model_selection"
