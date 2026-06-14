@@ -12,9 +12,9 @@ export default function AppPreviewCard({ data, onSendMessage, sessionId, storage
   const [editInstruction, setEditInstruction] = useState('');
   const [isPreviewMode, setIsPreviewMode] = useState(false);
   const [testInputs, setTestInputs] = useState(() => {
-    const rawVars = data?.variables || data?.variablesUsed || [];
+    const rawVars = (data?.variables && data?.variables.length > 0) ? data.variables : (data?.variablesUsed || []);
     return rawVars.reduce((acc, variable) => {
-      const varName = typeof variable === "object" ? variable.name : String(variable || "").replace(/^\$\$/, "");
+      const varName = typeof variable === "object" ? variable.name : String(variable || "").replace(/^\$\$/, "").replace(/\$\$$/, "");
 
       // Pre-fill with the extracted context-based test_value when available, otherwise start empty
       acc[varName] = (typeof variable === "object" && variable.test_value) ? variable.test_value : "";
@@ -104,7 +104,7 @@ export default function AppPreviewCard({ data, onSendMessage, sessionId, storage
   // Format variables beautifully
   const formatPrompt = (text) => {
     if (!text) return null;
-    const parts = text.split(/(\$\$\w+)/g);
+    const parts = text.split(/(\$\$[\w\s]+?\$\$|\$\$\w+)/g);
     return parts.map((part, i) =>
       part.startsWith('$$') ? <span key={i} className="text-rent-purple font-semibold">{part}</span> : part
     );
@@ -127,10 +127,10 @@ export default function AppPreviewCard({ data, onSendMessage, sessionId, storage
   };
 
   // Support both data.variables (new) and data.variablesUsed (existing)
-  const rawVariables = data.variables || data.variablesUsed || [];
+  const rawVariables = (data.variables && data.variables.length > 0) ? data.variables : (data.variablesUsed || []);
   const normalizedVariables = rawVariables.map((v) => {
     if (typeof v === 'object' && v.name) return v.name;
-    return String(v || "").replace(/^\$\$/, "");
+    return String(v || "").replace(/^\$\$/, "").replace(/\$\$$/, "");
   }).filter(Boolean);
 
   const handleTestInputChange = (name, value) => {
@@ -237,7 +237,7 @@ export default function AppPreviewCard({ data, onSendMessage, sessionId, storage
             </p>
 
             {rawVariables.map((v, i) => {
-              const varName = typeof v === 'object' ? v.name : String(v || "").replace(/^\$\$/, "");
+              const varName = typeof v === 'object' ? v.name : String(v || "").replace(/^\$\$/, "").replace(/\$\$$/, "");
 
               // FIX: Use the AI's test_value as a helpful placeholder hint
               const placeholderText = typeof v === 'object' && v.test_value

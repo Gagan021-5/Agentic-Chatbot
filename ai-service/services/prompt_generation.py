@@ -95,6 +95,38 @@ async def run_prompt_test(
     }
 
 
+import re
+
+def auto_inject_variables(user_prompt: str, vars_list: list[str]) -> str:
+    resolved = user_prompt
+    for var in vars_list:
+        var_clean = var.strip().strip("$")
+        var_pat = var_clean.replace("_", " ")
+        
+        # If already has $$var_clean$$ or $$var_pat$$, skip
+        esc_var = re.escape(var_clean)
+        esc_pat = re.escape(var_pat)
+        if re.search(r'\$\$' + esc_var + r'\$\$', resolved, re.I) or re.search(r'\$\$' + esc_pat + r'\$\$', resolved, re.I):
+            continue
+        if re.search(r'\$\$' + esc_var, resolved, re.I) or re.search(r'\$\$' + esc_pat, resolved, re.I):
+            continue
+            
+        patterns = [
+            var_pat,
+            var_clean,
+            var_clean.replace("_", ""),
+        ]
+        for pat in patterns:
+            if not pat or len(pat) < 3:
+                continue
+            pat_esc = re.escape(pat)
+            match = re.search(r'\b' + pat_esc + r'\b', resolved, re.I)
+            if match:
+                resolved = resolved[:match.start()] + f"$${var_clean}$$" + resolved[match.end():]
+                break
+    return resolved
+
+
 async def generate_prompt_template(llm: LLMService, session: dict) -> dict:
     edit_instruction = ""
     if session.get("deepAnswers", {}).get("lastEditInstruction"):
@@ -167,8 +199,59 @@ Return ONLY valid JSON:
     )
 
     try:
-        import re
-        return await llm.openrouter_json(system_prompt, user_content)
+        parsed = await llm.openrouter_json(system_prompt, user_content)
+        if not isinstance(parsed, dict):
+            parsed = {}
+
+        # Cleaned vars list from dynamicContext
+        cleaned_vars_list = []
+        for v in vars_list:
+            if isinstance(v, dict):
+                cleaned_vars_list.append(str(v.get("name", "")).strip().strip("$").replace(" ", "_").lower())
+            else:
+                cleaned_vars_list.append(str(v).strip().strip("$").replace(" ", "_").lower())
+
+        # Normalize variablesUsed from LLM response
+        vars_used = []
+        raw_vars_used = parsed.get("variablesUsed") or []
+        if not isinstance(raw_vars_used, list):
+            raw_vars_used = []
+        for v in raw_vars_used:
+            cleaned_v = str(v).strip().strip("$").replace(" ", "_").lower()
+            if cleaned_v:
+                vars_used.append(cleaned_v)
+
+        # If LLM returned no variablesUsed, use the cleaned list from dynamicContext
+        if not vars_used:
+            vars_used = cleaned_vars_list
+
+        # Deduplicate while preserving order
+        seen = set()
+        vars_used = [x for x in vars_used if not (x in seen or seen.add(x))]
+        parsed["variablesUsed"] = vars_used
+
+        # Normalize variableDescriptions
+        desc_clean = {}
+        raw_desc = parsed.get("variableDescriptions")
+        if not isinstance(raw_desc, dict):
+            raw_desc = {}
+        for k, v in raw_desc.items():
+            cleaned_k = str(k).strip().strip("$").replace(" ", "_").lower()
+            desc_clean[cleaned_k] = v
+
+        # Fill missing descriptions
+        for v in vars_used:
+            if v not in desc_clean:
+                desc_clean[v] = f"Enter {v.replace('_', ' ')}"
+        parsed["variableDescriptions"] = desc_clean
+
+        # Auto inject variables with $$ signs into userPrompt if missing
+        user_prompt = parsed.get("userPrompt") or ""
+        if user_prompt:
+            parsed["userPrompt"] = auto_inject_variables(user_prompt, vars_used)
+
+        return parsed
+
     except Exception as err:
         logger.error(f"[generate_prompt_template] Error: {err}")
         app_purpose = (
@@ -181,6 +264,7 @@ Return ONLY valid JSON:
             or (session.get("appType") == "image" and needs_upload and not is_generation)
         )
         main_var = vars_list[0].get("name") if vars_list and isinstance(vars_list[0], dict) else "main_input"
+        main_var_clean = str(main_var).strip().strip("$").replace(" ", "_").lower()
         return {
             "reasoning": "Fallback triggered.",
             "systemPrompt": (
@@ -189,7 +273,7 @@ Return ONLY valid JSON:
             ),
             "userPrompt": (
                 "I want to perform the requested task precisely based on the following inputs:\n\n"
-                f"$${main_var}$$\n\n"
+                f"$${main_var_clean}$$\n\n"
                 "Provide a detailed, well-structured response that directly addresses the request. "
                 "Do not add unrelated information."
             ),
@@ -199,15 +283,9 @@ Return ONLY valid JSON:
                 else None
             ),
             "acceptImageInput": accept_image,
-            "variablesUsed": [
-                f"$${v.get('name') if isinstance(v, dict) else v}$$"
-                for v in vars_list[:3]
-            ],
+            "variablesUsed": [main_var_clean],
             "variableDescriptions": {
-                f"$${v.get('name') if isinstance(v, dict) else v}$$": (
-                    v.get("placeholder") if isinstance(v, dict) else "Enter details"
-                )
-                for v in vars_list[:3]
+                main_var_clean: "Enter details"
             },
         }
 

@@ -827,8 +827,18 @@ async def _exec_generate_preview(session: dict, text: str, app_state: Any) -> di
     await _save(session, app_state)
 
     try:
-        # Prefill dynamicContext variables from conversational slot answers
+        # Ensure dynamicContext is present and has variables
         dynamic_context = session.get("dynamicContext") or {}
+        if not dynamic_context or not dynamic_context.get("variables"):
+            dynamic_context = await generate_dynamic_context(
+                llm,
+                session.get("appType") or "text",
+                (session.get("extraction") or {}).get("appPurpose") or "",
+                _detect_language_mode(session),
+            )
+            session["dynamicContext"] = dynamic_context
+
+        # Prefill dynamicContext variables from conversational slot answers
         deep_answers = session.get("deepAnswers") or {}
         extraction = session.get("extraction") or {}
         variables = dynamic_context.get("variables") or []
@@ -1033,6 +1043,18 @@ async def _exec_edit_app(session: dict, text: str, decision: dict, app_state: An
 
     session["awaitingPromptTweak"] = False
     _apply_edit_to_session(session, instruction)
+
+    # Regenerate dynamic context based on new requirements / app purpose
+    try:
+        session["dynamicContext"] = await generate_dynamic_context(
+            llm,
+            session.get("appType") or "text",
+            (session.get("extraction") or {}).get("appPurpose") or "",
+            _detect_language_mode(session),
+        )
+    except Exception as e:
+        logger.warning(f"[execEditApp] Regenerate dynamicContext failed: {e}")
+
     try:
         new_prompt_data, new_seo_data = await asyncio.gather(
             generate_prompt_template(llm, session),
