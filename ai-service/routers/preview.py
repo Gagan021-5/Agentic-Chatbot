@@ -28,6 +28,7 @@ class TestPreviewRequest(BaseModel):
     variables: dict[str, Any] = Field(default_factory=dict)
     systemPrompt: str = ""
     testImageBase64: str | None = None
+    status: str | None = None
 
 
 class TestPreviewResponse(BaseModel):
@@ -274,6 +275,7 @@ async def test_preview(request: Request, body: TestPreviewRequest):
     """
     llm = request.app.state.llm
     app_type = (body.appType or "text").lower()
+    is_ready = body.status == "ready" or getattr(body, "status", None) == "ready"
 
     # Construct combined context to query RAG blueprints
     transform_goal = "; ".join(
@@ -540,9 +542,12 @@ async def test_preview(request: Request, body: TestPreviewRequest):
             prompt = f"{clauses} Art direction: {style}" if clauses else style
             prompt = prompt or "High quality cinematic video."
 
-            video_url = await llm.route_model_request("video", prompt)
-            if not video_url:
+            if is_ready:
                 video_url = _generate_video_preview(prompt)
+            else:
+                video_url = await llm.route_model_request("video", prompt)
+                if not video_url:
+                    video_url = _generate_video_preview(prompt)
 
             preview_result = {
                 "type": "video",

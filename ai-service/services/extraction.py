@@ -423,9 +423,57 @@ async def _extract_with_openrouter_fallback(
         return normalize_extraction(None, message)
 
 
+class UniversalSlotExtractor:
+    def __init__(self, llm: LLMService):
+        self.llm = llm
+
+    async def extract(self, system_prompt: str | None, user_prompt: str | None, message: str) -> dict:
+        sys_p = system_prompt or ""
+        usr_p = user_prompt or ""
+        msg = message or ""
+        
+        user_content = f"System Prompt Context: {sys_p}\nUser Prompt Context: {usr_p}\nIncoming Message: {msg}"
+        
+        system_content = """You are a Universal Dimension Extractor.
+Analyze the provided system prompt, user prompt, and message to extract these 4 Universal Dimensions:
+1. PRIMARY_SUBJECT: What is the focus (e.g. Motor racing, Kaito Yamato)
+2. ENVIRONMENT_SETTING: Where is it (e.g. Beach, Mumbai streets)
+3. ACTION_DYNAMIC: What is happening (e.g. High-speed driving, Fire manipulation)
+4. AESTHETIC_STYLE: How does it look (e.g. Cinematic, Naruto style)
+
+Output strictly valid JSON with these keys and no other text:
+{
+  "PRIMARY_SUBJECT": "extracted value or null",
+  "ENVIRONMENT_SETTING": "extracted value or null",
+  "ACTION_DYNAMIC": "extracted value or null",
+  "AESTHETIC_STYLE": "extracted value or null"
+}"""
+
+        try:
+            result = await self.llm.groq_completion(
+                messages=[
+                    {"role": "system", "content": system_content},
+                    {"role": "user", "content": user_content}
+                ],
+                model="llama-3.1-8b-instant",
+                response_format={"type": "json_object"}
+            )
+            content = result.get("choices", [{}])[0].get("message", {}).get("content", "{}")
+            return json.loads(content)
+        except Exception as e:
+            logger.error(f"UniversalSlotExtractor LLM call failed: {e}")
+            return {}
+
+
 async def extract_requirements(llm: LLMService, message: str, history: list) -> dict:
+    # Instantiate and run the UniversalSlotExtractor
+    extractor = UniversalSlotExtractor(llm)
+    extracted_slots = await extractor.extract(None, None, message)
+
     if not llm.has_groq:
-        return await _extract_with_openrouter_fallback(llm, message, history)
+        standard_extracted = await _extract_with_openrouter_fallback(llm, message, history)
+        merged = {**standard_extracted, **extracted_slots}
+        return normalize_extraction(merged, message)
 
     try:
         result = await llm.groq_completion(
@@ -444,13 +492,17 @@ async def extract_requirements(llm: LLMService, message: str, history: list) -> 
             .get("message", {})
             .get("content", "{}")
         )
-        return normalize_extraction(json.loads(content), message)
+        standard_extracted = json.loads(content)
+        merged = {**standard_extracted, **extracted_slots}
+        return normalize_extraction(merged, message)
     except Exception as error:
         if _is_rate_limit_error(error):
             logger.info("[Groq] 429 hit, falling back to OpenRouter...")
         else:
             logger.error(f"Groq extraction error, falling back to OpenRouter: {error}")
-        return await _extract_with_openrouter_fallback(llm, message, history)
+        standard_extracted = await _extract_with_openrouter_fallback(llm, message, history)
+        merged = {**standard_extracted, **extracted_slots}
+        return normalize_extraction(merged, message)
 
 
 async def generate_dynamic_context(

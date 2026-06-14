@@ -506,27 +506,40 @@ def _is_ready_to_generate(session_context: dict) -> bool:
     return len(filled_slots) >= 3 # Agar 3/4 found then bypass!
 
 
-def _check_and_apply_artistic_priority(session: dict, text: str) -> None:
-    extraction = session.get("extraction") or {}
+def bypass_wizard_if_ready(session_context: dict, text: str = "") -> bool:
+    required_slots = ['PRIMARY_SUBJECT', 'ENVIRONMENT_SETTING', 'ACTION_DYNAMIC', 'AESTHETIC_STYLE']
     
-    # Check if 3/4 universal slots are filled
-    if _is_ready_to_generate(session):
-        session["status"] = "ready"
-        session["session_status"] = "ready"
-        session["artisticPriority"] = True
+    # Generic extraction check
+    filled_slots = []
+    for slot in required_slots:
+        val = session_context.get(slot) or (session_context.get("extraction") or {}).get(slot)
+        if val:
+            filled_slots.append(slot)
+            
+    # Count words in prompt text
+    prompt_text = text or session_context.get("message") or ""
+    words = [w for w in prompt_text.split() if w]
+    word_count = len(words)
+
+    # Bypass if we have at least 3 slots filled OR (word_count > 8 and clear entities)
+    has_clear_entities = (
+        (session_context.get("extraction") or {}).get("PRIMARY_SUBJECT") is not None and
+        (session_context.get("extraction") or {}).get("ENVIRONMENT_SETTING") is not None and
+        (session_context.get("extraction") or {}).get("ACTION_DYNAMIC") is not None
+    )
+    
+    should_bypass = len(filled_slots) >= 3 or (word_count > 8 and has_clear_entities)
+    
+    if should_bypass:
+        session_context["status"] = "ready"
+        session_context["session_status"] = "ready"
+        session_context["awaitingDeepAnswer"] = False
+        session_context["artisticPriority"] = True
+        session_context["formConfirmed"] = True
         
-        # Prepopulate budget to Premium to bypass budget question
-        if not session.get("deepAnswers"):
-            session["deepAnswers"] = {}
-        session["deepAnswers"]["budgetPreference"] = "Premium"
-        session["extraction"]["budget"] = "Premium"
-        session["formConfirmed"] = True
-        session["awaitingDeepAnswer"] = False
-        session["currentDeepField"] = None
-        session["lastSlotKey"] = None
-        session["triageRounds"] = 0
+        # Populate session["dynamicContext"]["variables"] if not done
+        extraction = session_context.get("extraction") or session_context
         
-        # Populate dynamicContext variables with values of filled slots
         sub = extraction.get("PRIMARY_SUBJECT")
         env = extraction.get("ENVIRONMENT_SETTING")
         act = extraction.get("ACTION_DYNAMIC")
@@ -542,15 +555,29 @@ def _check_and_apply_artistic_priority(session: dict, text: str) -> None:
         if aes:
             variables.append({"name": "AESTHETIC_STYLE", "placeholder": "Aesthetic Style", "test_value": aes})
             
-        if not session.get("dynamicContext"):
-            session["dynamicContext"] = {}
-        session["dynamicContext"]["variables"] = variables
-        session["dynamicContext"]["options"] = ["Dynamic UI Blueprint", "Multi-Slot Extraction", "Artistic Override", "Ready Canvas"]
+        if not session_context.get("dynamicContext"):
+            session_context["dynamicContext"] = {}
+        session_context["dynamicContext"]["variables"] = variables
+        session_context["dynamicContext"]["options"] = ["Dynamic UI Blueprint", "Multi-Slot Extraction", "Artistic Override", "Ready Canvas"]
         
-        # If app type is not set, default to image for style-heavy inputs
-        if not session.get("appType"):
-            session["appType"] = "image"
-            session["extraction"]["appType"] = "image"
+        if not session_context.get("deepAnswers"):
+            session_context["deepAnswers"] = {}
+        session_context["deepAnswers"]["budgetPreference"] = "Premium"
+        session_context["currentDeepField"] = None
+        session_context["lastSlotKey"] = None
+        session_context["triageRounds"] = 0
+        
+        if not session_context.get("appType"):
+            session_context["appType"] = "image"
+            if "extraction" in session_context:
+                session_context["extraction"]["appType"] = "image"
+                
+        return True
+    return False
+
+
+def _check_and_apply_artistic_priority(session: dict, text: str) -> None:
+    bypass_wizard_if_ready(session, text)
 
 
 def _get_next_deep_question(session: dict) -> dict | None:
@@ -2021,14 +2048,20 @@ def route_by_conversational_intent(state: ConversationState) -> str:
     """Dynamic routing logic determining target execution state."""
     action = state.get("recommended_action")
     
+    # ─── CONTEXT CHECK ───
+    is_form_confirmed = bool(state.get("form_confirmed"))
+    extraction = state.get("extraction") or {}
+    deep_answers = state.get("deep_answers") or {}
+    budget_pref = deep_answers.get("budgetPreference") or extraction.get("budget")
+    
+    if is_form_confirmed and budget_pref:
+        if action == "GENERATE_PREVIEW" or state.get("current_step") == 2:
+            return "app_preview_node"
+        return "model_selection_node"
+
     # If the state variables indicate requirements are incomplete, bypass advance attempts
     if action in ("SHOW_MODEL_CARDS", "GENERATE_PREVIEW"):
-        is_form_confirmed = bool(state.get("form_confirmed"))
-        extraction = state.get("extraction") or {}
-        deep_answers = state.get("deep_answers") or {}
-        has_budget = bool(extraction.get("budget") or deep_answers.get("budgetPreference"))
-        
-        if not is_form_confirmed or not has_budget:
+        if not is_form_confirmed or not budget_pref:
             return "ideation_triage_node"
             
     if action == "HANDLE_OFF_TOPIC":

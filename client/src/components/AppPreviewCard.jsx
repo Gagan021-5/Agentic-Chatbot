@@ -81,6 +81,15 @@ export default function AppPreviewCard({ data, onSendMessage, sessionId, storage
     if (previewResult?.url) setImageError(false);
   }, [previewResult?.url]);
 
+  const runTestRef = useRef(false);
+  useEffect(() => {
+    if ((data?.status === 'ready' || data?.session_status === 'ready') && !runTestRef.current) {
+      runTestRef.current = true;
+      setIsPreviewMode(true);
+      handleRunTest();
+    }
+  }, [data?.status, data?.session_status]);
+
   /** Resize + compress an image File to a base64 JPEG, max 900px on longest side. */
   function compressImageToBase64(file, maxPx = 900, quality = 0.85) {
     return new Promise((resolve) => {
@@ -196,7 +205,8 @@ export default function AppPreviewCard({ data, onSendMessage, sessionId, storage
         appType: currentAppType,
         variables: testInputs,
         systemPrompt: data.systemPrompt,
-        testImageBase64: testImage
+        testImageBase64: testImage,
+        status: data.status || data.session_status || null
       });
       if (json.success) {
         setPreviewResult(json.preview);
