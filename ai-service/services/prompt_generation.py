@@ -101,6 +101,7 @@ QUALITY RULES:
 1. systemPrompt: Define a tight AI persona. Include: role, domain expertise, tone, output format rules, and constraints. 3-5 sentences. It MUST be written in the second-person ("You are...") rather than first-person ("I am...").
 2. userPrompt — FORMAT DEPENDS ON APP TYPE:
    ▸ For TEXT and AUDIO apps: Must be HIGHLY DETAILED (200-400 words). Structure it as flowing prose with labeled sections where you strictly include every required input variable inside sentences using the double-dollar syntax like $$variable_name.
+   ▸ For IMAGE and VISION apps: userPrompt must be a concise VISUAL SCENE DESCRIPTION (80-150 words max). Focus ONLY on visual parameters using $$variable syntax. NEVER include backstory_length, tone, word_count, or any narrative/text field as a variable. Every $$variable must describe something a camera or artist would render visually.
 3. Use $$Variable_Name double-dollar prefix syntax (starts with $$, does not end with $$) ONLY for the REQUIRED INPUT VARIABLES listed below. Do not use [Variable_Name] or invent extra variables.
 4. FIRST-PERSON DECLARATIONS (CRITICAL): The userPrompt must be written in the first-person perspective (using "I", "my", "me", e.g. "I want to configure a Lead Generation Machine. Base the scoring on $$Company_Size..."). Do NOT write the prompt in passive third-person instructions.
 

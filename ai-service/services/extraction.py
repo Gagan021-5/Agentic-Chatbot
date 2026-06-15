@@ -674,6 +674,16 @@ Output layout shape (do not use generic keys or generic text placeholders, tailo
 {{"options":["3-4 feature flags"],"variables":[{{"name":"Context Parameter Name","placeholder":"Contextual realistic sample placeholder"}}]}}
 No markdown code fences. No conversational explanations."""
 
+    if app_type in ("image", "vision"):
+        system_prompt = (
+            "CRITICAL: This is an IMAGE generation app. Variables must be VISUAL ONLY. \n"
+            "Allowed: subject, style, environment, lighting, mood, color palette, camera angle, \n"
+            "render quality, art style. STRICTLY FORBIDDEN: backstory_length, tone, word_count, \n"
+            "narrative fields, or any text-content variable. If the app is about fantasy characters, \n"
+            "use: character_race, armor_style, weapon_type, visual_mood, art_style.\n\n"
+            + system_prompt
+        )
+
     rag_block = (
         f"\nREFERENCE EXAMPLES FROM MARKETPLACE (use these to anchor your variable names to real published apps):\n{rag_context}"
         if rag_context else ""

@@ -861,6 +861,42 @@ async def _exec_generate_preview(session: dict, text: str, app_state: Any) -> di
         session["step"] = 2
         await _save(session, app_state)
 
+        preview_image_url = None
+        if app_type in ("image", "vision"):
+            try:
+                compiled_prompt = (prompt_data.get("userPrompt") or "")
+                dc_vars = (session.get("dynamicContext") or {}).get("variables") or []
+                for var in dc_vars:
+                    name = var.get("name", "")
+                    test_val = var.get("test_value") or var.get("placeholder") or name
+                    compiled_prompt = re.sub(
+                        r'\$\$' + re.escape(name) + r'\b',
+                        str(test_val),
+                        compiled_prompt,
+                        flags=re.IGNORECASE
+                    )
+                compiled_prompt = re.sub(r'\$\$[a-zA-Z0-9_]+', '', compiled_prompt).strip()
+
+                model_api_url = getattr(app_state, "image_model_base_url", None)
+                if model_api_url and compiled_prompt:
+                    img_resp = await llm._openrouter_client.post(
+                        "/chat/completions",
+                        json={
+                            "model": selected_model_id,
+                            "messages": [{"role": "user", "content": compiled_prompt}],
+                            "max_tokens": 1,
+                        }
+                    )
+                    img_data = img_resp.json()
+                    preview_image_url = (
+                        img_data.get("choices", [{}])[0]
+                        .get("message", {})
+                        .get("content", "")
+                        .strip() or None
+                    )
+            except Exception as img_err:
+                logger.warning(f"Image preview generation failed, frontend will fallback: {img_err}")
+
         return {
             "reply": f"## App Preview Ready\n\nI've configured the full AI logic using **{selected_model['name']}**.\n\nTest it in the Live Preview below — click **Approve App** when ready!",
             "uiType": "app_preview",
@@ -874,6 +910,7 @@ async def _exec_generate_preview(session: dict, text: str, app_state: Any) -> di
                 "variablesUsed": prompt_data.get("variablesUsed"),
                 "variables": (session.get("dynamicContext") or {}).get("variables") or [],
                 "acceptImageInput": _sanitize_accept_image_input(prompt_data.get("acceptImageInput"), app_type),
+                "previewImageUrl": preview_image_url,
                 "options": ["Approve App", "Edit App"],
                 "step": 2,
             },
@@ -1012,7 +1049,22 @@ async def _exec_pivot_app(session: dict, text: str, decision: dict, app_state: A
 async def _exec_edit_app(session: dict, text: str, decision: dict, app_state: Any) -> dict:
     extracted = decision.get("extracted_variables") or {}
     instruction = extracted.get("editInstruction") or text
+    
+    # Apply edit instruction to existing prompt data
     _apply_edit_to_session(session, instruction)
+    
+    # CRITICAL FIX: Clear stale dynamic context so variables regenerate
+    # based on the new instruction (e.g. switching theme to Hindu mythology)
+    session["dynamicContext"] = None
+    session["ragContext"] = None
+    session["webSearchContext"] = None
+    
+    # Also update extraction purpose to reflect the edit
+    if not session.get("extraction"):
+        session["extraction"] = {}
+    existing_purpose = session["extraction"].get("appPurpose") or ""
+    session["extraction"]["appPurpose"] = f"{existing_purpose}. Edit: {instruction}".strip(". ")
+    
     session["step"] = 2
     await _save(session, app_state)
     return await _exec_generate_preview(session, text, app_state)
