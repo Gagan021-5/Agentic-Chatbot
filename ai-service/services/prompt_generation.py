@@ -358,29 +358,34 @@ async def run_prompt_test(
     model = model_hint or "google/gemini-1.5-flash"
     inputs = test_inputs if isinstance(test_inputs, dict) else {}
     resolved = str(user_prompt or "")
-    
-    # Trace and replace all dynamic input parameters from the frontend preview state form fields
+     # Trace and replace all dynamic input parameters from the frontend preview state form fields
     for key, value in inputs.items():
         val_str = str(value or "")
         keys_to_try = [key]
         
         # Add normalization mutations to match cross-platform cases
-        for alt in [key.replace(" ", "_"), key.replace("_", " "), key.replace(" ", ""), key.lower()]:
+        for alt in [key.replace(" ", "_"), key.replace("_", " "), key.replace(" ", ""), key.lower(), key.upper()]:
             if alt not in keys_to_try:
                 keys_to_try.append(alt)
 
         for k in keys_to_try:
-            esc_k = re.escape(k)
-            # Compile out any format variances ($$var$$, $$var, $var, [var])
-            resolved = re.sub(r'\$\$' + esc_k + r'\$\$', val_str, resolved, flags=re.I)
-            resolved = re.sub(r'\$\$' + esc_k + r'\b', val_str, resolved, flags=re.I)
-            resolved = re.sub(r'\$' + esc_k + r'\App', val_str, resolved, flags=re.I)
-            resolved = re.sub(r'\$' + esc_k + r'\b', val_str, resolved, flags=re.I)
-            resolved = re.sub(r'\[' + esc_k + r'\]', val_str, resolved, flags=re.I)
+            resolved = re.sub(re.escape(f"$${k}$$"), val_str, resolved, flags=re.I)
+            resolved = re.sub(re.escape(f"$${k}"), val_str, resolved, flags=re.I)
+            resolved = re.sub(re.escape(f"${k}$$"), val_str, resolved, flags=re.I)
+            resolved = re.sub(re.escape(f"${k}"), val_str, resolved, flags=re.I)
+            resolved = re.sub(re.escape(f"[{k}]"), val_str, resolved, flags=re.I)
 
     # 🛡️ CLEANUP LEAKED OR EMPTY SYMBOLS TO ENSURE OUTPUT NARRATIVE REMAINS CLEAN
+    # 1. First, replace bold variables/placeholders like **$$Survivor Name** or **[Cinematic_Style]**
+    resolved = re.sub(r"\*\*+(?:\$\$|\[)[a-zA-Z0-9_'\s-]+?(?:\$\$|\])?\*\*+", "", resolved)
+    # 2. Replace any remaining bracketed variables: [Cinematic_Style] or [Cinematic Style]
+    resolved = re.sub(r"\[[a-zA-Z0-9_'\s-]+?\]", "", resolved)
+    # 3. Replace any remaining double-dollar variables without spaces (like $$survivor_name)
     resolved = re.sub(r"\$\$[a-zA-Z0-9_']+\b", "", resolved)
-    resolved = re.sub(r"\[[a-zA-Z0-9_'\s]+\]", "", resolved)
+    # 4. Clean up empty or spacing-only bold markdown left over
+    resolved = re.sub(r"\*\*+\s*\*+", "", resolved)
+    # 5. Clean up multiple spaces
+    resolved = re.sub(r"\s+", " ", resolved).strip()
 
     logger.info(f"[Preview Engine] Triggering OpenRouter ({model}) to compile full runtime content response...")
     

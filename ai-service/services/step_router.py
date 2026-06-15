@@ -606,14 +606,62 @@ async def _show_models(session: dict, app_state: Any) -> dict:
     session["awaitingConfirmation"] = False
     await _save(session, app_state)
 
+    # Build user-facing capability description instead of exposing model names
+    app_type_labels = {
+        "audio": {
+            "speech":  ["tts", "voice", "speech", "narration", "spoken"],
+            "music":   ["music", "song", "lyria", "melody", "instrumental", "beat"],
+        }
+    }
+
+    def _build_capability_summary(app_type: str, ranked_models: list) -> str:
+        if app_type == "audio":
+            model_tags_flat = " ".join(
+                " ".join(str(t).lower() for t in (m.get("tags") or []))
+                for m in ranked_models
+            )
+            has_speech = any(w in model_tags_flat for w in ["tts", "voice", "speech", "narration"])
+            has_music  = any(w in model_tags_flat for w in ["music", "song", "melody", "creative"])
+            if has_speech and has_music:
+                return "🎙 Guided voice narration + 🎵 ambient background music generation"
+            if has_music:
+                return "🎵 AI music and song generation"
+            return "🎙 AI voice narration and speech synthesis"
+        if app_type == "image":
+            return "🖼 High-quality AI image generation"
+        if app_type == "video":
+            return "🎬 AI video and animation generation"
+        if app_type == "vision":
+            return "👁 AI image analysis and understanding"
+        return "✍️ AI text and content generation"
+
+    capability_summary = _build_capability_summary(app_type_str, models)
+
+    # Strip internal model names from display — show friendly labels only
+    display_models = []
+    for m in models:
+        display_models.append({
+            **m,
+            # Keep id internal but replace visible name with capability label
+            "displayName": m.get("name"),   # frontend can use this if it wants
+            "name": m.get("name"),          # keep for internal selection
+        })
+
     return {
         "reply": (
-            f"## 🤖 AI Model Selection\n\nI've ranked the **top 3 models** for your "
-            f"**{app_type_str.capitalize()}** app based on your requirements and budget.\n\n"
-            "Each card shows the model's strengths, speed, and cost per run — **click any card** to select it."
+            f"## 🤖 AI Engine Ready\n\n"
+            f"Based on your app requirements, I've selected the best AI engine for your "
+            f"**{app_type_str.capitalize()}** app.\n\n"
+            f"**What will be generated:** {capability_summary}\n\n"
+            f"Each card below shows the engine's strengths and cost per run — "
+            f"**click any card** to confirm your selection."
         ),
         "uiType": "models",
-        "uiData": {"appType": app_type_str, "models": models},
+        "uiData": {
+            "appType": app_type_str,
+            "models": display_models,
+            "capabilitySummary": capability_summary,
+        },
         "nextStep": 1,
         "coins": None,
     }
@@ -692,7 +740,7 @@ async def _build_step0_response(session: dict, text: str, app_state: Any) -> dic
             is_satisfied = len(dynamic_slots) > 0 and len(missing_slots) == 0
 
         if not is_satisfied and triage_rounds < 3:
-            if (triage_result.get("status") == "ready" or 
+            if missing_slots and (triage_result.get("status") == "ready" or 
                 not triage_result.get("question") or 
                 triage_result.get("slot_key") not in [s.get("key") for s in missing_slots]):
                 next_slot = missing_slots[0]
@@ -821,10 +869,40 @@ async def _exec_generate_preview(session: dict, text: str, app_state: Any) -> di
     session["modelCost"] = selected_model["cost"]
     session["modelName"] = selected_model["name"]
     await _save(session, app_state)
-
     try:
-        if not session.get("dynamicContext") or not (session.get("dynamicContext") or {}).get("variables"):
-            session["dynamicContext"] = await generate_dynamic_context(llm, app_type, (session.get("extraction") or {}).get("appPurpose") or "", _detect_language_mode(session))
+        existing_vars = (session.get("dynamicContext") or {}).get("variables") or []
+        bad_var_names = {
+            "episode_title", "story_title", "case_file_details", "content",
+            "description", "details", "information", "background", "overview"
+        }
+        has_stale_vars = any(
+            v.get("name", "").lower() in bad_var_names
+            for v in existing_vars
+        )
+
+        if not session.get("dynamicContext") or not existing_vars or has_stale_vars:
+            _rag_context = ""
+            vector_store = getattr(app_state, "vector_store", None)
+            if vector_store and hasattr(vector_store, "search"):
+                try:
+                    matches = await vector_store.search(
+                        query=f"{app_type} app variables for {(session.get('extraction') or {}).get('appPurpose') or ''}",
+                        categories=["examples", "blueprints"],
+                        top_k=3,
+                    )
+                    _rag_context = "\n\n".join([m.get("content", "") for m in matches if m.get("content")])
+                except Exception as e:
+                    logger.warning(f"RAG lookup for generate_dynamic_context failed: {e}")
+
+            session["dynamicContext"] = await generate_dynamic_context(
+                llm,
+                app_type,
+                (session.get("extraction") or {}).get("appPurpose") or "",
+                _detect_language_mode(session),
+                rag_context=_rag_context,
+                history=session.get("history"),
+                deep_answers=session.get("deepAnswers"),
+            )
 
         prefill_dynamic_context_variables(session)
 
@@ -866,16 +944,35 @@ async def _exec_generate_preview(session: dict, text: str, app_state: Any) -> di
             try:
                 compiled_prompt = (prompt_data.get("userPrompt") or "")
                 dc_vars = (session.get("dynamicContext") or {}).get("variables") or []
+                test_inputs = {}
                 for var in dc_vars:
-                    name = var.get("name", "")
-                    test_val = var.get("test_value") or var.get("placeholder") or name
-                    compiled_prompt = re.sub(
-                        r'\$\$' + re.escape(name) + r'\b',
-                        str(test_val),
-                        compiled_prompt,
-                        flags=re.IGNORECASE
-                    )
-                compiled_prompt = re.sub(r'\$\$[a-zA-Z0-9_]+', '', compiled_prompt).strip()
+                    if isinstance(var, dict):
+                        name = var.get("name", "")
+                        test_val = var.get("test_value") or var.get("placeholder") or name
+                        test_inputs[name] = test_val
+                    else:
+                        test_inputs[str(var)] = str(var)
+
+                for key, value in test_inputs.items():
+                    val_str = str(value or "")
+                    keys_to_try = [key]
+                    for alt in [key.replace(" ", "_"), key.replace("_", " "), key.replace(" ", ""), key.lower(), key.upper()]:
+                        if alt not in keys_to_try:
+                            keys_to_try.append(alt)
+
+                    for k in keys_to_try:
+                        compiled_prompt = re.sub(re.escape(f"$${k}$$"), val_str, compiled_prompt, flags=re.I)
+                        compiled_prompt = re.sub(re.escape(f"$${k}"), val_str, compiled_prompt, flags=re.I)
+                        compiled_prompt = re.sub(re.escape(f"${k}$$"), val_str, compiled_prompt, flags=re.I)
+                        compiled_prompt = re.sub(re.escape(f"${k}"), val_str, compiled_prompt, flags=re.I)
+                        compiled_prompt = re.sub(re.escape(f"[{k}]"), val_str, compiled_prompt, flags=re.I)
+
+                # Robust cleanup
+                compiled_prompt = re.sub(r"\*\*+(?:\$\$|\[)[a-zA-Z0-9_'\s-]+?(?:\$\$|\])?\*\*+", "", compiled_prompt)
+                compiled_prompt = re.sub(r"\[[a-zA-Z0-9_'\s-]+?\]", "", compiled_prompt)
+                compiled_prompt = re.sub(r"\$\$[a-zA-Z0-9_']+\b", "", compiled_prompt)
+                compiled_prompt = re.sub(r"\*\*+\s*\*+", "", compiled_prompt)
+                compiled_prompt = re.sub(r"\s+", " ", compiled_prompt).strip()
 
                 model_api_url = getattr(app_state, "image_model_base_url", None)
                 if model_api_url and compiled_prompt:
@@ -1047,24 +1144,67 @@ async def _exec_pivot_app(session: dict, text: str, decision: dict, app_state: A
 
 
 async def _exec_edit_app(session: dict, text: str, decision: dict, app_state: Any) -> dict:
-    extracted = decision.get("extracted_variables") or {}
-    instruction = extracted.get("editInstruction") or text
-    
-    # Apply edit instruction to existing prompt data
+    instruction = text.strip()
+    edit_scope = (decision.get("extracted_variables") or {}).get("edit_scope") or \
+                 decision.get("edit_scope") or "PATCH_PROMPT"
+
+    if edit_scope == "PATCH_VALUE":
+        # Only patch the matching variable value — never touch schema
+        dc = session.get("dynamicContext") or {}
+        variables = dc.get("variables") or []
+        instr_lower = instruction.lower()
+        patched = False
+        for var in variables:
+            var_name_lower = str(var.get("name") or "").lower().replace(" ", "_")
+            # Check if instruction references this variable by keyword proximity
+            if any(
+                kw in instr_lower
+                for kw in [var_name_lower, var_name_lower.replace("_", " ")]
+            ):
+                # Extract the value after common phrases like "be", "to", "is", "="
+                value_match = re.search(
+                    r"(?:be|to|is|=|:)\s+(.+)$", instruction, re.IGNORECASE
+                )
+                if value_match:
+                    var["test_value"] = value_match.group(1).strip()
+                    patched = True
+                    break
+        if not patched and variables:
+            # Fallback: patch the first name-like variable
+            for var in variables:
+                if any(w in str(var.get("name") or "").lower() for w in
+                       ["name", "character", "subject", "protagonist", "hero"]):
+                    value_match = re.search(
+                        r"(?:be|to|is|=|:)\s+(.+)$", instruction, re.IGNORECASE
+                    )
+                    if value_match:
+                        var["test_value"] = value_match.group(1).strip()
+                    break
+        session["dynamicContext"] = dc
+        session["step"] = 2
+        await _save(session, app_state)
+        return await _exec_generate_preview(session, text, app_state)
+
+    if edit_scope == "DOMAIN_SHIFT":
+        # Full reset — re-run triage with new intent
+        session["dynamicContext"] = None
+        session["ragContext"] = None
+        session["webSearchContext"] = None
+        session["dynamicSlots"] = []
+        session["triageRounds"] = 0
+        session["formConfirmed"] = False
+        if not session.get("extraction"):
+            session["extraction"] = {}
+        session["extraction"]["appPurpose"] = instruction
+        session["step"] = 0
+        await _save(session, app_state)
+        return await _build_step0_response(session, instruction, app_state)
+
+    # PATCH_PROMPT — update prompt direction, preserve schema entirely
     _apply_edit_to_session(session, instruction)
-    
-    # CRITICAL FIX: Clear stale dynamic context so variables regenerate
-    # based on the new instruction (e.g. switching theme to Hindu mythology)
-    session["dynamicContext"] = None
     session["ragContext"] = None
     session["webSearchContext"] = None
-    
-    # Also update extraction purpose to reflect the edit
-    if not session.get("extraction"):
-        session["extraction"] = {}
-    existing_purpose = session["extraction"].get("appPurpose") or ""
-    session["extraction"]["appPurpose"] = f"{existing_purpose}. Edit: {instruction}".strip(". ")
-    
+    # Do NOT clear dynamicContext
     session["step"] = 2
     await _save(session, app_state)
     return await _exec_generate_preview(session, text, app_state)

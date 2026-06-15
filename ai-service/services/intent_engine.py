@@ -48,8 +48,18 @@ ORCHESTRATOR_TOOL = {
                     "type": "string",
                     "description": "Clear explanation of state alignment and why this action was selected",
                 },
+                "edit_scope": {
+                    "type": "string",
+                    "enum": ["PATCH_VALUE", "PATCH_PROMPT", "DOMAIN_SHIFT"],
+                    "description": (
+                        "When action is EDIT_APP, classify the edit scope: "
+                        "PATCH_VALUE = user is changing a single variable value (name, location, etc), "
+                        "PATCH_PROMPT = user wants tone/style/length change but same domain, "
+                        "DOMAIN_SHIFT = user wants a completely different kind of app"
+                    )
+                },
             },
-            "required": ["recommended_action", "app_type", "confidence", "reasoning"],
+            "required": ["recommended_action", "app_type", "confidence", "reasoning", "edit_scope"],
         },
     },
 }
@@ -77,6 +87,28 @@ STAGE 3 — PREVIEW (session.modelSelected=true AND session.previewApproved=fals
   → GENERATE_PREVIEW (model was just selected, generate live preview)
   → EDIT_APP (user wants tweaks to the prompt/template)
   → PIVOT_APP (user describes a completely different application)
+
+═══════════════════════════════════════
+EDIT SCOPE CLASSIFICATION (when action = EDIT_APP)
+═══════════════════════════════════════
+You MUST classify edit_scope for every EDIT_APP action:
+
+PATCH_VALUE  → user changes a specific input value only
+               (a name, a place, a number, a character, any atomic field)
+               Schema stays IDENTICAL. Only the value is patched.
+               Example: "i want the name to be jack sparrow"
+               Example: "change location to Tokyo"
+
+PATCH_PROMPT → user changes creative direction but stays in same domain
+               (tone, style, pacing, mood, length)
+               Schema stays IDENTICAL. Prompt is regenerated.
+               Example: "make it more intense"
+               Example: "shorter episodes"
+
+DOMAIN_SHIFT → user wants a completely different app type or purpose
+               Schema is RESET. Full triage re-runs.
+               Example: "change to a music app instead"
+               Example: "actually I want image generation"
 
 ═══════════════════════════════════════
 PRD COMPLIANCE & STATE RULES
@@ -337,6 +369,13 @@ def build_fallback_decision(message: str, session: dict | None) -> dict:
             app_type = t
             break
 
+    edit_scope = "PATCH_PROMPT"
+    if recommended_action == "EDIT_APP":
+        if any(w in msg for w in ["music app", "song", "image generation", "instead", "actually"]):
+            edit_scope = "DOMAIN_SHIFT"
+        elif any(w in msg for w in ["name be", "location to", "change location", "change name", "subject to", "character to"]):
+            edit_scope = "PATCH_VALUE"
+
     logger.info(f"[Orchestrator:Fallback] Action: {recommended_action} | Confidence: LOW")
 
     decision = {
@@ -346,6 +385,7 @@ def build_fallback_decision(message: str, session: dict | None) -> dict:
         "reasoning": f"Regex fallback matched action {recommended_action} and app type {app_type}.",
         "extracted_variables": {},
         "is_major_pivot": is_major_pivot,
+        "edit_scope": edit_scope,
         "_source": "fallback_regex",
     }
     return enforce_prd_rules(decision, s)
@@ -401,12 +441,14 @@ async def get_agentic_decision(llm: LLMService, message: str, session: dict) -> 
             app_type = parsed.get("app_type") or "text"
             confidence = parsed.get("confidence") or "MEDIUM"
             reasoning = parsed.get("reasoning") or ""
+            edit_scope = parsed.get("edit_scope") or "PATCH_PROMPT"
 
             decision = {
                 "recommended_action": action,
                 "app_type": app_type,
                 "confidence": confidence,
                 "reasoning": reasoning,
+                "edit_scope": edit_scope,
                 "extracted_variables": {},
                 "is_major_pivot": action == "PIVOT_APP",
                 "_source": "llm",

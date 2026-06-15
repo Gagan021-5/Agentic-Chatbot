@@ -275,8 +275,10 @@ async def _resolve_transformation_tool(prompt: str, app_state: Any) -> dict | No
             top_k=1
         )
         if matches:
-            content = matches[0].get("content", "")
-            return _parse_blueprint_json(content)
+            # Enforce similarity threshold to prevent mismatched blueprints
+            if matches[0].get("relevance_score", 0) >= 0.75:
+                content = matches[0].get("content", "")
+                return _parse_blueprint_json(content)
     except Exception as e:
         logger.warning(f"Failed to resolve transformation tool from RAG: {e}")
     return None
@@ -307,39 +309,49 @@ async def test_preview(request: Request, body: TestPreviewRequest):
         sanitized_variables[k] = v
     body.variables = sanitized_variables
 
-    # Construct combined context to query RAG blueprints
-    transform_goal = "; ".join(
-        f"{k}: {v}" for k, v in body.variables.items() if v
-    )
-    combined_context = f"{transform_goal}\n\n{body.systemPrompt}"
-
-    # Resolve transformation tool using RAG
-    blueprint = await _resolve_transformation_tool(combined_context, request.app.state)
-
-    if blueprint:
+    if app_type not in ("image", "vision"):
         ui_meta = {
-            "show_upload": blueprint.get("show_upload", False),
-            "show_url_input": blueprint.get("show_url_input", False),
-            "active_tool": blueprint.get("tool_id"),
-            "layout_mode": blueprint.get("layout_mode", "static"),
-            "tool_id": blueprint.get("tool_id"),
-            "config": blueprint.get("config", {})
-        }
-    else:
-        # Heuristics-based fallback
-        show_upload = (
-            body.appType in ("image", "vision")
-            or any(kw in combined_context.lower() for kw in ["image", "photo", "portrait", "design", "style transfer", "remove background", "utensil"])
-        )
-        show_url_input = any(kw in combined_context.lower() for kw in ["url", "fetch", "scrap", "external", "link"])
-        ui_meta = {
-            "show_upload": show_upload,
-            "show_url_input": show_url_input,
-            "active_tool": "bg_remover" if ("remove background" in combined_context.lower() or "bg_remover" in combined_context.lower()) else None,
-            "layout_mode": "interactive" if (show_upload or show_url_input) else "static",
-            "tool_id": "bg_remover" if ("remove background" in combined_context.lower() or "bg_remover" in combined_context.lower()) else None,
+            "show_upload": False,
+            "show_url_input": False,
+            "active_tool": None,
+            "layout_mode": "static",
+            "tool_id": None,
             "config": {}
         }
+    else:
+        # Construct combined context to query RAG blueprints
+        transform_goal = "; ".join(
+            f"{k}: {v}" for k, v in body.variables.items() if v
+        )
+        combined_context = f"{transform_goal}\n\n{body.systemPrompt}"
+
+        # Resolve transformation tool using RAG
+        blueprint = await _resolve_transformation_tool(combined_context, request.app.state)
+
+        if blueprint:
+            ui_meta = {
+                "show_upload": blueprint.get("show_upload", False),
+                "show_url_input": blueprint.get("show_url_input", False),
+                "active_tool": blueprint.get("tool_id"),
+                "layout_mode": blueprint.get("layout_mode", "static"),
+                "tool_id": blueprint.get("tool_id"),
+                "config": blueprint.get("config", {})
+            }
+        else:
+            # Heuristics-based fallback
+            show_upload = (
+                body.appType in ("image", "vision")
+                or any(kw in combined_context.lower() for kw in ["image", "photo", "portrait", "design", "style transfer", "remove background", "utensil"])
+            )
+            show_url_input = any(kw in combined_context.lower() for kw in ["url", "fetch", "scrap", "external", "link"])
+            ui_meta = {
+                "show_upload": show_upload,
+                "show_url_input": show_url_input,
+                "active_tool": "bg_remover" if ("remove background" in combined_context.lower() or "bg_remover" in combined_context.lower()) else None,
+                "layout_mode": "interactive" if (show_upload or show_url_input) else "static",
+                "tool_id": "bg_remover" if ("remove background" in combined_context.lower() or "bg_remover" in combined_context.lower()) else None,
+                "config": {}
+            }
 
     # If testImageBase64 is not provided, check if any of the variables contain an image URL
     if not body.testImageBase64 and body.variables:
@@ -503,8 +515,15 @@ async def test_preview(request: Request, body: TestPreviewRequest):
                         "You write ONLY the exact words a voice actor will read aloud. "
                         "Never add titles, labels, or meta lines. No markdown. Plain spoken text only."
                     ),
-                    user_content=f"{body.systemPrompt}\n\nInputs: {json.dumps(body.variables)}",
-                    max_tokens=500,
+                    user_content=(
+                        f"App instructions: {body.systemPrompt}\n\n"
+                        f"User inputs provided:\n{json.dumps(body.variables, indent=2)}\n\n"
+                        f"Using ALL of the above inputs, write a complete, full-length spoken podcast script. "
+                        f"Do NOT describe the tone. Do NOT repeat the inputs back. "
+                        f"Generate the ACTUAL script content a voice actor would speak word for word. "
+                        f"Minimum 300 words. Start speaking immediately."
+                    ),
+                    max_tokens=900,
                 )
                 raw_script = result["choices"][0]["message"]["content"]
                 script_content = _normalize_tts_script(raw_script)
@@ -628,43 +647,22 @@ async def test_preview(request: Request, body: TestPreviewRequest):
 @router.post("/test-prompt", response_model=TestPromptResponse)
 async def test_prompt(request: Request, body: TestPromptRequest):
     """Run a prompt test for POST /api/test-prompt."""
-    import time as _time
+    from services.prompt_generation import run_prompt_test
     llm = request.app.state.llm
-    started = _time.time()
 
     try:
-        # Resolve variables in user prompt supporting both legacy $$ and new [Variable] syntax
-        resolved = body.userPrompt
-        for key, value in (body.testInputs or {}).items():
-            val_str = str(value or "")
-            keys_to_try = [key]
-            key_alt1 = key.replace(" ", "_")
-            if key_alt1 not in keys_to_try:
-                keys_to_try.append(key_alt1)
-            key_alt2 = key.replace("_", " ")
-            if key_alt2 not in keys_to_try:
-                keys_to_try.append(key_alt2)
-
-            for k in keys_to_try:
-                resolved = re.sub(re.escape(f"$${k}$$"), val_str, resolved, flags=re.I)
-                resolved = re.sub(re.escape(f"$${k}"), val_str, resolved, flags=re.I)
-                resolved = re.sub(re.escape(f"${k}$$"), val_str, resolved, flags=re.I)
-                resolved = re.sub(re.escape(f"${k}"), val_str, resolved, flags=re.I)
-                resolved = re.sub(re.escape(f"[{k}]"), val_str, resolved, flags=re.I)
-
-        raw = await llm.openrouter_chat(
-            system_prompt=body.systemPrompt or "You are a helpful AI assistant.",
-            user_content=resolved,
-            model=body.modelHint or "google/gemini-1.5-flash",
-            max_tokens=700,
-            temperature=0.4,
+        res = await run_prompt_test(
+            llm=llm,
+            system_prompt=body.systemPrompt,
+            user_prompt=body.userPrompt,
+            test_inputs=body.testInputs,
+            model_hint=body.modelHint
         )
-
         return TestPromptResponse(
-            output=raw[:3000],
-            modelUsed=body.modelHint or "google/gemini-1.5-flash",
-            latencyMs=int((_time.time() - started) * 1000),
-            tokens=None,
+            output=res["output"],
+            modelUsed=res["modelUsed"],
+            latencyMs=res["latencyMs"],
+            tokens=res["tokens"]
         )
     except Exception as e:
         logger.error(f"test_prompt error: {e}")

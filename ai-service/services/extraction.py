@@ -654,46 +654,103 @@ async def generate_dynamic_context(
     app_purpose: str,
     language_hint: str = "English",
     rag_context: str = "",
+    deep_answers: dict | None = None,
+    existing_variables: list | None = None,
+    conversation_history: list | None = None,
 ) -> dict:
     safe_type = app_type if app_type in ALLOWED_TRIAGE_APP_FORMATS else "text"
     safe_purpose = str(app_purpose or "").strip() or "general assistant app"
     safe_lang = _normalize_language_hint(language_hint)
+    language_mode = safe_lang
 
-    # ─── 🛡️ GENERIC CONTEXT CONSTRAINTS (NO HARDCODED DOB/BLOAT) ───
-    system_prompt = f"""You are a strict JSON generator.
-Generate compact, highly relevant runtime user input fields and variable requirements for a custom AI app idea.
-{LANGUAGE_MIRROR_DIRECTIVE}
+    system_prompt = """
+You are an expert AI App Variable Architect for the RentPrompts marketplace.
+Analyze the app purpose, conversation history, and RAG context to generate
+the most domain-specific, atomic, reusable prompt variables possible.
 
-VARIABLE EXTRACTOR RULES:
-1. ZERO PERSONAL BOILERPLATE: Under no circumstances are you allowed to generate generic personal variables like 'User Name', 'Date of Birth', 'Age', 'Creation Date', 'Current Date', or 'Today's Date' unless the user's concept explicitly asks for them.
-2. ZERO META-PLATFORM/BOILERPLATE LEAKAGE: NEVER generate variables for model names, model variants, model versions, LLM providers, API keys, or system configuration settings.
-3. DOMAIN-AWARE ATTRIBUTES: For a motivational generator, generate fields like 'Speech Length', 'Target Industry', 'Speaker Accent'. For a text-to-speech engine, generate 'Script Theme', 'Voice Accent Style'.
-4. Output variable names inside the JSON array must be explicitly formatted using alphanumeric symbols with matching descriptive, realistic placeholders. Do not use generic placeholders.
+CRITICAL RULES:
+1. NEVER generate pre-filled content variables where user writes full content:
+   BAD:  episode_title → user types "The Mysterious Disappearance at Ravenswood Manor"
+   GOOD: location, victim_name, case_type → AI generates title FROM these
 
-Output layout shape (do not use generic keys or generic text placeholders, tailor them to the custom app domain):
-{{"options":["3-4 feature flags"],"variables":[{{"name":"Context Parameter Name","placeholder":"Contextual realistic sample placeholder"}}]}}
-No markdown code fences. No conversational explanations."""
+2. NEVER merge multiple facts into one field:
+   BAD:  case_file_details → "Victim: Sarah Lee, 28, missing 3 days, last seen at cafe"
+   GOOD: victim_name, victim_age, case_duration, last_seen_location
 
-    if app_type in ("image", "vision"):
-        system_prompt = (
-            "CRITICAL: This is an IMAGE generation app. Variables must be VISUAL ONLY. \n"
-            "Allowed: subject, style, environment, lighting, mood, color palette, camera angle, \n"
-            "render quality, art style. STRICTLY FORBIDDEN: backstory_length, tone, word_count, \n"
-            "narrative fields, or any text-content variable. If the app is about fantasy characters, \n"
-            "use: character_race, armor_style, weapon_type, visual_mood, art_style.\n\n"
-            + system_prompt
+3. Variables must be ATOMIC (one fact per variable), REUSABLE (works for any
+   instance of this app), GENERATIVE (AI builds output FROM these inputs).
+
+4. Use RAG context + conversation history to infer domain-specific variables:
+   - True crime audio    → location, victim_name, case_type, suspect_count,
+                           narrative_tone, episode_length, detective_style
+   - Fantasy character   → race, weapon_type, armor_style, power_class,
+                           world_setting, art_style, lighting_mood
+   - Legal advisor       → incident_type, jurisdiction, party_role,
+                           desired_outcome, case_urgency
+   - Interior design     → room_type, design_style, color_theme, budget_range
+   - Marketing copy      → product_name, target_audience, tone, platform
+   Always infer from actual app purpose — never use these as defaults.
+
+5. Generate exactly 4-7 variables. Quality over quantity.
+
+6. Each variable must have all 5 fields:
+   - name:        snake_case key used in prompt template
+   - label:       Human readable label shown in the UI form
+   - placeholder: Realistic SHORT example (NOT pre-written content sentences)
+   - description: One line telling user what to input here
+   - test_value:  Concrete sample value used in live preview generation
+
+Return ONLY valid JSON, no markdown, no explanation:
+{
+  "variables": [
+    {
+      "name": "victim_name",
+      "label": "Victim Name",
+      "placeholder": "e.g. Sarah Lee",
+      "description": "First and last name of the victim or missing person",
+      "test_value": "Emily Carter"
+    }
+  ],
+  "options": [],
+  "title": "Short descriptive title for this app input schema"
+}
+"""
+
+    history_block = ""
+    if conversation_history:
+        history_block = "\nConversation so far:\n" + "\n".join(
+            f"{m.get('role','user')}: {m.get('content','')}"
+            for m in (conversation_history or [])[-6:]
         )
 
-    rag_block = (
-        f"\nREFERENCE EXAMPLES FROM MARKETPLACE (use these to anchor your variable names to real published apps):\n{rag_context}"
-        if rag_context else ""
-    )
+    captured_block = ""
+    if deep_answers:
+        clean = {k: v for k, v in deep_answers.items() if not k.startswith("_") and v}
+        if clean:
+            captured_block = "\nAlready captured from user:\n" + json.dumps(clean)
+
+    schema_lock_block = ""
+    if existing_variables:
+        schema_lock_block = (
+            "\nEXISTING SCHEMA (LOCKED — preserve these exact variable names, "
+            "only update test_value if a captured answer matches):\n"
+            + json.dumps(existing_variables)
+        )
+
+    rag_block = f"\nRAG Context:\n{rag_context}" if rag_context else ""
 
     user_prompt = (
-        f"The user wants to build a {safe_type} app for: {safe_purpose}.\n"
-        f"Language mode: {safe_lang}.\n"
-        f"{rag_block}"
-        f"Generate 4 highly relevant product features and 3-4 input fields strictly customized for this domain's operational targets."
+        f"App type: {safe_type}\n"
+        f"App purpose: {safe_purpose}\n"
+        f"Language: {safe_lang}\n"
+        f"{history_block}"
+        f"{captured_block}"
+        f"{schema_lock_block}"
+        f"{rag_block}\n"
+        f"Generate 4 feature flags and 3-4 input variables precisely matching "
+        f"this app's domain. Use the conversation history and captured answers "
+        f"to prefill test_value fields. If existing schema is provided, "
+        f"return it unchanged — only update test_values."
     )
 
     if llm.has_groq:
