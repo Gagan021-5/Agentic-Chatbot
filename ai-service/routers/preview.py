@@ -53,12 +53,19 @@ class TestPromptResponse(BaseModel):
 
 
 def _generate_video_preview(prompt: str) -> str:
-    """Constructs the Pollinations video URL directly."""
+    """Constructs the Pollinations video URL directly with key, or falls back to standard sample video."""
+    from config import get_settings
+    settings = get_settings()
+    key = settings.pollinations_api_key
+    if not key:
+        logger.info("[Preview Engine] No Pollinations key configured, falling back to TearsOfSteel cinematic MP4 placeholder")
+        return "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/TearsOfSteel.mp4"
+
     from urllib.parse import quote
     import hashlib
     clean_prompt = quote(prompt.strip())
     h = int(hashlib.md5(prompt.encode('utf-8')).hexdigest(), 16) % 1000000
-    return f"https://gen.pollinations.ai/video/{clean_prompt}?width=1024&height=576&seed={h}"
+    return f"https://gen.pollinations.ai/video/{clean_prompt}?width=1024&height=576&seed={h}&key={key}"
 
 
 
@@ -354,20 +361,12 @@ async def test_preview(request: Request, body: TestPreviewRequest):
             text_content = re.sub(r"^#{1,6}\s?", "", text_content, flags=re.MULTILINE)
             text_content = text_content.replace("#", "").strip()
 
-            # Surprise image for visual text apps
             image_url = None
-            if re.search(r"astrology|horoscope|story|character|design", body.systemPrompt, re.I):
-                clauses = _build_visual_clauses(body.variables)
-                prompt = f"{clauses} Art direction: {body.systemPrompt[:240]}"
-                try:
-                    image_url = await _fetch_pollinations_with_fallback(prompt, prompt[:200])
-                except Exception:
-                    image_url = _preview_unavailable_svg()
 
             preview_result = {
-                "type": "multimodal" if image_url else "text",
+                "type": "text",
                 "content": text_content,
-                "url": image_url,
+                "url": None,
             }
 
         # ─── 2. IMAGE APP (Hardened Context Detection) ──────

@@ -51,14 +51,17 @@ class Settings(BaseSettings):
     # --- Murf TTS ---
     murf_api_key: str = Field(default="", description="Murf.ai TTS API key for audio preview")
 
+    # --- Remove.bg ---
+    removebg_api_key: str = Field(default="", description="Remove.bg API Key")
+
     # --- Tavily Search ---
     tavily_api_key: str = Field(default="", description="Tavily API key for web search")
 
     # --- Hugging Face ---
     huggingface_api_key: str = Field(default="", description="Hugging Face API token")
 
-    # --- Remove.bg ---
-    removebg_api_key: str = Field(default="", description="Remove.bg API Key")
+    # --- Pollinations AI ---
+    pollinations_api_key: str = Field(default="", description="Pollinations AI API Key for video generation")
 
     # --- Service ---
     host: str = Field(default="0.0.0.0")

@@ -381,8 +381,15 @@ async def run_prompt_test(
     logger.info(f"[Preview Engine] Triggering OpenRouter ({model}) to compile full runtime content response...")
     
     try:
+        # Grounding with explicit deep reasoning instruction
+        final_system_prompt = (
+            str(system_prompt or "You are a helpful AI assistant.") +
+            "\n\nCRITICAL INSTRUCTION: Do NOT output raw prompt templates or empty variable tags. "
+            "Using the resolved user prompt, perform the final generation to produce the ACTUAL complete story, speech, or content. "
+            "Generate high-quality, final production-ready content."
+        )
         raw = await llm.openrouter_chat(
-            system_prompt=str(system_prompt or "You are a helpful AI assistant."),
+            system_prompt=final_system_prompt,
             user_content=resolved,
             model=model,
             temperature=0.4,

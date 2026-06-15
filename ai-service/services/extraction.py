@@ -103,24 +103,24 @@ ANTI-LOOP PROTECTION:
 - You must read the already captured attributes. If fields like tone, length, theme, or audience are already populated from previous turns, do NOT ask for them again. Ensure you choose a different missing attribute if needed, or set status to "ready".
 
 Return strict JSON only (no markdown, no other text):
-{
+{{
   "status": "needs_context|ready",
   "question": "Clear natural follow-up question if needs_context, else null",
   "slot_key": "The snake_case key variable name for state mapping, else null",
   "corrected_app_type": "Retain the incoming specialized app type string (text|image|audio|video|vision)",
   "domain_identified": "text|image|audio|video|vision|hybrid",
   "confidence_score": 0-100,
-  "form": {
+  "form": {{
     "options": ["4 concise feature options"],
     "variables": [
-      {
+      {{
         "name": "variable name",
         "placeholder": "realistic placeholder",
         "test_value": "realistic test value"
-      }
+      }}
     ]
-  }
-}
+  }}
+}}
 
 VARIABLE CONFIGURATION RULES (when status is "ready"):
 - Extract 3–6 variables. They must be user-facing (non-technical) and directly affect output.
@@ -150,7 +150,6 @@ def _is_rate_limit_error(error: Exception) -> bool:
         return True
     msg = str(error)
     return "429" in msg or "rate_limit" in msg.lower() or "too many requests" in msg.lower()
-
 
 
 def _normalize_language_hint(language_hint: str | None) -> str:
@@ -217,7 +216,10 @@ def _prettify_variable_name(name: str, app_type: str) -> str:
 def is_personal_boilerplate(name: str, app_purpose: str) -> bool:
     n = name.lower()
     p = app_purpose.lower()
-    boilerplate = ["user name", "username", "date of birth", "dob", "birth date", "age", "current date", "today's date"]
+    boilerplate = [
+        "user name", "username", "date of birth", "dob", "birth date", "age",
+        "creation date", "current date", "today's date", "date of creation", "creationdate"
+    ]
     for kw in boilerplate:
         if kw in n:
             if kw not in p:
@@ -229,6 +231,8 @@ def _sanitize_variable_objects(
     items: Any, min_len: int, max_len: int, fallback: list[dict], app_type: str, app_purpose: str = ""
 ) -> list[dict]:
     normalized: list[dict] = []
+    has_boilerplate_scrubbed = False
+    
     if isinstance(items, list):
         seen: set[str] = set()
         for item in items:
@@ -249,13 +253,58 @@ def _sanitize_variable_objects(
             if not obj["name"]:
                 continue
             if is_personal_boilerplate(obj["name"], app_purpose):
+                has_boilerplate_scrubbed = True
                 continue
             key = obj["name"].lower()
             if key in seen:
                 continue
             seen.add(key)
             normalized.append(obj)
+        
+        # ─── 🛡️ PRD DOMAIN-AWARE ATTRIBUTE ENFORCEMENT & INTERCEPTOR ───
+        if has_boilerplate_scrubbed or len(normalized) < min_len:
+            domain_fields = []
+            purpose_lower = app_purpose.lower()
+            type_lower = app_type.lower()
+            
+            if "motivation" in purpose_lower or "speech" in purpose_lower or type_lower in ("audio", "text"):
+                domain_fields = [
+                    {"name": "Script Topic", "placeholder": "What should the speech/content focus on?", "test_value": "Overcoming interview anxiety and building confidence"},
+                    {"name": "Target Industry", "placeholder": "e.g. Technology, Finance, General...", "test_value": "Technology"},
+                    {"name": "Speaker Accent", "placeholder": "e.g. Male, British accent, clear voice...", "test_value": "Male, clear and energetic"}
+                ]
+            elif type_lower == "image":
+                domain_fields = [
+                    {"name": "Visual Subject", "placeholder": "Main subject of the image", "test_value": "A futuristic city at sunset"},
+                    {"name": "Aesthetic Style", "placeholder": "Visual style (e.g. oil painting, digital art)", "test_value": "cinematic digital art"},
+                    {"name": "Lighting Style", "placeholder": "Lighting mood (e.g. golden hour, neon)", "test_value": "golden hour"}
+                ]
+            elif type_lower == "video":
+                domain_fields = [
+                    {"name": "Video Concept", "placeholder": "Overall concept or storyline", "test_value": "Drone shot of ocean waves"},
+                    {"name": "Motion Style", "placeholder": "Camera motion description", "test_value": "slow pan left"},
+                    {"name": "Target Platform", "placeholder": "YouTube, Reels, TikTok...", "test_value": "YouTube Reels"}
+                ]
+            elif type_lower == "vision":
+                domain_fields = [
+                    {"name": "Image Analysis Goal", "placeholder": "What to analyze/detect", "test_value": "text on receipt"},
+                    {"name": "Output Format", "placeholder": "Desired format (e.g. JSON, markdown)", "test_value": "JSON"}
+                ]
+            else:
+                domain_fields = [
+                    {"name": "Script Topic", "placeholder": "Topic or focus of the application", "test_value": "General topic"},
+                    {"name": "Target Industry", "placeholder": "Target domain or area", "test_value": "Technology"},
+                    {"name": "Speaker Accent", "placeholder": "Accent or voice style", "test_value": "Neutral tone"}
+                ]
+            
+            for df in domain_fields:
+                key = df["name"].lower()
+                if key not in seen:
+                    seen.add(key)
+                    normalized.append(df)
+                    
         normalized = normalized[:max_len]
+        
     return normalized if len(normalized) >= min_len else fallback[:max_len]
 
 
@@ -400,12 +449,12 @@ def _parse_triage_response(
         return ready_shape(
             domain,
             effective_type,
-            {
+            {{
                 "options": _sanitize_string_list(options_raw, 4, 4, fallback_form["options"]),
                 "variables": _sanitize_variable_objects(
                     variables_raw, 3, 8, fallback_form["variables"], effective_type, safe_purpose
                 ),
-            },
+            }},
             confidence,
         )
     except Exception as e:
@@ -536,8 +585,8 @@ Generate compact, highly relevant runtime user input fields and variable require
 {LANGUAGE_MIRROR_DIRECTIVE}
 
 VARIABLE EXTRACTOR RULES:
-1. ZERO PERSONAL BOILERPLATE: NEVER generate generic personal variables like 'User Name', 'Date of Birth', 'Age', or 'Current Date' unless the app specifically asks for them.
-2. DOMAIN-AWARE ATTRIBUTES: For a motivational generator, generate fields like 'Speech Length', 'Target Industry', 'Speaker Tone'. For a text-to-speech engine, generate 'Script Theme', 'Voice Accent Style'.
+1. ZERO PERSONAL BOILERPLATE: NEVER generate generic personal variables like 'User Name', 'Date of Birth', 'Age', or 'Creation Date' unless the app specifically asks for them.
+2. DOMAIN-AWARE ATTRIBUTES: For a motivational generator, generate fields like 'Speech Length', 'Target Industry', 'Speaker Accent'. For a text-to-speech engine, generate 'Script Theme', 'Voice Accent Style'.
 3. Output variable names inside the JSON array must be explicitly formatted using alphanumeric symbols with matching descriptive placeholders.
 
 Output layout shape (do not use generic keys or generic text placeholders, tailor them to the custom app domain):
