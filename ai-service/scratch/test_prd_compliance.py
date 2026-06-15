@@ -37,7 +37,7 @@ def run_tests():
     print("\nTest 3: Premature Progression Gating")
     # Only 2 metadata attributes -> should gate
     session_gate = {
-        "appType": "text",
+        "appType": "image",
         "step": 0,
         "extraction": {
             "PRIMARY_SUBJECT": "motorcycles",
@@ -45,7 +45,7 @@ def run_tests():
         },
         "deepAnswers": {}
     }
-    decision_gate = {"recommended_action": "SHOW_MODEL_CARDS", "app_type": "text", "confidence": "medium", "reasoning": "Test"}
+    decision_gate = {"recommended_action": "SHOW_MODEL_CARDS", "app_type": "image", "confidence": "medium", "reasoning": "Test"}
     res_gate = enforce_prd_rules(decision_gate, session_gate)
     assert res_gate["recommended_action"] == "GATHER_REQUIREMENTS", f"Expected gated to GATHER_REQUIREMENTS, got {res_gate['recommended_action']}"
     print("  -> Gated premature transition to SHOW_MODEL_CARDS when attributes < 3")

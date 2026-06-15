@@ -583,10 +583,10 @@ async def _save(session: dict, app_state: Any) -> None:
 
 async def _show_models(session: dict, app_state: Any) -> dict:
     # Double validation step ensuring dynamic context doesn't bypass catalog formats
-    history_str = " ".join([str(h.get("content", "")).lower() for h in (session.get("history") or [])])
+    user_history_str = " ".join([str(h.get("content", "")).lower() for h in (session.get("history") or []) if h.get("role") in ("user", "human")])
     purpose_str = str((session.get("extraction") or {}).get("appPurpose") or "").lower()
     
-    if any(s in history_str or s in purpose_str for s in ("image", "images", "poster", "posters", "photo")):
+    if any(s in user_history_str or s in purpose_str for s in ("image", "images", "poster", "posters", "photo")):
         session["appType"] = "image"
         if session.get("extraction"):
             session["extraction"]["appType"] = "image"
@@ -733,7 +733,27 @@ async def _build_step0_response(session: dict, text: str, app_state: Any) -> dic
     if triage_result.get("form"):
         session["dynamicContext"] = triage_result["form"]
     else:
-        session["dynamicContext"] = await generate_dynamic_context(llm, session.get("appType") or "text", (session.get("extraction") or {}).get("appPurpose") or "", _detect_language_mode(session))
+        _app_purpose = (session.get("extraction") or {}).get("appPurpose") or ""
+        _rag_context = ""
+        vector_store = getattr(app_state, "vector_store", None)
+        if vector_store and hasattr(vector_store, "search"):
+            try:
+                matches = await vector_store.search(
+                    query=f"{session.get('appType')} app variables for {_app_purpose}",
+                    categories=["examples", "blueprints"],
+                    top_k=3,
+                )
+                _rag_context = "\n\n".join([m.get("content", "") for m in matches if m.get("content")])
+            except Exception as e:
+                logger.warning(f"RAG lookup for generate_dynamic_context failed: {e}")
+
+        session["dynamicContext"] = await generate_dynamic_context(
+            llm,
+            session.get("appType") or "text",
+            _app_purpose,
+            _detect_language_mode(session),
+            rag_context=_rag_context,
+        )
     
     session["formConfirmed"] = True
     session["triageRounds"] = 0
@@ -789,6 +809,8 @@ async def _exec_generate_preview(session: dict, text: str, app_state: Any) -> di
     app_type = session.get("appType") or "text"
     selected_model_id = _parse_selected_model_id(text, MODELS.get(app_type, []))
     if not selected_model_id:
+        selected_model_id = session.get("modelId")
+    if not selected_model_id:
         return {"reply": "Please **click one of the model cards** above to select the AI engine. 👆", "uiType": "text", "nextStep": 1}
 
     selected_model = _find_model(app_type, selected_model_id)
@@ -813,6 +835,21 @@ async def _exec_generate_preview(session: dict, text: str, app_state: Any) -> di
             session["webSearchContext"] = search_result
         except Exception as search_err:
             logger.warning(f"WebSearch grounding failed: {search_err}")
+
+        _prompt_rag = ""
+        vector_store = getattr(app_state, "vector_store", None)
+        if vector_store and hasattr(vector_store, "search"):
+            try:
+                matches = await vector_store.search(
+                    query=f"{app_type} app prompt template for {(session.get('extraction') or {}).get('appPurpose') or ''}",
+                    categories=["examples", "prompting"],
+                    top_k=3,
+                )
+                _prompt_rag = "\n\n".join([m.get("content", "") for m in matches if m.get("content")])
+                if _prompt_rag:
+                    session["ragContext"] = _prompt_rag
+            except Exception as e:
+                logger.warning(f"RAG lookup for prompt generation failed: {e}")
 
         prompt_data, seo_data = await asyncio.gather(
             generate_prompt_template(llm, session),
@@ -1014,6 +1051,8 @@ class ConversationState(TypedDict, total=False):
     triage_rounds: int
     last_slot_key: Optional[str]
     dynamic_slots: list[dict]
+    awaiting_deep_answer: Optional[bool]
+    current_deep_field: Optional[str]
 
 
 def _session_to_state(session: dict, message: str) -> ConversationState:
@@ -1079,6 +1118,8 @@ def _session_to_state(session: dict, message: str) -> ConversationState:
         "triage_rounds": triage_rounds,
         "last_slot_key": last_slot_key,
         "dynamic_slots": dynamic_slots,
+        "awaiting_deep_answer": session.get("awaitingDeepAnswer") or False,
+        "current_deep_field": session.get("currentDeepField"),
     }
 
 
@@ -1118,6 +1159,8 @@ def _state_to_session(state: ConversationState, session: dict) -> None:
     session["triageRounds"] = state.get("triage_rounds", 0)
     session["lastSlotKey"] = state.get("last_slot_key")
     session["dynamicSlots"] = state.get("dynamic_slots") or []
+    session["awaitingDeepAnswer"] = state.get("awaiting_deep_answer") or False
+    session["currentDeepField"] = state.get("current_deep_field")
 
     session_history = []
     for m in state.get("history", []):
@@ -1319,6 +1362,13 @@ def route_by_conversational_intent(state: ConversationState) -> str:
         return "ideation_triage_node"
 
     if not state.get("form_confirmed") and action not in ("GATHER_REQUIREMENTS", "PROCESS_FORM", "HANDLE_OFF_TOPIC"):
+        return "ideation_triage_node"
+
+    # ─── 🛡️ BUDGET CHIP INTERCEPT ───
+    # If we're awaiting a budget answer, the chip must go through ideation_triage_node
+    # so the budget is saved to deepAnswers BEFORE _show_models is called.
+    # Sending it to model_selection_node directly causes a double render with wrong models first.
+    if state.get("awaiting_deep_answer") and state.get("current_deep_field") == "budgetPreference":
         return "ideation_triage_node"
 
     if action == "HANDLE_OFF_TOPIC":

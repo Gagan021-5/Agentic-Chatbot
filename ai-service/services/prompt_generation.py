@@ -94,31 +94,15 @@ async def generate_prompt_template(llm: LLMService, session: dict) -> dict:
 Your job: generate a HIGHLY SPECIFIC, DOMAIN-AWARE prompt configuration for the app described below.
 {LANGUAGE_MIRROR_DIRECTIVE}
 
+CRITICAL ANTI-CONTAMINATION RULE:
+Look closely at the explicit App Type and App Purpose. Do NOT mix up previous applications or domains from the chat history. If the app purpose is a placement speech generator, do NOT generate a prompt for a horror story or any other unrelated topic. Stay strictly focused on the current App Purpose.
+
 QUALITY RULES:
 1. systemPrompt: Define a tight AI persona. Include: role, domain expertise, tone, output format rules, and constraints. 3-5 sentences. It MUST be written in the second-person ("You are...") rather than first-person ("I am...").
 2. userPrompt — FORMAT DEPENDS ON APP TYPE:
-   ▸ For TEXT and AUDIO apps: Must be HIGHLY DETAILED (200-400 words). Structure it as:
-     a) Instructions for the LLM using the $$Variable_Name variables in the first-person perspective ("I want to generate based on my $$Variable_Name...", "I want my $$Variable_Name to be...")
-     b) Step-by-step processing logic
-     c) Output format specification (headings, bullets, structure)
-     d) Constraints (what NOT to do)
-     DO NOT use markdown headers (##) inside the prompt — write it as flowing prose with labeled sections.
-   ▸ For IMAGE and VIDEO apps: Must be a CONCISE VISUAL DESCRIPTION (50-120 words). Write it as:
-     - A single flowing visual prompt describing the desired output
-     - Incorporate $$Variable_Name variables naturally: "A $$style $$subject with $$details"
-     - Include art direction: lighting, camera angle, color palette, mood
-     - End with quality keywords: "professional photography, 8K, ultra-detailed"
-     - DO NOT use ## headers, numbered steps, or "Processing Logic" — image generators don't read structured prompts
+   ▸ For TEXT and AUDIO apps: Must be HIGHLY DETAILED (200-400 words). Structure it as flowing prose with labeled sections where you strictly include every required input variable inside sentences using the double-dollar syntax like $$variable_name.
 3. Use $$Variable_Name double-dollar prefix syntax (starts with $$, does not end with $$) ONLY for the REQUIRED INPUT VARIABLES listed below. Do not use [Variable_Name] or invent extra variables.
-4. negativePrompt: For image/video apps, write a detailed negative prompt. For text/audio/vision, set to null.
-5. acceptImageInput: SMART DETECTION — do NOT blindly set true for all image apps.
-6. NO META-PLATFORM DETAILS: NEVER mention the user's budget, coin cost, or model name in the systemPrompt or userPrompt.
-7. DOMAIN GROUNDING: If the app is legal/medical/agricultural, explicitly define domain-specific terms in systemPrompt.
-8. DO NOT write generic prompts. Every sentence must be specific to THIS app's purpose.
-9. NEVER include in prompts: model names, coin costs, budget tiers, platform names ("RentPrompts"), or any internal metadata.
-10. USER PERSPECTIVE PRINCIPLE (CRITICAL): Variables must reflect what a NON-EXPERT end-user can actually provide.
-11. CONFLICT DETECTION & ANTI-HALLUCINATION (CRITICAL for legal/medical/expert apps).
-12. FIRST-PERSON DECLARATIONS (CRITICAL): The userPrompt must be written in the first-person perspective (using "I", "my", "me", e.g. "I want to configure a Lead Generation Machine. Base the scoring on $$Company_Size..."). Do NOT write the prompt in passive third-person instructions (do NOT write "Analyze the input...", "Generate a...").
+4. FIRST-PERSON DECLARATIONS (CRITICAL): The userPrompt must be written in the first-person perspective (using "I", "my", "me", e.g. "I want to configure a Lead Generation Machine. Base the scoring on $$Company_Size..."). Do NOT write the prompt in passive third-person instructions.
 
 Return ONLY valid JSON:
 {{
@@ -159,17 +143,25 @@ Return ONLY valid JSON:
                 f"  Apply optimal prompting parameters from this research to systemPrompt and userPrompt."
             )
 
+    rag_block = ""
+    rag_ctx = session.get("ragContext")
+    if rag_ctx and isinstance(rag_ctx, str):
+        rag_block = (
+            f"\n- REFERENCE EXAMPLES FROM KNOWLEDGE BASE "
+            f"(model your prompt structure and variable names on these real published app examples):\n{rag_ctx}"
+        )
+
     user_content = (
         f"Generate a production-ready prompt for this app:\n"
         f"- App Type: {session.get('appType')}\n"
         f"- Selected Model: {session.get('modelName') or session.get('modelId') or 'unknown'}\n"
         f"- App Purpose: {requirements.get('appPurpose') or extraction.get('appPurpose') or 'Not specified'}\n"
         f"- Target Users: {requirements.get('targetUsers') or extraction.get('targetUsers') or 'General Public'}\n"
-        f"- Domain Context from Chat: {json.dumps(session.get('deepAnswers') or {})}\n"
-        f"- Conversation Summary: {json.dumps([(h.get('content')) for h in (session.get('history') or [])[-6:]])}\n"
-        f"- REQUIRED INPUT VARIABLES (use EXACTLY these, no more, no less):\n"
-        f"{var_list or 'Use the most logical 3-4 variables for this app type and purpose.'}"
-        f"{web_search_block}"
+        f"- REQUIRED INPUT VARIABLES (You must include EXACTLY these variables as $$ tokens in the prose):\n"
+        f"{var_list or 'Use the most logical 3-4 variables for this app type and purpose.'}\n\n"
+        f"- Optional History Reference: {json.dumps([(h.get('content')) for h in (session.get('history') or [])[-4:]])}\n"
+        f"{web_search_block}\n"
+        f"{rag_block}\n"
         f"{edit_instruction}"
     )
 
@@ -216,6 +208,17 @@ Return ONLY valid JSON:
 
         user_prompt = parsed.get("userPrompt") or ""
         if user_prompt:
+            # ─── 🛡️ HARD PROGRAMMATIC INTERCEPTOR VALVE ───
+            # Scans text and forces any missing variables with strict $$ syntax at the end of prose
+            missing_appends = []
+            for v in vars_used:
+                if f"$${v}" not in user_prompt:
+                    human_label = v.replace("_", " ").capitalize()
+                    missing_appends.append(f"Execute using my exact input {human_label}: $${v}.")
+            
+            if missing_appends:
+                user_prompt = user_prompt.strip() + "\n\n" + " ".join(missing_appends)
+            
             parsed["userPrompt"] = auto_inject_variables(user_prompt, vars_used)
 
         return parsed
@@ -370,7 +373,7 @@ async def run_prompt_test(
             # Compile out any format variances ($$var$$, $$var, $var, [var])
             resolved = re.sub(r'\$\$' + esc_k + r'\$\$', val_str, resolved, flags=re.I)
             resolved = re.sub(r'\$\$' + esc_k + r'\b', val_str, resolved, flags=re.I)
-            resolved = re.sub(r'\$' + esc_k + r'\$\$', val_str, resolved, flags=re.I)
+            resolved = re.sub(r'\$' + esc_k + r'\App', val_str, resolved, flags=re.I)
             resolved = re.sub(r'\$' + esc_k + r'\b', val_str, resolved, flags=re.I)
             resolved = re.sub(r'\[' + esc_k + r'\]', val_str, resolved, flags=re.I)
 

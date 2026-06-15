@@ -277,6 +277,31 @@ def _sanitize_variable_objects(
                 continue
             seen.add(key)
             normalized.append(obj)
+
+        # ─── 🛡️ PLACEHOLDER SANITY INTERCEPTOR ───
+        # Catch LLM-hallucinated placeholders like "e.g., v3", "e.g., 1.0", "e.g., model-name"
+        # and replace them with domain-sensible values derived from the variable name.
+        VERSION_PATTERN = re.compile(r"^\s*e\.?g\.?,?\s*v?\d", re.I)
+        for obj in normalized:
+            placeholder = str(obj.get("placeholder") or "")
+            if VERSION_PATTERN.match(placeholder) or placeholder.strip().lower() in ("", "e.g., v3", "e.g., 1.0", "n/a"):
+                var_name = str(obj.get("name") or "").lower()
+                # Replace with a sensible domain-aware placeholder
+                if "style" in var_name:
+                    obj["placeholder"] = "e.g., Modern Minimalist, Futuristic, Corporate, Geometric"
+                    obj["test_value"] = obj.get("test_value") or "Modern Minimalist"
+                elif "color" in var_name:
+                    obj["placeholder"] = "e.g., Monochromatic, Blue and White, Earthy tones"
+                    obj["test_value"] = obj.get("test_value") or "Monochromatic blue and white"
+                elif "industry" in var_name or "sector" in var_name:
+                    obj["placeholder"] = "e.g., Technology, Healthcare, Finance, Retail"
+                    obj["test_value"] = obj.get("test_value") or "Technology"
+                elif "name" in var_name or "company" in var_name or "brand" in var_name:
+                    obj["placeholder"] = "e.g., Nexora AI, BrightPath, TechVault"
+                    obj["test_value"] = obj.get("test_value") or "Nexora AI"
+                else:
+                    obj["placeholder"] = f"Enter {obj.get('name', 'value').lower()}"
+                    obj["test_value"] = obj.get("test_value") or ""
         
         # ─── 🛡️ PRD DOMAIN-AWARE ATTRIBUTE ENFORCEMENT & INTERCEPTOR ───
         if has_boilerplate_scrubbed or len(normalized) < min_len:
@@ -291,11 +316,32 @@ def _sanitize_variable_objects(
                     {"name": "Speaker Accent", "placeholder": "e.g. Male, British accent, clear voice...", "test_value": "Male, clear and energetic"}
                 ]
             elif type_lower == "image":
-                domain_fields = [
-                    {"name": "Visual Subject", "placeholder": "Main subject of the image", "test_value": "A futuristic city at sunset"},
-                    {"name": "Aesthetic Style", "placeholder": "Visual style (e.g. oil painting, digital art)", "test_value": "cinematic digital art"},
-                    {"name": "Lighting Style", "placeholder": "Lighting mood (e.g. golden hour, neon)", "test_value": "golden hour"}
-                ]
+                p = purpose_lower
+                if any(w in p for w in ("logo", "brand", "identity", "icon")):
+                    domain_fields = [
+                        {"name": "Company Name", "placeholder": "e.g., Nexora AI, BrightPath, TechVault", "test_value": "Nexora AI"},
+                        {"name": "Industry", "placeholder": "e.g., Technology, Healthcare, Finance", "test_value": "Artificial Intelligence"},
+                        {"name": "Logo Style", "placeholder": "e.g., Modern Minimalist, Futuristic, Corporate, Geometric", "test_value": "Modern Minimalist"},
+                        {"name": "Color Scheme", "placeholder": "e.g., Monochromatic, Blue and White, Earthy tones", "test_value": "Monochromatic blue and white"},
+                    ]
+                elif any(w in p for w in ("poster", "flyer", "banner", "ad", "marketing")):
+                    domain_fields = [
+                        {"name": "Headline Text", "placeholder": "Main text to display on the poster", "test_value": "Summer Sale — 50% Off"},
+                        {"name": "Visual Theme", "placeholder": "e.g., Bold and vibrant, Clean and minimal", "test_value": "Bold and vibrant"},
+                        {"name": "Color Scheme", "placeholder": "e.g., Red and black, Pastel tones", "test_value": "Red and black"},
+                    ]
+                elif any(w in p for w in ("portrait", "avatar", "headshot", "profile")):
+                    domain_fields = [
+                        {"name": "Subject Description", "placeholder": "Describe the person or character", "test_value": "Professional woman in her 30s"},
+                        {"name": "Art Style", "placeholder": "e.g., Photorealistic, Anime, Oil painting", "test_value": "Photorealistic"},
+                        {"name": "Background", "placeholder": "e.g., Office, Studio, Outdoor", "test_value": "Clean studio background"},
+                    ]
+                else:
+                    domain_fields = [
+                        {"name": "Visual Subject", "placeholder": "Main subject of the image", "test_value": "A futuristic city at sunset"},
+                        {"name": "Aesthetic Style", "placeholder": "e.g., Photorealistic, Digital art, Oil painting", "test_value": "Cinematic digital art"},
+                        {"name": "Lighting Style", "placeholder": "e.g., Golden hour, Neon, Studio lighting", "test_value": "Golden hour"},
+                    ]
             elif type_lower == "video":
                 domain_fields = [
                     {"name": "Video Concept", "placeholder": "Overall concept or storyline", "test_value": "Drone shot of ocean waves"},
@@ -607,6 +653,7 @@ async def generate_dynamic_context(
     app_type: str,
     app_purpose: str,
     language_hint: str = "English",
+    rag_context: str = "",
 ) -> dict:
     safe_type = app_type if app_type in ALLOWED_TRIAGE_APP_FORMATS else "text"
     safe_purpose = str(app_purpose or "").strip() or "general assistant app"
@@ -627,9 +674,15 @@ Output layout shape (do not use generic keys or generic text placeholders, tailo
 {{"options":["3-4 feature flags"],"variables":[{{"name":"Context Parameter Name","placeholder":"Contextual realistic sample placeholder"}}]}}
 No markdown code fences. No conversational explanations."""
 
+    rag_block = (
+        f"\nREFERENCE EXAMPLES FROM MARKETPLACE (use these to anchor your variable names to real published apps):\n{rag_context}"
+        if rag_context else ""
+    )
+
     user_prompt = (
         f"The user wants to build a {safe_type} app for: {safe_purpose}.\n"
         f"Language mode: {safe_lang}.\n"
+        f"{rag_block}"
         f"Generate 4 highly relevant product features and 3-4 input fields strictly customized for this domain's operational targets."
     )
 

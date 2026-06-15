@@ -112,7 +112,6 @@ def enforce_prd_rules(decision: dict, session: dict) -> dict:
         decision["recommended_action"] = action
 
     # Rule 3: Premature progression check
-    # We need at least 3 distinct metadata attributes captured before SHOW_MODEL_CARDS/GENERATE_PREVIEW.
     captured_attributes = set()
     deep_answers = session.get("deepAnswers") or {}
     for k, v in deep_answers.items():
@@ -124,14 +123,15 @@ def enforce_prd_rules(decision: dict, session: dict) -> dict:
         if extraction.get(k) and str(extraction.get(k)).strip():
             captured_attributes.add(k.lower().strip())
             
-    for k in ["model_id"]:
-        if session.get(k) and str(session.get(k)).strip():
-            captured_attributes.add(k.lower().strip())
-    for k in ["modelId"]:
+    for k in ["model_id", "modelId"]:
         if session.get(k) and str(session.get(k)).strip():
             captured_attributes.add(k.lower().strip())
 
-    if len(captured_attributes) < 3 and action in ("SHOW_MODEL_CARDS", "GENERATE_PREVIEW"):
+    # ─── 🛡️ PRD REGISTRY FIX: PREVENT OVER-ENFORCEMENT FOR TEXT APPS ───
+    current_type = (session.get("appType") or "text").lower()
+    min_required = 3 if current_type in ("image", "video", "vision") else 1
+    
+    if len(captured_attributes) < min_required and action in ("SHOW_MODEL_CARDS", "GENERATE_PREVIEW"):
         action = "GATHER_REQUIREMENTS"
         decision["recommended_action"] = action
         
@@ -145,7 +145,6 @@ def enforce_prd_rules(decision: dict, session: dict) -> dict:
         decision["reasoning"] = f"Aligned state with action {action} and app type {decision.get('app_type')} based on PRD rules."
         
     return decision
-
 
 
 def build_session_snapshot(session: dict | None) -> dict:
@@ -209,12 +208,13 @@ def try_fast_path(text: str, session: dict | None) -> dict | None:
             "_source": "fast_path",
         }
 
-    if lower in ("approve app", "approve"):
+    # ─── 🛡️ FAST-PATH MATCH PAYLOAD CONTRACTS ───
+    if lower in ("approve app", "approve") or re.match(r"^selected\s+model", lower):
         return {
             "recommended_action": "GENERATE_PREVIEW",
             "app_type": app_type,
             "confidence": "HIGH",
-            "reasoning": "User approval of app configuration.",
+            "reasoning": "User approval or model confirmation of app configuration.",
             "_source": "fast_path",
         }
 
@@ -321,17 +321,19 @@ def build_fallback_decision(message: str, session: dict | None) -> dict:
     elif snapshot["triageComplete"] and not snapshot["formConfirmed"]:
         recommended_action = "PROCESS_FORM"
 
+    # Avoid substring leaks by using strict word boundaries if length is tiny
     type_signals = {
-        "image": re.compile(
-            r"\b(image|photo|picture|logo|poster|card|avatar|portrait|room design|banner|meme|flyer|sticker)\b", re.I
-        ),
+        "image": re.compile(r"\b(image|images|photo|photos|picture|logo|poster|posters|card|avatar|portrait|banner|meme|flyer|art)\b", re.I),
         "audio": re.compile(r"\b(audio|voice|podcast|tts|speech|narration|music|sound)\b", re.I),
         "video": re.compile(r"\b(video|animation|animate|reel|cinematic|clip)\b", re.I),
         "vision": re.compile(r"\b(detect|analyze image|scan|ocr|read from image)\b", re.I),
-        "text": re.compile(r"\b(text|blog|legal|recipe|email|story|script|plan|write|article)\b", re.I),
+        "text": re.compile(r"\b(text|blog|legal|recipe|email|story|script|plan|write|article|debate)\b", re.I),
     }
     for t, pattern in type_signals.items():
         if pattern.search(msg):
+            # Anti-contamination: Double ensure it's not matching 'artificial'
+            if t == "image" and "artificial" in msg and not re.search(r"\bart\b", msg):
+                continue
             app_type = t
             break
 
@@ -432,7 +434,6 @@ async def get_agentic_decision(llm: LLMService, message: str, session: dict) -> 
                 except Exception:
                     pass
         
-        # Log response content if it's an httpx status error
         import httpx
         if isinstance(real_err, httpx.HTTPStatusError):
             try:

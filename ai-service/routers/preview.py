@@ -129,19 +129,28 @@ def _preview_unavailable_svg() -> str:
 
 
 def _get_loremflickr_url(prompt: str) -> str:
-    """Extract keywords from prompt and build a LoremFlickr URL."""
-    import re
-    from urllib.parse import quote
-    # Extract words of 3+ letters
-    words = re.findall(r'\b[a-zA-Z]{3,}\b', prompt)
-    meaningful = [w.lower() for w in words if w.lower() not in (
-        "art", "direction", "high", "quality", "detailed", "illustration", "creative",
-        "photorealistic", "beautiful", "highly", "resolution", "generation", "preview",
-        "primary", "subject", "honor", "all", "user", "fields", "image", "type", "output", "format"
-    )]
-    # Use top 2-3 meaningful words as tags
-    keywords = ",".join(meaningful[:3]) or "design"
-    return f"https://loremflickr.com/{POLLINATIONS_PREVIEW_SIZE}/{POLLINATIONS_PREVIEW_SIZE}/{quote(keywords)}"
+    """Select a high-quality, domain-specific Unsplash image based on keywords in the prompt."""
+    p = str(prompt or "").lower()
+    
+    # Curated Unsplash images for a premium look
+    if any(w in p for w in ("logo", "brand", "identity", "icon", "company", "business")):
+        # Beautiful minimalist corporate logo/branding artwork
+        return "https://images.unsplash.com/photo-1626785774573-4b799315345d?w=768&auto=format&fit=crop"
+        
+    if any(w in p for w in ("character", "fantasy", "game", "avatar", "dwarf", "elf", "orc", "wizard", "hero", "monster")):
+        # Premium fantasy character/dragon/illustration art
+        return "https://images.unsplash.com/photo-1579783900882-c0d3dad7b119?w=768&auto=format&fit=crop"
+        
+    if any(w in p for w in ("poster", "flyer", "banner", "marketing", "ad", "bold", "creative")):
+        # High quality graphic design poster/mockup
+        return "https://images.unsplash.com/photo-1620641788421-7a1c342ea42e?w=768&auto=format&fit=crop"
+        
+    if any(w in p for w in ("portrait", "face", "headshot", "profile", "avatar", "subject description")):
+        # Clean, professional studio portrait/headshot
+        return "https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=768&auto=format&fit=crop"
+        
+    # Default: beautiful abstract fluid gradient wallpaper
+    return "https://images.unsplash.com/photo-1541701494587-cb58502866ab?w=768&auto=format&fit=crop"
 
 
 async def _fetch_pollinations_image(prompt: str) -> str:
