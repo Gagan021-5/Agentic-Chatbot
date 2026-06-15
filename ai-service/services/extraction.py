@@ -88,25 +88,41 @@ Return ONLY valid JSON. No markdown. No explanation.
 
 ALLOWED_TRIAGE_APP_FORMATS = ["text", "image", "audio", "video", "vision"]
 
-TRIAGE_INSTRUCTION = """You are the Context Triage Node inside a LangGraph framework grounded dynamically via a ChromaDB vector store.
-Your job is to check if we have enough parameters to build the custom application architecture blueprint.
+TRIAGE_INSTRUCTION = """You are the Dynamic Context Triage Node inside a LangGraph framework grounded dynamically via a ChromaDB vector store.
+Your job is to dynamically analyze the user's application concept ('appPurpose') and determine exactly 3 relevant domain-specific parameter slots required to build the blueprint for this custom app concept.
 
 Act like an expert Product Manager from OpenAI or Anthropic. Your goal is to figure out the target blueprint requirements through dynamic fluid conversation.
 
 CRITICAL BEHAVIOR POLICIES:
-- NEVER format your question as a multiple-choice menu, numbered checklist, or structured option bracket.
+- NEVER format your question as a multiple-choice menu, numbered checklist, bulleted list, or structured option bracket.
+- ALWAYS return the question as natural, flowing conversational prose.
 - NEVER append mechanical directive text strings like "Pick one option" or "Choose from below".
-- Always ask exactly ONE friendly, conversational, open-ended question tailored precisely to their niche. If they want a resume tool, ask about specific template goals or CV constraints. Do not ask generic SaaS boilerplate questions.
-- If the user's core intent, domain context, and functional specifications are clear, set status = "ready".
+- Always ask exactly ONE friendly, conversational, open-ended question tailored precisely to the selected slot.
+- If the user's concept is clear and all 3 dynamic slots are satisfied in the already captured attributes, set status = "ready".
 
 ANTI-LOOP PROTECTION:
-- You must read the already captured attributes. If fields like tone, length, theme, or audience are already populated from previous turns, do NOT ask for them again. Ensure you choose a different missing attribute if needed, or set status to "ready".
+- You must read the already captured attributes. If a key is already populated in the captured attributes, you are strictly forbidden from re-asking it.
+- Ensure you choose a different missing attribute, or if all are satisfied, set status to "ready".
 
 Return strict JSON only (no markdown, no other text):
 {{
   "status": "needs_context|ready",
-  "question": "Clear natural follow-up question if needs_context, else null",
+  "question": "Clear natural flowing prose follow-up question if needs_context, else null",
   "slot_key": "The snake_case key variable name for state mapping, else null",
+  "slots": [
+    {{
+      "key": "slot_key_name_1",
+      "question": "Default dynamic friendly question for slot 1"
+    }},
+    {{
+      "key": "slot_key_name_2",
+      "question": "Default dynamic friendly question for slot 2"
+    }},
+    {{
+      "key": "slot_key_name_3",
+      "question": "Default dynamic friendly question for slot 3"
+    }}
+  ],
   "corrected_app_type": "Retain the incoming specialized app type string (text|image|audio|video|vision)",
   "domain_identified": "text|image|audio|video|vision|hybrid",
   "confidence_score": 0-100,
@@ -218,7 +234,8 @@ def is_personal_boilerplate(name: str, app_purpose: str) -> bool:
     p = app_purpose.lower()
     boilerplate = [
         "user name", "username", "date of birth", "dob", "birth date", "age",
-        "creation date", "current date", "today's date", "date of creation", "creationdate"
+        "creation date", "current date", "today's date", "date of creation", "creationdate",
+        "model name", "model variant", "llm provider", "model version", "api key"
     ]
     for kw in boilerplate:
         if kw in n:
@@ -305,7 +322,12 @@ def _sanitize_variable_objects(
                     
         normalized = normalized[:max_len]
         
-    return normalized if len(normalized) >= min_len else fallback[:max_len]
+    final_list = []
+    for item in normalized:
+        if not is_personal_boilerplate(item["name"], app_purpose):
+            final_list.append(item)
+            
+    return final_list if len(final_list) >= min_len else [f for f in fallback if not is_personal_boilerplate(f["name"], app_purpose)][:max_len]
 
 
 def build_dynamic_context_fallback(
@@ -394,7 +416,7 @@ def _parse_triage_response(
     fallback_type = format_fallback if format_fallback in ALLOWED_TRIAGE_APP_FORMATS else "text"
     safe_purpose = str(app_purpose or "").strip()
 
-    def ready_shape(domain, app_format, form, confidence=100):
+    def ready_shape(domain, app_format, form, slots, confidence=100):
         return {
             "status": "ready",
             "domain": domain,
@@ -402,15 +424,23 @@ def _parse_triage_response(
             "question": None,
             "app_format": app_format,
             "form": form,
+            "slots": slots or [],
         }
 
     try:
         cleaned = re.sub(r"```json|```", "", str(raw_content or "{}"), flags=re.I).strip()
         parsed = json.loads(cleaned)
+        
+        # Extract dynamic slots list
+        slots = parsed.get("slots") or []
+        if not isinstance(slots, list):
+            slots = []
+
         if not parsed or not parsed.get("status"):
             return ready_shape(
                 None, fallback_type,
                 build_dynamic_context_fallback(fallback_type, safe_purpose, language_hint),
+                slots,
             )
 
         domain = str(parsed.get("domain_identified") or parsed.get("domain") or "").strip() or None
@@ -424,7 +454,7 @@ def _parse_triage_response(
             question = str(parsed.get("question") or "").strip()
             if not question or len(question) < 10:
                 fb_form = build_dynamic_context_fallback(fallback_type, safe_purpose, language_hint)
-                return ready_shape(domain, fallback_type, fb_form, confidence)
+                return ready_shape(domain, fallback_type, fb_form, slots, confidence)
             suggested = None
             if isinstance(parsed.get("suggested_options"), list):
                 opts = [str(o or "").strip() for o in parsed["suggested_options"] if str(o or "").strip()]
@@ -440,6 +470,7 @@ def _parse_triage_response(
                 "corrected_app_type": corrected_type,
                 "form": None,
                 "app_format": None,
+                "slots": slots,
             }
 
         fallback_form = build_dynamic_context_fallback(effective_type, safe_purpose, language_hint)
@@ -449,12 +480,13 @@ def _parse_triage_response(
         return ready_shape(
             domain,
             effective_type,
-            {{
+            {
                 "options": _sanitize_string_list(options_raw, 4, 4, fallback_form["options"]),
                 "variables": _sanitize_variable_objects(
                     variables_raw, 3, 8, fallback_form["variables"], effective_type, safe_purpose
                 ),
-            }},
+            },
+            slots,
             confidence,
         )
     except Exception as e:
@@ -462,6 +494,7 @@ def _parse_triage_response(
         return ready_shape(
             None, fallback_type,
             build_dynamic_context_fallback(fallback_type, "", language_hint),
+            [],
         )
 
 
@@ -585,9 +618,10 @@ Generate compact, highly relevant runtime user input fields and variable require
 {LANGUAGE_MIRROR_DIRECTIVE}
 
 VARIABLE EXTRACTOR RULES:
-1. ZERO PERSONAL BOILERPLATE: NEVER generate generic personal variables like 'User Name', 'Date of Birth', 'Age', or 'Creation Date' unless the app specifically asks for them.
-2. DOMAIN-AWARE ATTRIBUTES: For a motivational generator, generate fields like 'Speech Length', 'Target Industry', 'Speaker Accent'. For a text-to-speech engine, generate 'Script Theme', 'Voice Accent Style'.
-3. Output variable names inside the JSON array must be explicitly formatted using alphanumeric symbols with matching descriptive placeholders.
+1. ZERO PERSONAL BOILERPLATE: Under no circumstances are you allowed to generate generic personal variables like 'User Name', 'Date of Birth', 'Age', 'Creation Date', 'Current Date', or 'Today's Date' unless the user's concept explicitly asks for them.
+2. ZERO META-PLATFORM/BOILERPLATE LEAKAGE: NEVER generate variables for model names, model variants, model versions, LLM providers, API keys, or system configuration settings.
+3. DOMAIN-AWARE ATTRIBUTES: For a motivational generator, generate fields like 'Speech Length', 'Target Industry', 'Speaker Accent'. For a text-to-speech engine, generate 'Script Theme', 'Voice Accent Style'.
+4. Output variable names inside the JSON array must be explicitly formatted using alphanumeric symbols with matching descriptive, realistic placeholders. Do not use generic placeholders.
 
 Output layout shape (do not use generic keys or generic text placeholders, tailor them to the custom app domain):
 {{"options":["3-4 feature flags"],"variables":[{{"name":"Context Parameter Name","placeholder":"Contextual realistic sample placeholder"}}]}}
@@ -695,5 +729,6 @@ async def triage_dynamic_context(
         "domain": None,
         "question": None,
         "app_format": format_fallback,
+        "slots": [],
         "form": build_dynamic_context_fallback(format_fallback, safe_purpose, safe_lang),
     }

@@ -143,6 +143,8 @@ def _parse_selected_plan(msg: Any) -> str | None:
 
 def _parse_chip_app_type(msg: Any) -> str | None:
     v = _lower(msg)
+    if any(s in v for s in ("image", "images", "poster", "posters", "photo", "photos", "graphic", "art")):
+        return "image"
     if v in ("text", "image", "audio", "video", "vision"):
         return v
     if v == "images":
@@ -391,17 +393,24 @@ def _merge_extraction(existing: dict | None, latest: dict | None, message: str) 
         or _is_yes(message)
     )
     
-    # ─── 🛡️ FORMAT RECOVERY PROTECTION LOCK ───
-    specialized_formats = {"audio", "video", "image", "vision"}
-    existing_app_type = existing.get("appType")
-    latest_app_type = latest.get("appType")
-    
-    if existing_app_type in specialized_formats:
-        resolved_app_type = existing_app_type
-    elif latest_app_type and latest_app_type not in ("None", "text", None):
-        resolved_app_type = latest_app_type
+    # ─── 🛡️ CRITICAL VALUE INTENT OVERRIDE INTERCEPTOR ───
+    # If the text message contains formatting keywords, unconditionally prioritize them over stale history states
+    msg_l = message.lower()
+    if any(s in msg_l for s in ("image", "images", "poster", "posters", "photo", "photos", "graphic")):
+        resolved_app_type = "image"
+    elif any(s in msg_l for s in ("video", "videos", "animation", "reel", "reels", "cinematic clip")):
+        resolved_app_type = "video"
+    elif any(s in msg_l for s in ("audio", "voiceover", "voice", "speech aloud", "podcast", "tts")):
+        resolved_app_type = "audio"
     else:
-        resolved_app_type = existing_app_type or latest_app_type or "text"
+        existing_app_type = existing.get("appType")
+        latest_app_type = latest.get("appType")
+        specialized_formats = {"audio", "video", "image", "vision"}
+        
+        if latest_app_type and latest_app_type not in ("None", "text", None):
+            resolved_app_type = latest_app_type
+        else:
+            resolved_app_type = existing_app_type or latest_app_type or "text"
 
     keep_purpose = is_control or not latest.get("appPurpose") or len(str(latest.get("appPurpose") or "")) < 8
 
@@ -414,7 +423,7 @@ def _merge_extraction(existing: dict | None, latest: dict | None, message: str) 
         "PRIMARY_SUBJECT": latest.get("PRIMARY_SUBJECT") or existing.get("PRIMARY_SUBJECT"),
         "ENVIRONMENT_SETTING": latest.get("ENVIRONMENT_SETTING") or existing.get("ENVIRONMENT_SETTING"),
         "ACTION_DYNAMIC": latest.get("ACTION_DYNAMIC") or existing.get("ACTION_DYNAMIC"),
-        "AESTHETIC_STYLE": latest.get("AESTHETIC_STYLE") or existing.get("AESTHEST_STYLE", existing.get("AESTHETIC_STYLE")),
+        "AESTHETIC_STYLE": latest.get("AESTHETIC_STYLE") or existing.get("AESTHETIC_STYLE"),
         "appType": resolved_app_type,
         "appPurpose": existing.get("appPurpose") if keep_purpose else latest.get("appPurpose"),
         "targetUsers": (
@@ -573,13 +582,23 @@ async def _save(session: dict, app_state: Any) -> None:
 
 
 async def _show_models(session: dict, app_state: Any) -> dict:
+    # Double validation step ensuring dynamic context doesn't bypass catalog formats
+    history_str = " ".join([str(h.get("content", "")).lower() for h in (session.get("history") or [])])
+    purpose_str = str((session.get("extraction") or {}).get("appPurpose") or "").lower()
+    
+    if any(s in history_str or s in purpose_str for s in ("image", "images", "poster", "posters", "photo")):
+        session["appType"] = "image"
+        if session.get("extraction"):
+            session["extraction"]["appType"] = "image"
+
+    app_type_str = session.get("appType") or "text"
     full_text = " ".join([
         str((session.get("extraction") or {}).get("appPurpose") or ""),
         str((session.get("extraction") or {}).get("oneLineUnderstanding") or ""),
         json.dumps(session.get("deepAnswers") or {}),
     ])
     budget = (session.get("deepAnswers") or {}).get("budgetPreference") or ((session.get("extraction") or {}).get("budget"))
-    model_collection = MODELS.get(session.get("appType") or "text", MODELS.get("text", []))
+    model_collection = MODELS.get(app_type_str, MODELS.get("text", []))
     
     models = _rank_models(model_collection, full_text, str(budget or ""), artistic_priority=False)
 
@@ -590,11 +609,11 @@ async def _show_models(session: dict, app_state: Any) -> dict:
     return {
         "reply": (
             f"## 🤖 AI Model Selection\n\nI've ranked the **top 3 models** for your "
-            f"**{session.get('appType')}** app based on your requirements and budget.\n\n"
+            f"**{app_type_str.capitalize()}** app based on your requirements and budget.\n\n"
             "Each card shows the model's strengths, speed, and cost per run — **click any card** to select it."
         ),
         "uiType": "models",
-        "uiData": {"appType": session.get("appType"), "models": models},
+        "uiData": {"appType": app_type_str, "models": models},
         "nextStep": 1,
         "coins": None,
     }
@@ -604,7 +623,12 @@ async def _build_step0_response(session: dict, text: str, app_state: Any) -> dic
     llm = app_state.llm
     ext = session.get("extraction") or {}
 
-    # Force fallback if local mapping gets empty values
+    text_l = text.lower()
+    if any(s in text_l for s in ("image", "images", "poster", "posters", "photo", "photos")):
+        session["appType"] = "image"
+        if not session.get("extraction"): session["extraction"] = {}
+        session["extraction"]["appType"] = "image"
+
     if not session.get("appType") or session.get("appType") == "None":
         session["appType"] = "text"
         if not session.get("extraction"): session["extraction"] = {}
@@ -613,31 +637,30 @@ async def _build_step0_response(session: dict, text: str, app_state: Any) -> dic
     session["step"] = 0
     session["awaitingConfirmation"] = False
 
-    # Count captured critical attributes
-    captured_attributes = set()
+    triage_rounds = session.get("triageRounds", 0)
+    app_type = session.get("appType") or "text"
+
+    dynamic_slots = session.get("dynamicSlots") or []
     deep_answers = session.get("deepAnswers") or {}
+    captured_slots = {}
     for k, v in deep_answers.items():
-        if not k.startswith("_") and k.lower() not in ("apptype", "app_type", "apppurpose", "app_purpose") and v and str(v).strip():
-            captured_attributes.add(k.lower().strip())
-            
-    for k in ["PRIMARY_SUBJECT", "ENVIRONMENT_SETTING", "ACTION_DYNAMIC", "AESTHETIC_STYLE", "budget", "targetUsers"]:
-        if ext.get(k) and str(ext.get(k)).strip():
-            captured_attributes.add(k.lower().strip())
+        if v and str(v).strip():
+            captured_slots[str(k).lower().strip()] = str(v).strip()
 
-    triage_rounds = session.get("triageRounds", 0) or session.get("triage_rounds", 0)
-    bypass_triage = (triage_rounds >= 2 or len(captured_attributes) >= 3)
+    missing_slots = []
+    for slot_obj in dynamic_slots:
+        slot_key = str(slot_obj.get("key") or "").lower().strip()
+        found = False
+        for k in captured_slots:
+            if slot_key == k or slot_key in k or k in slot_key:
+                found = True
+                break
+        if not found:
+            missing_slots.append(slot_obj)
 
-    if bypass_triage:
-        logger.info(f"[Triage Loop Breaker] Bypassing triage checkups. triageRounds={triage_rounds}, captured_attributes={len(captured_attributes)}")
-        triage_result = {
-            "status": "ready",
-            "question": None,
-            "slot_key": None,
-            "domain_identified": session.get("appType") or "text",
-            "confidence_score": 100,
-            "form": None,
-        }
-    else:
+    is_satisfied = len(dynamic_slots) > 0 and len(missing_slots) == 0
+
+    if not dynamic_slots or (not is_satisfied and triage_rounds < 3):
         rag_context = ""
         vector_store = getattr(app_state, "vector_store", None)
         if vector_store and hasattr(vector_store, "search"):
@@ -652,29 +675,51 @@ async def _build_step0_response(session: dict, text: str, app_state: Any) -> dic
             _detect_language_mode(session), session.get("history") or [], session.get("deepAnswers") or {}, rag_context=rag_context
         )
 
-        # ─── 🛡️ PRD REQUIREMENTS SCOPING RULES: ANTI-LOOP & CAP ───
-        populated_keys = {k.lower().strip() for k, v in deep_answers.items() if v and str(v).strip()}
-        triage_slot_key = str(triage_result.get("slot_key") or "").lower().strip()
-        if triage_slot_key in populated_keys or any(k in populated_keys for k in ["tone", "length", "theme", "audience"] if triage_slot_key == k):
+        if not dynamic_slots:
+            dynamic_slots = triage_result.get("slots") or []
+            session["dynamicSlots"] = dynamic_slots
+            
+            missing_slots = []
+            for slot_obj in dynamic_slots:
+                slot_key = str(slot_obj.get("key") or "").lower().strip()
+                found = False
+                for k in captured_slots:
+                    if slot_key == k or slot_key in k or k in slot_key:
+                        found = True
+                        break
+                if not found:
+                    missing_slots.append(slot_obj)
+            is_satisfied = len(dynamic_slots) > 0 and len(missing_slots) == 0
+
+        if not is_satisfied and triage_rounds < 3:
+            if (triage_result.get("status") == "ready" or 
+                not triage_result.get("question") or 
+                triage_result.get("slot_key") not in [s.get("key") for s in missing_slots]):
+                next_slot = missing_slots[0]
+                triage_result["status"] = "needs_context"
+                triage_result["slot_key"] = next_slot.get("key")
+                triage_result["question"] = next_slot.get("question")
+                triage_result["form"] = None
+        else:
             triage_result["status"] = "ready"
             triage_result["question"] = None
             triage_result["slot_key"] = None
-
-        # ─── 🛡️ STRICT PIECE: FORCE TRIAGE QUESTIONS, STOP POISONED OVERWRITES ───
-        required_slots = ['PRIMARY_SUBJECT', 'ENVIRONMENT_SETTING', 'ACTION_DYNAMIC', 'AESTHETIC_STYLE']
-        filled_slots = [s for s in required_slots if ext.get(s)]
-        if triage_result.get("status") == "ready" and len(filled_slots) < 2 and triage_rounds < 2:
-            logger.info("[Guard] Overfitting signal locked. Re-routing loop target down to context acquisition.")
-            triage_result["status"] = "needs_context"
-            triage_result["question"] = "What specific focus, tone, or dynamic parameters should the speech generation include?"
-            triage_result["slot_key"] = "visual_style"
             triage_result["form"] = None
+    else:
+        triage_result = {
+            "status": "ready",
+            "question": None,
+            "slot_key": None,
+            "domain_identified": app_type,
+            "confidence_score": 100,
+            "form": None,
+        }
 
     if triage_result.get("status") == "needs_context":
         question = str(triage_result.get("question") or "").strip()
         slot_key = triage_result.get("slot_key") or _infer_slot_key_from_question(question)
         session["lastSlotKey"] = slot_key
-        session["triageRounds"] = (session.get("triageRounds") or 0) + 1
+        session["triageRounds"] = triage_rounds + 1
         session["lastQuestion"] = question
         await _save(session, app_state)
         return {
@@ -692,6 +737,7 @@ async def _build_step0_response(session: dict, text: str, app_state: Any) -> dic
     
     session["formConfirmed"] = True
     session["triageRounds"] = 0
+    session["lastSlotKey"] = None
     prefill_dynamic_context_variables(session)
     await _save(session, app_state)
 
@@ -714,12 +760,27 @@ async def _build_step0_response(session: dict, text: str, app_state: Any) -> dic
 async def _exec_gather_requirements(session: dict, text: str, app_state: Any) -> dict:
     if not session.get("history"):
         session["history"] = []
+
+    last_slot = session.get("lastSlotKey")
+    if last_slot and text:
+        if "deepAnswers" not in session or not isinstance(session["deepAnswers"], dict):
+            session["deepAnswers"] = {}
+        normalized_key = str(last_slot).strip()
+        session["deepAnswers"][normalized_key] = text.strip()
+        session["lastSlotKey"] = None  # Consume key
+
     latest_extraction = await extract_requirements(app_state.llm, text, session["history"])
     session["extraction"] = _merge_extraction(session.get("extraction"), latest_extraction, text)
     
     session["languageMode"] = _detect_language_mode(session)
     extraction = session.get("extraction") or {}
-    session["appType"] = extraction.get("appType") or session.get("appType") or "text"
+    
+    if any(s in text.lower() for s in ("image", "images", "poster", "posters", "photo", "photos")):
+        session["appType"] = "image"
+        session["extraction"]["appType"] = "image"
+    else:
+        session["appType"] = extraction.get("appType") or session.get("appType") or "text"
+        
     return await _build_step0_response(session, text, app_state)
 
 
@@ -745,7 +806,6 @@ async def _exec_generate_preview(session: dict, text: str, app_state: Any) -> di
 
         prefill_dynamic_context_variables(session)
 
-        # Grounding with Web Search Tools
         search_query = f"{app_type} model {session.get('modelName')} prompting guidelines parameters"
         try:
             search_tool = get_web_search_tool()
@@ -903,7 +963,11 @@ async def _exec_pivot_app(session: dict, text: str, decision: dict, app_state: A
     new_type = decision.get("app_type") or _parse_chip_app_type(text) or "text"
     session["appType"] = new_type
     session["extraction"] = {"appPurpose": text, "appType": new_type}
+    session["deepAnswers"] = {}
+    session["dynamicSlots"] = []
     session["step"] = 0
+    session["triageRounds"] = 0
+    session["lastSlotKey"] = None
     await _save(session, app_state)
     return await _build_step0_response(session, text, app_state)
 
@@ -947,6 +1011,9 @@ class ConversationState(TypedDict, total=False):
     seo_data: Dict[str, Any]
     clear_session: bool
     language_mode: str
+    triage_rounds: int
+    last_slot_key: Optional[str]
+    dynamic_slots: list[dict]
 
 
 def _session_to_state(session: dict, message: str) -> ConversationState:
@@ -956,6 +1023,10 @@ def _session_to_state(session: dict, message: str) -> ConversationState:
         hist.append({"role": role, "content": m.get("content", "")})
     
     a_type = session.get("appType")
+    
+    # ─── 🛡️ HARD LOCK VALVE: INSTANT ENTRY OVERRIDE CHECK ───
+    if any(s in message.lower() for s in ("image", "images", "poster", "posters", "photo", "photos")):
+        a_type = "image"
     if not a_type or a_type == "None": a_type = "text"
 
     if "extraction" not in session or not isinstance(session["extraction"], dict):
@@ -980,6 +1051,10 @@ def _session_to_state(session: dict, message: str) -> ConversationState:
     state_seo_data = {}
     state_seo_data.update(session["seoData"])
 
+    triage_rounds = session.get("triageRounds", 0)
+    last_slot_key = session.get("lastSlotKey")
+    dynamic_slots = session.get("dynamicSlots") or []
+
     return {
         "session_id": session.get("sessionId") or "",
         "message": message,
@@ -1001,6 +1076,9 @@ def _session_to_state(session: dict, message: str) -> ConversationState:
         "seo_data": state_seo_data,
         "clear_session": False,
         "language_mode": session.get("languageMode") or "English",
+        "triage_rounds": triage_rounds,
+        "last_slot_key": last_slot_key,
+        "dynamic_slots": dynamic_slots,
     }
 
 
@@ -1037,6 +1115,9 @@ def _state_to_session(state: ConversationState, session: dict) -> None:
     session["languageMode"] = state.get("language_mode", "English")
     session["confidence"] = state.get("confidence", "MEDIUM")
     session["reasoning"] = state.get("reasoning", "")
+    session["triageRounds"] = state.get("triage_rounds", 0)
+    session["lastSlotKey"] = state.get("last_slot_key")
+    session["dynamicSlots"] = state.get("dynamic_slots") or []
 
     session_history = []
     for m in state.get("history", []):
@@ -1089,19 +1170,18 @@ async def intent_classifier_node(state: ConversationState, config: dict) -> dict
     if msg.startswith(("how ", "what ", "why ", "explain ")) or action == "HANDLE_OFF_TOPIC":
         action = "HANDLE_OFF_TOPIC"
 
-    # ─── 🛡️ SECURE PIPELINE APP_TYPE PRESERVATION LOOP ───
+    # ─── 🛡️ HARD OVERRIDE VALVE: CHAT SEPARATION INTERCEPT ───
     app_type = state.get("app_type") or temp_session.get("appType") or "text"
-    new_inferred = decision.get("app_type")
     
-    specialized_formats = {"audio", "video", "image", "vision"}
-    if app_type in specialized_formats:
-        if action == "PIVOT_APP" and new_inferred and new_inferred != "None":
-            app_type = new_inferred
+    if any(s in msg for s in ("image", "images", "poster", "posters", "photo", "photos", "graphic")):
+        app_type = "image"
     else:
-        if new_inferred and new_inferred != "None":
+        new_inferred = decision.get("app_type")
+        if new_inferred and new_inferred != "None" and action == "PIVOT_APP":
             app_type = new_inferred
-        else:
-            app_type = "text"
+
+    if app_type == "None" or not app_type:
+        app_type = "text"
 
     extraction = state.get("extraction") or {}
     extraction["appType"] = app_type
@@ -1115,8 +1195,6 @@ async def intent_classifier_node(state: ConversationState, config: dict) -> dict
         "decision_payload": decision,
     }
 
-
-# ─── ASYNC PIPELINE NODE ROUTERS ───
 
 async def ideation_triage_node(state: ConversationState, config: dict) -> dict:
     app_state = config["configurable"]["app_state"]
@@ -1164,12 +1242,10 @@ async def form_submission_node(state: ConversationState, config: dict) -> dict:
     new_state["response_payload"] = result
     return new_state
 
-
 async def off_topic_handler_node(state: ConversationState, config: dict) -> dict:
     app_state = config["configurable"]["app_state"]
     res = {"reply": "I am your RentPrompts Architect. Let me know what app you want to configure!", "uiType": None}
     return {"response_payload": res}
-
 
 async def off_topic_inline_node(state: ConversationState, config: dict) -> dict:
     app_state = config["configurable"]["app_state"]
@@ -1178,7 +1254,6 @@ async def off_topic_inline_node(state: ConversationState, config: dict) -> dict:
     res = await _rebuild_current_step_response(temp_session, app_state, state.get("current_step", 0))
     res["reply"] = f"Let's focus on finishing your custom Rapp logic.\n\n{res.get('reply', '')}"
     return {"response_payload": res}
-
 
 async def model_selection_node(state: ConversationState, config: dict) -> dict:
     app_state = config["configurable"]["app_state"]
@@ -1189,7 +1264,6 @@ async def model_selection_node(state: ConversationState, config: dict) -> dict:
     new_state["response_payload"] = res
     return new_state
 
-
 async def app_preview_node(state: ConversationState, config: dict) -> dict:
     app_state = config["configurable"]["app_state"]
     temp_session = {}
@@ -1198,7 +1272,6 @@ async def app_preview_node(state: ConversationState, config: dict) -> dict:
     new_state = _session_to_state(temp_session, state["message"])
     new_state["response_payload"] = res
     return new_state
-
 
 async def modification_handler_node(state: ConversationState, config: dict) -> dict:
     app_state = config["configurable"]["app_state"]
@@ -1209,14 +1282,12 @@ async def modification_handler_node(state: ConversationState, config: dict) -> d
     new_state["response_payload"] = res
     return new_state
 
-
 async def seo_review_node(state: ConversationState, config: dict) -> dict:
     app_state = config["configurable"]["app_state"]
     temp_session = {}
     _state_to_session(state, temp_session)
     res = await _exec_review_seo(temp_session, app_state)
     return {"response_payload": res}
-
 
 async def publish_app_node(state: ConversationState, config: dict) -> dict:
     app_state = config["configurable"]["app_state"]
@@ -1234,7 +1305,6 @@ def route_by_conversational_intent(state: ConversationState) -> str:
     message = str(state.get("message") or "").strip()
     msg = message.lower()
 
-    # Special UI fast paths
     if msg.startswith("seo_publish::") or msg in ("publish to marketplace", "save draft") or action == "PUBLISH_APP":
         return "publish_app_node"
     if msg.startswith("confirm seo::") or msg in ("approve app", "approve") or action == "REVIEW_SEO":
@@ -1242,6 +1312,12 @@ def route_by_conversational_intent(state: ConversationState) -> str:
     if msg.startswith("multi_select_form::") or action == "PROCESS_FORM":
         return "form_submission_node"
         
+    # ─── 🛑 THE RADICAL ROUTING VALVE BYPASS RECOVERY ───
+    # If the user text contains strong format changes, FORCE it through the ideation extraction loop
+    # instead of blindly short-circuiting straight into model rendering via stale action schemas!
+    if any(s in msg for s in ("image", "images", "poster", "posters", "photo", "photos", "graphic")):
+        return "ideation_triage_node"
+
     if not state.get("form_confirmed") and action not in ("GATHER_REQUIREMENTS", "PROCESS_FORM", "HANDLE_OFF_TOPIC"):
         return "ideation_triage_node"
 
