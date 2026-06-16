@@ -129,7 +129,7 @@ def enforce_prd_rules(decision: dict, session: dict) -> dict:
     locked_types = {"audio", "video", "image", "vision"}
     current_app_type = session.get("appType") or session.get("app_type")
     
-    if current_app_type in locked_types and action != "PIVOT_APP":
+    if current_app_type in locked_types and action != "PIVOT_APP" and decision.get("_source") != "fast_path":
         decision["app_type"] = current_app_type
         
     # Rule 2: Clarification follow-up question answering check
@@ -166,6 +166,17 @@ def enforce_prd_rules(decision: dict, session: dict) -> dict:
     if len(captured_attributes) < min_required and action in ("SHOW_MODEL_CARDS", "GENERATE_PREVIEW"):
         action = "GATHER_REQUIREMENTS"
         decision["recommended_action"] = action
+        
+    # ─── 🛡️ FIXED PROGRESSION RULE: ENFORCE COMPLETE DYNAMIC TRIAGE ───
+    dynamic_slots = session.get("dynamicSlots") or []
+    deep_answers = session.get("deepAnswers") or {}
+    
+    # If the triage node has defined dynamic requirement slots for a domain,
+    # we MUST force the user to answer them before allowing progression to model selection or previews.
+    if dynamic_slots and len(deep_answers) < len(dynamic_slots):
+        if action in ("SHOW_MODEL_CARDS", "GENERATE_PREVIEW"):
+            action = "GATHER_REQUIREMENTS"
+            decision["recommended_action"] = action
         
     # Normalize confidence to uppercase
     conf = str(decision.get("confidence") or "MEDIUM").upper()
@@ -215,6 +226,36 @@ def try_fast_path(text: str, session: dict | None) -> dict | None:
     lower = t.lower()
     s = session or {}
     app_type = s.get("appType") or "text"
+
+    # Explicit modality correction and negation handling (e.g. "it is a text app", "i want a text app", "not an image app")
+    modality_pattern = r"\b(?:it is|i want|use|change to|make it|it\'s|want a|need a|not an?|instead of)\s+a?n?\s*(text|image|audio|video|vision)\s*(?:app|tool|generator|model|models)?\b"
+    modality_match = re.search(modality_pattern, lower)
+    if modality_match:
+        matched_type = modality_match.group(1)
+        
+        # Handle negation / rejection phrases (e.g., "not an image", "instead of vision")
+        negation_match = re.search(r"\b(?:not an?|instead of|stop making)\s+a?n?\s*" + re.escape(matched_type), lower)
+        if negation_match:
+            # If the user rejected this matched_type, try to find another modality in the string they are shifting toward
+            other_types = [t_key for t_key in ("text", "image", "audio", "video", "vision") if t_key != matched_type]
+            found_other = None
+            for ot in other_types:
+                if ot in lower:
+                    found_other = ot
+                    break
+            if found_other:
+                matched_type = found_other
+            else:
+                matched_type = "text" if matched_type == "image" else "image"
+                
+        action = "SHOW_MODEL_CARDS" if s.get("formConfirmed") else "GATHER_REQUIREMENTS"
+        return {
+            "recommended_action": action,
+            "app_type": matched_type,
+            "confidence": "HIGH",
+            "reasoning": f"Explicit user correction of app type to {matched_type}.",
+            "_source": "fast_path",
+        }
 
     if (
         t.startswith("multi_select_form::")
@@ -305,7 +346,7 @@ def try_fast_path(text: str, session: dict | None) -> dict | None:
     }
     if lower in chip_types:
         return {
-            "recommended_action": "GATHER_REQUIREMENTS",
+            "recommended_action": "SHOW_MODEL_CARDS" if s.get("formConfirmed") else "GATHER_REQUIREMENTS",
             "app_type": chip_types[lower],
             "confidence": "HIGH",
             "reasoning": "App type chip selected by user.",
@@ -523,4 +564,53 @@ async def get_agentic_intent(llm: LLMService, message: str, session: dict) -> di
         "confidence": decision.get("confidence"),
         "_source": decision.get("_source"),
         "_decision": decision,
+    }
+
+
+def infer_category_from_purpose(purpose: str) -> str:
+    if not purpose:
+        return "unknown"
+    lower = purpose.lower()
+    if any(w in lower for w in ("quest", "mystery", "murder", "map", "fantasy", "dragon", "story", "game", "fiction", "character")):
+        return "creative"
+    if any(w in lower for w in ("study", "plan", "workout", "meal", "diet", "tutor", "code", "learn", "course", "fit", "health", "exercise")):
+        return "functional"
+    if any(w in lower for w in ("image", "photo", "picture", "poster", "logo", "banner", "art")):
+        return "visual"
+    if any(w in lower for w in ("audio", "voice", "podcast", "speech", "tts", "music", "song")):
+        return "audio"
+    if any(w in lower for w in ("video", "animation", "animate", "clip")):
+        return "video"
+    if any(w in lower for w in ("law", "legal", "ipc", "court", "judge")):
+        return "legal"
+    return "text"
+
+
+def detect_vertical_mismatch(user_input: str, previous_category: str) -> bool:
+    if not previous_category or previous_category == "unknown":
+        return False
+        
+    lower = user_input.lower()
+    new_app_intent = any(w in lower for w in ("i want", "build", "create", "make", "change to", "switch to", "instead of", "how about", "new app"))
+    if not new_app_intent:
+        return False
+        
+    new_cat = infer_category_from_purpose(user_input)
+    if new_cat != "unknown" and new_cat != previous_category:
+        return True
+    return False
+
+
+def classify_intent_with_pivot_check(user_input: str, current_app_context: dict) -> dict:
+    prev_purpose = current_app_context.get("appPurpose") or ""
+    prev_category = infer_category_from_purpose(prev_purpose)
+    new_category = infer_category_from_purpose(user_input)
+    
+    is_pivot = detect_vertical_mismatch(user_input, prev_category)
+    
+    return {
+        "intent": "create_new_app" if is_pivot else "continue",
+        "drastic_pivot": is_pivot,
+        "previous_category": prev_category,
+        "new_category": new_category
     }

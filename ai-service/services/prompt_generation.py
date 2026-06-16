@@ -152,6 +152,7 @@ Return ONLY valid JSON:
             f"(model your prompt structure and variable names on these real published app examples):\n{rag_ctx}"
         )
 
+    detected_lang = session.get("languageMode") or (session.get("extraction") or {}).get("detectedLanguage") or "English"
     user_content = (
         f"Generate a production-ready prompt for this app:\n"
         f"- App Type: {session.get('appType')}\n"
@@ -160,6 +161,7 @@ Return ONLY valid JSON:
         f"- Target Users: {requirements.get('targetUsers') or extraction.get('targetUsers') or 'General Public'}\n"
         f"- REQUIRED INPUT VARIABLES (You must include EXACTLY these variables as $$ tokens in the prose):\n"
         f"{var_list or 'Use the most logical 3-4 variables for this app type and purpose.'}\n\n"
+        f"- Target Output Language: {detected_lang} (You MUST generate all systemPrompt, userPrompt, and variableDescriptions in this language. Do not translate or generate in any other language unless explicitly requested. If English, use English. If Hindi, use Hindi. If Hinglish, use Hinglish.)\n"
         f"- Optional History Reference: {json.dumps([(h.get('content')) for h in (session.get('history') or [])[-4:]])}\n"
         f"{web_search_block}\n"
         f"{rag_block}\n"
@@ -335,11 +337,13 @@ Return ONLY valid JSON:
         if m.get("role") == "user"
     )[:600]
 
+    detected_lang = session.get("languageMode") or (session.get("extraction") or {}).get("detectedLanguage") or "English"
     user_content = (
         f"Generate premium, high-converting marketplace metadata for this AI app:\n"
         f"- What the app does: {app_purpose}\n"
         f"- App type: {session.get('appType')}\n"
         f"- User answers during setup: {json.dumps(deep_answers)}\n"
+        f"- Target Output Language: {detected_lang} (You MUST generate the appName, appDescription, and tags in this language. Do not translate or generate in any other language unless explicitly requested. If English, use English. If Hindi, use Hindi. If Hinglish, use Hinglish.)\n"
         f"- Conversation context: {triage_history}\n"
         f"- Model used (DO NOT use as app name — this is internal only): {session.get('modelId') or 'unknown'}\n\n"
         "Remember: App name must sound like a premium SaaS product (2-4 words). "

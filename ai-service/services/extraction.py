@@ -89,93 +89,77 @@ Return ONLY valid JSON. No markdown. No explanation.
 ALLOWED_TRIAGE_APP_FORMATS = ["text", "image", "audio", "video", "vision"]
 
 TRIAGE_INSTRUCTION = """You are the Dynamic Context Triage Node inside a LangGraph framework grounded dynamically via a ChromaDB vector store.
-Your job is to dynamically analyze the user's application concept ('appPurpose') and determine exactly 3 relevant domain-specific parameter slots required to build the blueprint for this custom app concept.
+Your job is to analyze the user's application concept ('appPurpose') and determine exactly 3 critical, domain-specific parameter slots required to build a highly tailored prompt blueprint for this specific app vertical.
 
-Act like an expert Product Manager from OpenAI or Anthropic. Your goal is to figure out the target blueprint requirements through dynamic fluid conversation.
+Act like an expert Product Manager and AI Prompt Engineer. Your goal is to extract structural inputs that let users generate rich, customizable outputs.
 
 ═══════════════════════════════════════
-SLOT SELECTION MANDATE BY APP FORMAT TYPE
+SLOT SELECTION MANDATE BY DOMAIN ARCHETYPE
 ═══════════════════════════════════════
-You must align your 3 parameter slots strictly with the output format of the application. Gathering generic marketing metadata or demographic profiles for highly creative workflows is a critical system failure.
+You must adapt your 3 parameter slots dynamically to the domain vertical. Avoid generic placeholders (e.g., "script text", "topic") when specific architectural parameters are required.
 
-1. FOR "image" AND "video" FORMATS:
-   - CRITICAL: You are STRICTLY FORBIDDEN from asking about "target users", "intended audience", "demographics", or "marketing goals".
-   - MANDATORY SLOTS: You must select slots exclusively from this production-critical visual list:
-     * movie_title / banner_headline (highly recommended for posters, covers, or ads)
-     * main_character / visual_subject
-     * setting_background / environment
-     * visual_style / artistic_aesthetic
-     * mood_lighting
-     * composition_framing
-   - RATIONALE: Image generation microservices cannot parse metadata like "fans aged 18-40"; they require descriptive, physical visual attributes to populate prompt templates.
+1. FOR CREATIVE / GAMING / FICTION DOMAINS (e.g., RPG Quests, Murder Mysteries, Fantasy Maps):
+   - Focus on systemic constraints and creative direction variables.
+   - RPG Quests: [Quest Difficulty, Main Hero/Protagonist Class, Reward Type/Rarity, Faction/Setting]
+   - Murder Mysteries: [Mystery Setting, Number of Suspects, Detective Archetype, Difficulty Tier]
+   - Fantasy Maps: [Setting Type, Landmass Style, Temporal Era, Major Kingdoms]
 
-2. FOR "audio" FORMATS:
-   - CRITICAL: Do not ask about target users or demographics.
-   - MANDATORY SLOTS: Focus exclusively on acoustic properties:
-     * voice_gender_age
-     * vocal_tone_mood
-     * background_music_genre
-     * pacing_delivery_speed
+2. FOR EDUCATIONAL / FUNCTIONAL DOMAINS (e.g., Study Plans, Meal Planners, Coding Tutors):
+   - Focus on user baselines, resource parameters, and objective scopes.
+   - Study Plans: [Target Exam/Objective, User's Current Skill Level, Daily Study Allocation Window, Core Weaknesses]
+   - Workout/Meal Planners: [Fitness Goal, Dietary Restrictions, Equipment Availability, Weekly Schedule Split]
 
-3. FOR "text" FORMATS:
-   - You are permitted to select audience parameters, document length boundaries, business tone constraints, and target section layouts.
+3. FOR AUDIO & VISUAL FORMATS (Image, Video, Voice):
+   - Graphics/Video: Focus strictly on physical descriptions [Visual Subject, Environmental Setting, Composition/Framing, Aesthetic/Art Style]
+   - Audio: Focus on acoustic properties [Voice Gender/Age, Vocal Tone/Mood, Background Music Genre, Delivery Pacing]
 
-CRITICAL BEHAVIOR POLICIES:
-- NEVER format your question as a multiple-choice menu, numbered checklist, bulleted list, or structured option bracket.
+CRITICAL CONVERSATIONAL BEHAVIOR:
+- NEVER format your question as a multiple-choice menu, numbered checklist, or structured bracket.
 - ALWAYS return the question as natural, flowing conversational prose.
-- NEVER append mechanical directive text strings like "Pick one option" or "Choose from below".
-- Always ask exactly ONE friendly, conversational, open-ended question tailored precisely to the selected slot.
-- If the user's concept is clear and all 3 dynamic slots are satisfied in the already captured attributes, set status = "ready".
+- Ask exactly ONE friendly, open-ended question tailored precisely to the current missing slot.
+- If the user's concept is clear and all 3 domain slots are satisfied in the already captured attributes, set status = "ready".
 
 ANTI-LOOP PROTECTION:
-- You must read the already captured attributes. If a key is already populated in the captured attributes, you are strictly forbidden from re-asking it.
-- Ensure you choose a different missing attribute, or if all are satisfied, set status to "ready".
+- Read the already captured attributes. If a key or its semantic equivalent is populated, you are strictly forbidden from re-asking it. Choose a different missing attribute, or set status to "ready".
 
 Return strict JSON only (no markdown, no other text):
-{{
+{
   "status": "needs_context|ready",
   "question": "Clear natural flowing prose follow-up question if needs_context, else null",
   "slot_key": "The snake_case key variable name for state mapping, else null",
   "slots": [
-    {{
+    {
       "key": "slot_key_name_1",
       "question": "Default dynamic friendly question for slot 1"
-    }},
-    {{
+    },
+    {
       "key": "slot_key_name_2",
       "question": "Default dynamic friendly question for slot 2"
-    }},
-    {{
+    },
+    {
       "key": "slot_key_name_3",
       "question": "Default dynamic friendly question for slot 3"
-    }}
+    }
   ],
   "corrected_app_type": "Retain the incoming specialized app type string (text|image|audio|video|vision)",
   "domain_identified": "text|image|audio|video|vision|hybrid",
   "confidence_score": 0-100,
-  "form": {{
+  "form": {
     "options": ["4 concise feature options"],
     "variables": [
-      {{
+      {
         "name": "variable name",
         "placeholder": "realistic placeholder",
         "test_value": "realistic test value"
-      }}
+      }
     ]
-  }}
-}}
+  }
+}
 
 VARIABLE CONFIGURATION RULES (when status is "ready"):
-- Extract 3–6 variables. They must be user-facing (non-technical) and directly affect output.
-- NEVER include model names, internal parameters, or system settings.
-- Variable name constraint: Every variable name MUST be translated into explicit human language. You are strictly prohibited from generating variables named 'input', 'text', 'data', 'variables', 'param', or 'main_input'.
-- Placeholders:
-  - If the variable name contains 'Date', placeholder MUST be 'DD/MM/YYYY'.
-  - If the variable name contains 'Time', placeholder MUST be 'HH:MM AM/PM'.
-  - If the variable name contains 'Place' or 'Location', placeholder MUST be 'City, Country'.
-  - For everything else, use a relevant example.
-  - NEVER use 'Enter details...' as a placeholder for date, time, or location fields.
-}}"""
+- Extract 3–6 variable structures. They must be user-facing and directly fuel the prompt template.
+- Translate names into clear title case (e.g. 'Quest Difficulty' instead of 'difficulty'). Never name variables 'input', 'text', 'data', or 'param'.
+- Match placeholders to types: Date -> 'DD/MM/YYYY', Time -> 'HH:MM AM/PM', Location -> 'City, Country'. For creative fields, provide realistic contextual entities."""
 
 
 def _is_rate_limit_error(error: Exception) -> bool:
@@ -330,68 +314,38 @@ def _sanitize_variable_objects(
                     obj["placeholder"] = f"Enter {obj.get('name', 'value').lower()}"
                     obj["test_value"] = obj.get("test_value") or ""
         
-        # ─── 🛡️ PRD DOMAIN-AWARE ATTRIBUTE ENFORCEMENT & INTERCEPTOR ───
+        # ─── 🛡️ THE PRODUCTION FIX: REPLACING HARDCODED DOMAIN BIAS ───
         if has_boilerplate_scrubbed or len(normalized) < min_len:
-            domain_fields = []
-            purpose_lower = app_purpose.lower()
-            type_lower = app_type.lower()
+            type_lower = str(app_type or "text").lower()
             
-            if "motivation" in purpose_lower or "speech" in purpose_lower or type_lower in ("audio", "text"):
-                domain_fields = [
-                    {"name": "Script Topic", "placeholder": "What should the speech/content focus on?", "test_value": "Overcoming interview anxiety and building confidence"},
-                    {"name": "Target Industry", "placeholder": "e.g. Technology, Finance, General...", "test_value": "Technology"},
-                    {"name": "Speaker Accent", "placeholder": "e.g. Male, British accent, clear voice...", "test_value": "Male, clear and energetic"}
-                ]
-            elif type_lower == "image":
-                p = purpose_lower
-                if any(w in p for w in ("logo", "brand", "identity", "icon")):
-                    domain_fields = [
-                        {"name": "Company Name", "placeholder": "e.g., Nexora AI, BrightPath, TechVault", "test_value": "Nexora AI"},
-                        {"name": "Industry", "placeholder": "e.g., Technology, Healthcare, Finance", "test_value": "Artificial Intelligence"},
-                        {"name": "Logo Style", "placeholder": "e.g., Modern Minimalist, Futuristic, Corporate, Geometric", "test_value": "Modern Minimalist"},
-                        {"name": "Color Scheme", "placeholder": "e.g., Monochromatic, Blue and White, Earthy tones", "test_value": "Monochromatic blue and white"},
-                    ]
-                elif any(w in p for w in ("poster", "flyer", "banner", "ad", "marketing")):
-                    domain_fields = [
-                        {"name": "Headline Text", "placeholder": "Main text to display on the poster", "test_value": "Summer Sale — 50% Off"},
-                        {"name": "Visual Theme", "placeholder": "e.g., Bold and vibrant, Clean and minimal", "test_value": "Bold and vibrant"},
-                        {"name": "Color Scheme", "placeholder": "e.g., Red and black, Pastel tones", "test_value": "Red and black"},
-                    ]
-                elif any(w in p for w in ("portrait", "avatar", "headshot", "profile")):
-                    domain_fields = [
-                        {"name": "Subject Description", "placeholder": "Describe the person or character", "test_value": "Professional woman in her 30s"},
-                        {"name": "Art Style", "placeholder": "e.g., Photorealistic, Anime, Oil painting", "test_value": "Photorealistic"},
-                        {"name": "Background", "placeholder": "e.g., Office, Studio, Outdoor", "test_value": "Clean studio background"},
-                    ]
-                else:
-                    domain_fields = [
-                        {"name": "Visual Subject", "placeholder": "Main subject of the image", "test_value": "A futuristic city at sunset"},
-                        {"name": "Aesthetic Style", "placeholder": "e.g., Photorealistic, Digital art, Oil painting", "test_value": "Cinematic digital art"},
-                        {"name": "Lighting Style", "placeholder": "e.g., Golden hour, Neon, Studio lighting", "test_value": "Golden hour"},
-                    ]
-            elif type_lower == "video":
-                domain_fields = [
-                    {"name": "Video Concept", "placeholder": "Overall concept or storyline", "test_value": "Drone shot of ocean waves"},
-                    {"name": "Motion Style", "placeholder": "Camera motion description", "test_value": "slow pan left"},
-                    {"name": "Target Platform", "placeholder": "YouTube, Reels, TikTok...", "test_value": "YouTube Reels"}
-                ]
-            elif type_lower == "vision":
-                domain_fields = [
-                    {"name": "Image Analysis Goal", "placeholder": "What to analyze/detect", "test_value": "text on receipt"},
-                    {"name": "Output Format", "placeholder": "Desired format (e.g. JSON, markdown)", "test_value": "JSON"}
-                ]
-            else:
-                domain_fields = [
-                    {"name": "Script Topic", "placeholder": "Topic or focus of the application", "test_value": "General topic"},
-                    {"name": "Target Industry", "placeholder": "Target domain or area", "test_value": "Technology"},
-                    {"name": "Speaker Accent", "placeholder": "Accent or voice style", "test_value": "Neutral tone"}
-                ]
+            # If the LLM returns fewer variables than min_len, we gracefully pad it
+            # with abstract structural properties, leaving the LLM's unique vertical fields alone.
+            abstract_fallbacks = [
+                {
+                    "name": "Core Subject", 
+                    "placeholder": f"Describe the primary topic or focal point of your {type_lower} app", 
+                    "test_value": "General Domain Context"
+                },
+                {
+                    "name": "Target Audience", 
+                    "placeholder": "Who is the primary consumer or target user of this output?", 
+                    "test_value": "General Audience"
+                },
+                {
+                    "name": "Output Tone", 
+                    "placeholder": "e.g., Professional, creative, conversational, technical...", 
+                    "test_value": "Conversational"
+                }
+            ]
             
-            for df in domain_fields:
-                key = df["name"].lower()
-                if key not in seen:
+            for fallback_field in abstract_fallbacks:
+                if len(normalized) >= max_len:
+                    break
+                
+                key = fallback_field["name"].lower()
+                if not any(k in key or key in k for k in seen):
                     seen.add(key)
-                    normalized.append(df)
+                    normalized.append(fallback_field)
                     
         normalized = normalized[:max_len]
         

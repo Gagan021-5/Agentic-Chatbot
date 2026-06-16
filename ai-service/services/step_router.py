@@ -583,13 +583,18 @@ async def _save(session: dict, app_state: Any) -> None:
 
 async def _show_models(session: dict, app_state: Any) -> dict:
     # Double validation step ensuring dynamic context doesn't bypass catalog formats
-    user_history_str = " ".join([str(h.get("content", "")).lower() for h in (session.get("history") or []) if h.get("role") in ("user", "human")])
+    user_history = [h for h in (session.get("history") or []) if h.get("role") in ("user", "human")]
+    user_history_str = " ".join([str(h.get("content", "")).lower() for h in user_history])
     purpose_str = str((session.get("extraction") or {}).get("appPurpose") or "").lower()
     
-    if any(s in user_history_str or s in purpose_str for s in ("image", "images", "poster", "posters", "photo")):
-        session["appType"] = "image"
-        if session.get("extraction"):
-            session["extraction"]["appType"] = "image"
+    last_user_msg = str(user_history[-1].get("content") or "").lower() if user_history else ""
+    is_text_correction = "text" in last_user_msg and any(w in last_user_msg for w in ("it is", "i want", "use", "change to", "make it", "it's", "app", "tool"))
+    
+    if not is_text_correction and any(s in user_history_str or s in purpose_str for s in ("image", "images", "poster", "posters", "photo")):
+        if session.get("appType") not in ("audio", "video", "vision", "text") or is_text_correction:
+            session["appType"] = "image"
+            if session.get("extraction"):
+                session["extraction"]["appType"] = "image"
 
     app_type_str = session.get("appType") or "text"
     full_text = " ".join([
@@ -1416,7 +1421,7 @@ async def intent_classifier_node(state: ConversationState, config: dict) -> dict
         app_type = "image"
     else:
         new_inferred = decision.get("app_type")
-        if new_inferred and new_inferred != "None" and action == "PIVOT_APP":
+        if new_inferred and new_inferred != "None" and (action == "PIVOT_APP" or decision.get("_source") == "fast_path"):
             app_type = new_inferred
 
     if app_type == "None" or not app_type:
@@ -1662,6 +1667,50 @@ def build_true_agentic_graph() -> StateGraph:
 compiled_graph = build_true_agentic_graph()
 
 async def route(session: dict, message: str, app_state: Any) -> dict:
+    # ─── 🛡️ DRASTIC PIVOT INTERCEPTOR ───
+    from services.intent_engine import classify_intent_with_pivot_check
+    
+    current_context = {
+        "appPurpose": (session.get("extraction") or {}).get("appPurpose") or session.get("domainIdentified") or ""
+    }
+    pivot_data = classify_intent_with_pivot_check(message, current_context)
+    
+    if pivot_data.get("drastic_pivot"):
+        # 1. Reset/purge app-specific context
+        await app_state.session.reset_app_specific_context(session.get("sessionId", ""))
+        
+        # Read the newly reset session
+        updated_session = await app_state.session.get_session(session.get("sessionId", "")) or {}
+        session.clear()
+        session.update(updated_session)
+        
+        # 2. Inject a user-friendly conversational block
+        transition_text = (
+            f"I noticed you've pivoted from a **{pivot_data['previous_category'].capitalize()}** app "
+            f"to a **{pivot_data['new_category'].capitalize()}** app. Let me clear the old configuration "
+            f"and regenerate clean requirements for you!"
+        )
+        
+        # Append message to chat history so the user sees it in their UI
+        if "history" not in session:
+            session["history"] = []
+        session["history"].append({"role": "user", "content": message})
+        session["history"].append({"role": "agent", "content": transition_text})
+        
+        # Update appPurpose in extraction so step 0 triage knows the target concept!
+        session["extraction"] = {
+            "appPurpose": message,
+            "appType": "text" # default to text, dynamic triage will refine
+        }
+        
+        # Save session
+        await app_state.session.save_session(session)
+        
+        # 3. Direct back to baseline slot-filling/prompt-generation phase (step 0 response)
+        res = await _build_step0_response(session, message, app_state)
+        res["reply"] = f"{transition_text}\n\n{res.get('reply', '')}"
+        return res
+
     initial_state = _session_to_state(session, message)
     config = {"configurable": {"app_state": app_state}}
     final_state = await compiled_graph.ainvoke(initial_state, config=config)

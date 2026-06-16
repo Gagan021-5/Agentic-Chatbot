@@ -156,6 +156,46 @@ class SessionService:
             logger.warning(f"Redis delete_session failed: {e}")
             _memory_store.pop(_key(session_id), None)
 
+    async def reset_app_specific_context(self, session_id: str) -> dict:
+        """Reset app-specific context while preserving basic session identity."""
+        session = await self.get_session(session_id)
+        if not session:
+            session = _create_session(session_id)
+            
+        session["step"] = 0
+        session["awaitingConfirmation"] = False
+        session["confirmStep"] = None
+        session["awaitingDeepAnswer"] = False
+        session["currentDeepField"] = None
+        session["deepAnswers"] = {}
+        session["appType"] = None
+        session["modelId"] = None
+        session["modelCost"] = None
+        session["modelName"] = None
+        session["extraction"] = None
+        session["promptData"] = None
+        session["scopeData"] = None
+        session["seoData"] = None
+        session["budgetPath"] = None
+        session["requirements"] = {}
+        session["currentField"] = None
+        session["lastQuestion"] = None
+        session["isPivot"] = True
+        session["dynamicContext"] = None
+        session["formConfirmed"] = False
+        session["triageRounds"] = 0
+        session["awaitingTriageAnswer"] = False
+        session["awaitingPromptTweak"] = False
+        session["formatAskedByTriage"] = False
+        session["formatConfirmedByUser"] = False
+        session["domainIdentified"] = None
+        session["ragContext"] = None
+        session["ragEnhancement"] = None
+        session["modelGuidance"] = None
+        
+        await self.save_session(session)
+        return session
+
     # --- Cache helpers (for RAG/web research caching) ---
 
     async def get_cache(self, key: str) -> dict | None:
