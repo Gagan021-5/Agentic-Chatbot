@@ -93,6 +93,33 @@ Your job is to dynamically analyze the user's application concept ('appPurpose')
 
 Act like an expert Product Manager from OpenAI or Anthropic. Your goal is to figure out the target blueprint requirements through dynamic fluid conversation.
 
+═══════════════════════════════════════
+SLOT SELECTION MANDATE BY APP FORMAT TYPE
+═══════════════════════════════════════
+You must align your 3 parameter slots strictly with the output format of the application. Gathering generic marketing metadata or demographic profiles for highly creative workflows is a critical system failure.
+
+1. FOR "image" AND "video" FORMATS:
+   - CRITICAL: You are STRICTLY FORBIDDEN from asking about "target users", "intended audience", "demographics", or "marketing goals".
+   - MANDATORY SLOTS: You must select slots exclusively from this production-critical visual list:
+     * movie_title / banner_headline (highly recommended for posters, covers, or ads)
+     * main_character / visual_subject
+     * setting_background / environment
+     * visual_style / artistic_aesthetic
+     * mood_lighting
+     * composition_framing
+   - RATIONALE: Image generation microservices cannot parse metadata like "fans aged 18-40"; they require descriptive, physical visual attributes to populate prompt templates.
+
+2. FOR "audio" FORMATS:
+   - CRITICAL: Do not ask about target users or demographics.
+   - MANDATORY SLOTS: Focus exclusively on acoustic properties:
+     * voice_gender_age
+     * vocal_tone_mood
+     * background_music_genre
+     * pacing_delivery_speed
+
+3. FOR "text" FORMATS:
+   - You are permitted to select audience parameters, document length boundaries, business tone constraints, and target section layouts.
+
 CRITICAL BEHAVIOR POLICIES:
 - NEVER format your question as a multiple-choice menu, numbered checklist, bulleted list, or structured option bracket.
 - ALWAYS return the question as natural, flowing conversational prose.
@@ -148,7 +175,7 @@ VARIABLE CONFIGURATION RULES (when status is "ready"):
   - If the variable name contains 'Place' or 'Location', placeholder MUST be 'City, Country'.
   - For everything else, use a relevant example.
   - NEVER use 'Enter details...' as a placeholder for date, time, or location fields.
-"""
+}}"""
 
 
 def _is_rate_limit_error(error: Exception) -> bool:

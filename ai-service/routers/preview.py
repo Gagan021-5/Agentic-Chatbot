@@ -26,7 +26,7 @@ POLLINATIONS_PREVIEW_SIZE = 768
 class TestPreviewRequest(BaseModel):
     appType: str = "text"
     variables: dict[str, Any] = Field(default_factory=dict)
-    systemPrompt: str = ""
+    systemPrompt: str | None = ""
     testImageBase64: str | None = None
     status: str | None = None
 
@@ -162,7 +162,7 @@ async def _fetch_pollinations_image(prompt: str) -> str:
         f"?width={POLLINATIONS_PREVIEW_SIZE}&height={POLLINATIONS_PREVIEW_SIZE}&nologo=true"
     )
 
-    async with httpx.AsyncClient(timeout=5.0) as client:
+    async with httpx.AsyncClient(timeout=30.0) as client:
         resp = await client.get(url, headers={
             "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0",

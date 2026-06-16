@@ -1286,6 +1286,10 @@ def _session_to_state(session: dict, message: str) -> ConversationState:
     last_slot_key = session.get("lastSlotKey")
     dynamic_slots = session.get("dynamicSlots") or []
 
+    # Parse model selection if present in the current message
+    parsed_model_id = _parse_selected_model_id(message, MODELS.get(a_type, []))
+    model_id = parsed_model_id or session.get("modelId")
+
     return {
         "session_id": session.get("sessionId") or "",
         "message": message,
@@ -1300,7 +1304,7 @@ def _session_to_state(session: dict, message: str) -> ConversationState:
         "reasoning": session.get("reasoning") or "",
         "response_payload": {},
         "form_confirmed": session.get("formConfirmed") or False,
-        "model_id": session.get("modelId"),
+        "model_id": model_id,
         "model_cost": session.get("modelCost"),
         "model_name": session.get("modelName"),
         "prompt_data": state_prompt_data,
@@ -1546,6 +1550,13 @@ def route_by_conversational_intent(state: ConversationState) -> str:
         return "seo_review_node"
     if msg.startswith("multi_select_form::") or action == "PROCESS_FORM":
         return "form_submission_node"
+
+    # ─── 🛡️ PREVIEW SAFETY BOUNDARY GATE ───
+    # If a preview is requested but no model is selected, drop back down gracefully
+    if (action == "GENERATE_PREVIEW" or state.get("current_step") == 2) and not state.get("model_id"):
+        if not _session_has_budget(state.get("extraction"), state.get("deep_answers")):
+            return "ideation_triage_node"
+        return "model_selection_node"
         
     # ─── 🛑 THE RADICAL ROUTING VALVE BYPASS RECOVERY ───
     # If the user text contains strong format changes, FORCE it through the ideation extraction loop
@@ -1575,8 +1586,28 @@ def route_by_conversational_intent(state: ConversationState) -> str:
     return "ideation_triage_node"
 
 
-def build_orchestrator_graph() -> StateGraph:
+def check_triage_completeness(state: ConversationState) -> str:
+    # Autonomously evaluate if requirements are robustly met mid-flight
+    slots = state.get("dynamic_slots") or []
+    answers = state.get("deep_answers") or {}
+    
+    # If slots are missing, halt and return control to the user
+    if not slots or len(answers) < len(slots):
+        return "wait_for_user"
+        
+    # ─── 🛡️ BUDGET CHECK: Prevent bypassing budget collection ───
+    extraction = state.get("extraction") or {}
+    if not _session_has_budget(extraction, answers):
+        return "wait_for_user"
+        
+    # TRUE AUTONOMY: Move directly to model scaling without waiting for a new API request turn
+    return "auto_advance_to_models"
+
+
+def build_true_agentic_graph() -> StateGraph:
     graph = StateGraph(ConversationState)
+    
+    # Add nodes
     graph.add_node("intent_classifier_node", intent_classifier_node)
     graph.add_node("off_topic_handler_node", off_topic_handler_node)
     graph.add_node("off_topic_inline_node", off_topic_inline_node)
@@ -1588,6 +1619,7 @@ def build_orchestrator_graph() -> StateGraph:
     graph.add_node("seo_review_node", seo_review_node)
     graph.add_node("publish_app_node", publish_app_node)
     
+    # Set entry routing logic
     graph.set_entry_point("intent_classifier_node")
     graph.add_conditional_edges("intent_classifier_node", route_by_conversational_intent, {
         "off_topic_handler_node": "off_topic_handler_node",
@@ -1601,19 +1633,33 @@ def build_orchestrator_graph() -> StateGraph:
         "publish_app_node": "publish_app_node",
     })
     
-    graph.add_edge("off_topic_handler_node", END)
-    graph.add_edge("off_topic_inline_node", END)
-    graph.add_edge("ideation_triage_node", END)
-    graph.add_edge("form_submission_node", END)
+    # Autonomous routing evaluated right after requirements tracking
+    graph.add_conditional_edges(
+        "ideation_triage_node",
+        check_triage_completeness,
+        {
+            "wait_for_user": END,                            
+            "auto_advance_to_models": "model_selection_node" 
+        }
+    )
+    
+    # ─── 🛠️ THE CRITICAL EDGE REPAIR ───
+    # Break the direct node-to-node bypass. Let model selection stop so cards render.
     graph.add_edge("model_selection_node", END)
     graph.add_edge("app_preview_node", END)
+    
+    # Other standard exit routes
+    graph.add_edge("off_topic_handler_node", END)
+    graph.add_edge("off_topic_inline_node", END)
+    graph.add_edge("form_submission_node", END)
     graph.add_edge("modification_handler_node", END)
     graph.add_edge("seo_review_node", END)
     graph.add_edge("publish_app_node", END)
     
     return graph.compile()
 
-compiled_graph = build_orchestrator_graph()
+
+compiled_graph = build_true_agentic_graph()
 
 async def route(session: dict, message: str, app_state: Any) -> dict:
     initial_state = _session_to_state(session, message)

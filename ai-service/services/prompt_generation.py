@@ -171,6 +171,20 @@ Return ONLY valid JSON:
         if not isinstance(parsed, dict):
             parsed = {}
 
+        # Normalize keys (support snake_case from LLM response)
+        if "system_prompt" in parsed and "systemPrompt" not in parsed:
+            parsed["systemPrompt"] = parsed["system_prompt"]
+        if "user_prompt" in parsed and "userPrompt" not in parsed:
+            parsed["userPrompt"] = parsed["user_prompt"]
+        if "negative_prompt" in parsed and "negativePrompt" not in parsed:
+            parsed["negativePrompt"] = parsed["negative_prompt"]
+        if "accept_image_input" in parsed and "acceptImageInput" not in parsed:
+            parsed["acceptImageInput"] = parsed["accept_image_input"]
+        if "variables_used" in parsed and "variablesUsed" not in parsed:
+            parsed["variablesUsed"] = parsed["variables_used"]
+        if "variable_descriptions" in parsed and "variableDescriptions" not in parsed:
+            parsed["variableDescriptions"] = parsed["variable_descriptions"]
+
         cleaned_vars_list = []
         for v in vars_list:
             if isinstance(v, dict):
@@ -221,6 +235,36 @@ Return ONLY valid JSON:
                 user_prompt = user_prompt.strip() + "\n\n" + " ".join(missing_appends)
             
             parsed["userPrompt"] = auto_inject_variables(user_prompt, vars_used)
+
+        # Fallback validation check
+        if not parsed.get("systemPrompt") or not parsed.get("userPrompt"):
+            logger.warning("[generate_prompt_template] Parsed JSON missing systemPrompt or userPrompt. Merging fallback.")
+            app_purpose_lower = (
+                requirements.get("appPurpose") or extraction.get("appPurpose") or ""
+            ).lower()
+            needs_upload = any(k in app_purpose_lower for k in UPLOAD_KEYWORDS)
+            is_generation = any(k in app_purpose_lower for k in GENERATION_KEYWORDS)
+            accept_image = (
+                session.get("appType") == "vision"
+                or (session.get("appType") == "image" and needs_upload and not is_generation)
+            )
+            main_var = vars_list[0].get("name") if vars_list and isinstance(vars_list[0], dict) else "main_input"
+            main_var_clean = str(main_var).strip().strip("$").replace(" ", "_").lower()
+            
+            if not parsed.get("systemPrompt"):
+                parsed["systemPrompt"] = (
+                    f"You are a highly specialized AI assistant for {session.get('appType') or 'content'} generation. "
+                    "Focus exclusively on the app's stated purpose. Provide structured, accurate, and domain-specific outputs only."
+                )
+            if not parsed.get("userPrompt"):
+                parsed["userPrompt"] = (
+                    "I want to perform the requested task precisely based on the following inputs:\n\n"
+                    f"$${main_var_clean}\n\n"
+                    "Provide a detailed, well-structured response that directly addresses the request. "
+                    "Do not add unrelated information."
+                )
+            if "acceptImageInput" not in parsed:
+                parsed["acceptImageInput"] = accept_image
 
         return parsed
 
