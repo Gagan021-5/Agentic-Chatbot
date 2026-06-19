@@ -38,7 +38,7 @@ ORCHESTRATOR_TOOL = {
                 },
                 "app_type": {
                     "type": "string",
-                    "enum": ["text", "image", "audio", "video", "vision"],
+                    "enum": ["text", "image", "audio", "video", "vision", "ambiguous"],
                 },
                 "confidence": {
                     "type": "string",
@@ -365,7 +365,7 @@ def build_fallback_decision(message: str, session: dict | None) -> dict:
     app_type = snapshot.get("currentAppType") or "text"
     is_major_pivot = False
 
-    if re.match(r"^(hi|hello|hey|hy|hola|greetings)[\s!.]*$", msg, re.I):
+    if re.match(r"^(h+e+l+[lo]+|h+[iy]+|hey+|hola|greetings?|yo|sup|namaste)[\s!?.]*$", msg, re.I):
         recommended_action = "HANDLE_OFF_TOPIC"
     elif re.match(r"^(help)[\s!.]*$", msg, re.I):
         recommended_action = "HANDLE_OFF_TOPIC"

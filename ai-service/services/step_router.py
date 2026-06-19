@@ -831,6 +831,15 @@ async def _build_step0_response(session: dict, text: str, app_state: Any) -> dic
 
 
 async def _exec_gather_requirements(session: dict, text: str, app_state: Any) -> dict:
+    # Guard: if the message is too short or looks like small talk, bail early
+    if len(text.strip()) < 6 and not any(c.isalpha() for c in text[2:]):
+        return {
+            "reply": "I am your RentPrompts Architect. Let me know what app you want to configure!",
+            "uiType": None,
+            "uiData": None,
+            "nextStep": 0,
+        }
+
     if not session.get("history"):
         session["history"] = []
 
@@ -1425,7 +1434,7 @@ async def intent_classifier_node(state: ConversationState, config: dict) -> dict
             app_type = new_inferred
 
     if app_type == "None" or not app_type:
-        app_type = "text"
+        app_type = "ambiguous"
 
     extraction = state.get("extraction") or {}
     extraction["appType"] = app_type

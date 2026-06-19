@@ -1,5 +1,12 @@
 """Off-topic detection — RentPrompts requirementRouter.js."""
 
+import re
+
+GREETING_PATTERN = re.compile(
+    r"^(h+e+l+[lo]+|h+[iy]+|hey+|hola|greetings?|howdy|sup|yo|what'?s up|namaste|hi+)[\s!?.]*$",
+    re.IGNORECASE,
+)
+
 OFF_TOPIC_KEYWORDS = [
     "gravity", "physics", "chemistry", "biology", "history",
     "math", "equation", "formula", "theorem", "law of",
@@ -50,8 +57,12 @@ OFF_TOPIC_RESPONSE = {
 
 def is_off_topic(message: str, session: dict | None) -> bool:
     msg = str(message or "").lower().strip()
-    if len(msg) < 4:
+    if len(msg) < 2:
         return False
+
+    # Catch greetings and typo variants FIRST, before any other check
+    if GREETING_PATTERN.match(msg):
+        return True
 
     if session:
         has_history = isinstance(session.get("history"), list) and len(session["history"]) > 1
