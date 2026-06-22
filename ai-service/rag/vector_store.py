@@ -114,6 +114,7 @@ class VectorStoreManager:
         categories: list[str] | None = None,
         top_k: int = 5,
         metadata_filter: dict | None = None,
+        boost_gold_standards: bool = False,
     ) -> list[dict]:
         """Search across one or more knowledge base collections."""
         if categories is None:
@@ -144,11 +145,15 @@ class VectorStoreManager:
                         similarity = 1.0 - (distance / 2.0)
 
                         metadata = results["metadatas"][0][i] if results.get("metadatas") else {}
+                        relevance = round(similarity, 4)
+                        if boost_gold_standards and metadata.get("source") == "marketplace_gold_standards.md":
+                            relevance = min(1.0, relevance + 0.2)
+
                         all_results.append({
                             "content": doc,
                             "source": metadata.get("source", category),
                             "category": category,
-                            "relevance_score": round(similarity, 4),
+                            "relevance_score": relevance,
                             "metadata": metadata,
                         })
 
@@ -166,6 +171,7 @@ class VectorStoreManager:
         model_id: str | None = None,
         app_type: str | None = None,
         top_k: int = 5,
+        boost_gold_standards: bool = False,
     ) -> list[dict]:
         """Search with metadata filtering for model-specific or type-specific docs."""
         metadata_filter = {}
@@ -180,6 +186,7 @@ class VectorStoreManager:
             categories=[category],
             top_k=top_k,
             metadata_filter=where,
+            boost_gold_standards=boost_gold_standards,
         )
 
     def get_collection_stats(self) -> dict[str, int]:

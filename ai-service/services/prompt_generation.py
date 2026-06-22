@@ -308,22 +308,75 @@ Return ONLY valid JSON:
         }
 
 
-async def generate_seo(llm: LLMService, session: dict) -> dict:
+async def generate_seo(llm: LLMService, session: dict, vector_store: Any = None) -> dict:
+    rag_context = ""
+    if vector_store and hasattr(vector_store, "search"):
+        try:
+            app_type = (session.get("appType") or "text").lower()
+            app_purpose = (session.get("extraction") or {}).get("appPurpose") or ""
+            # Retrieve relevant chunks from marketplace_gold_standards.md with boosted priority
+            matches = await vector_store.search(
+                query=f"{app_type} app: {app_purpose} naming description tags",
+                categories=["examples", "marketplace"],
+                top_k=5,
+                boost_gold_standards=True,
+            )
+            # Filter specifically for chunks from marketplace_gold_standards.md
+            gold_chunks = [
+                m.get("content", "")
+                for m in matches
+                if m.get("metadata", {}).get("source") == "marketplace_gold_standards.md"
+            ]
+            
+            # Fallback direct search filter if no gold standards retrieved by general search
+            if not gold_chunks:
+                direct_matches = await vector_store.search(
+                    query=f"{app_type} app: {app_purpose}",
+                    categories=["examples", "marketplace"],
+                    metadata_filter={"source": "marketplace_gold_standards.md"},
+                    top_k=3
+                )
+                gold_chunks = [m.get("content", "") for m in direct_matches if m.get("content")]
+            
+            if gold_chunks:
+                rag_context = "\n\n".join(gold_chunks)
+        except Exception as e:
+            logger.warning(f"[generate_seo] Failed to retrieve gold standards from RAG: {e}")
+
     system_prompt = f"""You are an expert Product Marketer and App Store Optimization (ASO) specialist for a premium AI app marketplace.
 Your job: generate irresistible, high-converting marketplace metadata that makes users WANT to try the app instantly.
 {LANGUAGE_MIRROR_DIRECTIVE}
 
-STRICT RULES — follow every single one:
+STRICT METADATA FORMULAS:
 
-1. APP NAME (2-4 words MAXIMUM): catchy, memorable, premium SaaS product name. Max 55 characters.
-2. DESCRIPTION (under 150 characters): benefit-driven copy, NOT a feature list.
-3. TAGS (EXACTLY 7 tags): lowercase, hyphenated, no # prefix.
+1. APP NAME (2-4 words MAXIMUM, max 55 characters):
+   Must prefer the formula: [PowerWord] + [Domain] pattern (or [Domain] + [PowerWord] pattern), optionally followed by "AI".
+   PowerWord examples: Forge, Sprint, Lens, Flow, Boost, Craft, Spark, Vision, Mind, etc.
+   Domain examples: Resume, Interview, Thumbnail, Podcast, Voice, Study, Career, Skill, Reel, etc.
+   Preferred name patterns: ResumeForge AI, InterviewSprint AI, MatchLens AI, PodcastVoice AI, StudyFlow AI.
+   Avoid generic names like "AI Generator", "Text Creator", "Video Maker", "App Builder", "Generic AI Tool".
+
+2. APP DESCRIPTION (under 150 characters):
+   Must strictly follow the formula: [Action Verb] + [User Outcome] + [AI Capability]
+   Examples of good descriptions:
+   - "Transform your experience into ATS-optimized resumes with AI."
+   - "Create high-converting marketing content in seconds."
+   - "Analyze uploaded plant photos and identify crop diseases instantly."
+   Avoid bad descriptions like "Generates resumes", "Creates content", "Makes images".
+
+3. TAGS (EXACTLY 7 tags):
+   Must strictly follow the formula:
+   - 2 broad discovery tags (e.g., ai-writing, ai-voice, ai-design, content-creator)
+   - 3 niche use-case tags (e.g., resume-builder, ats-optimization, software-engineering)
+   - 2 benefit/outcome tags (e.g., career-growth, job-search, professional-resume)
+   All tags must be lowercase, hyphenated, and have no '#' prefix.
+
 4. CATEGORY: one of: creative, business, education, healthcare, entertainment, productivity, social, other
 
 Return ONLY valid JSON:
 {{
-  "appName": "string, 2-4 words, max 55 chars",
-  "appDescription": "string, benefit-driven, max 150 chars",
+  "appName": "string, 2-4 words, max 55 chars, following [PowerWord] + [Domain] pattern",
+  "appDescription": "string, max 150 chars, following [Action Verb] + [User Outcome] + [AI Capability] pattern",
   "tags": ["tag1", "tag2", "tag3", "tag4", "tag5", "tag6", "tag7"],
   "category": "creative | business | education | healthcare | entertainment | productivity | social | other"
 }}"""
@@ -337,6 +390,13 @@ Return ONLY valid JSON:
         if m.get("role") == "user"
     )[:600]
 
+    gold_standards_block = ""
+    if rag_context:
+        gold_standards_block = (
+            f"\n- GOLD STANDARD EXAMPLES FROM KNOWLEDGE BASE (use these examples for structure, naming patterns, and description tone):\n"
+            f"{rag_context}\n"
+        )
+
     detected_lang = session.get("languageMode") or (session.get("extraction") or {}).get("detectedLanguage") or "English"
     user_content = (
         f"Generate premium, high-converting marketplace metadata for this AI app:\n"
@@ -345,9 +405,11 @@ Return ONLY valid JSON:
         f"- User answers during setup: {json.dumps(deep_answers)}\n"
         f"- Target Output Language: {detected_lang} (You MUST generate the appName, appDescription, and tags in this language. Do not translate or generate in any other language unless explicitly requested. If English, use English. If Hindi, use Hindi. If Hinglish, use Hinglish.)\n"
         f"- Conversation context: {triage_history}\n"
-        f"- Model used (DO NOT use as app name — this is internal only): {session.get('modelId') or 'unknown'}\n\n"
-        "Remember: App name must sound like a premium SaaS product (2-4 words). "
-        "Description must sell the benefit to the user in under 150 characters. Exactly 7 action-oriented tags."
+        f"- Model used (DO NOT use as app name — this is internal only): {session.get('modelId') or 'unknown'}\n"
+        f"{gold_standards_block}\n"
+        "Remember: App name must follow [PowerWord] + [Domain] (2-4 words). "
+        "Description must follow [Action Verb] + [User Outcome] + [AI Capability] in under 150 characters. "
+        "Exactly 7 tags: 2 broad discovery, 3 niche use-case, 2 benefit/outcome tags."
     )
 
     try:
@@ -366,11 +428,11 @@ Return ONLY valid JSON:
             "vision": "InsightLens AI",
         }
         desc_map = {
-            "image": f"Create stunning AI-powered visuals{' — ' + purpose_clean if purpose_clean else ''} in seconds.",
-            "text": f"Craft polished, professional content{' — ' + purpose_clean if purpose_clean else ''} with AI.",
-            "audio": f"Transform text into natural, professional audio{' — ' + purpose_clean if purpose_clean else ''} instantly.",
-            "video": f"Produce scroll-stopping AI videos{' — ' + purpose_clean if purpose_clean else ''} effortlessly.",
-            "vision": f"Analyze and extract insights from images{' — ' + purpose_clean if purpose_clean else ''} with AI.",
+            "image": f"Create stunning visuals{' — ' + purpose_clean if purpose_clean else ''} with AI.",
+            "text": f"Craft polished content{' — ' + purpose_clean if purpose_clean else ''} with AI.",
+            "audio": f"Transform text into realistic narration{' — ' + purpose_clean if purpose_clean else ''} with AI.",
+            "video": f"Produce scroll-stopping videos{' — ' + purpose_clean if purpose_clean else ''} with AI.",
+            "vision": f"Analyze uploaded images{' — ' + purpose_clean if purpose_clean else ''} with AI.",
         }
         tag_map = {
             "image": ["ai-design", "visual-creator", "brand-design", "image-craft", "creative-ai", "instant-design", "smart-visuals"],

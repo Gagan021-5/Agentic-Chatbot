@@ -70,6 +70,7 @@ class RetrievalRequest(BaseModel):
         description="Knowledge base categories to search"
     )
     top_k: int = Field(default=5, ge=1, le=20)
+    boost_gold_standards: bool = Field(default=False, description="Increase priority for marketplace gold standards")
 
 
 class RetrievalResponse(BaseModel):

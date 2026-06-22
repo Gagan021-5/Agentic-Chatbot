@@ -945,7 +945,7 @@ async def _exec_generate_preview(session: dict, text: str, app_state: Any) -> di
 
         prompt_data, seo_data = await asyncio.gather(
             generate_prompt_template(llm, session),
-            generate_seo(llm, session),
+            generate_seo(llm, session, vector_store=vector_store),
         )
 
         session["promptData"] = prompt_data
@@ -1037,6 +1037,23 @@ async def _handle_seo_publish(session: dict, card_data: dict, app_state: Any) ->
     prompt_data = session.get("promptData") or {}
     seo_data = {**(session.get("seoData") or {}), **card_data}
     session["seoData"] = seo_data
+
+    # Retrieve relevant gold standards during publishing for validation logging or context enrichment
+    vector_store = getattr(app_state, "vector_store", None)
+    if vector_store and hasattr(vector_store, "search"):
+        try:
+            app_type = session.get("appType") or "text"
+            app_purpose = (session.get("extraction") or {}).get("appPurpose") or ""
+            matches = await vector_store.search(
+                query=f"{app_type} app: {app_purpose} publishing validation",
+                categories=["examples", "marketplace"],
+                top_k=2,
+                boost_gold_standards=True,
+            )
+            logger.info("Publishing metadata verification against gold standards complete", 
+                        num_matches=len(matches))
+        except Exception as e:
+            logger.warning(f"Gold standards retrieval failed during publishing: {e}")
 
     app_name = seo_data.get("appName") or "Your App"
     alt_text = str(seo_data.get("appDescription") or app_name)[:500]

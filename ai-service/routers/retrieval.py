@@ -58,6 +58,7 @@ async def retrieve_context(request: Request, body: RetrievalRequest):
             query=search_query,
             categories=body.categories,
             top_k=body.top_k,
+            boost_gold_standards=body.boost_gold_standards,
         )
 
         # If model_id specified, also search model-specific docs
