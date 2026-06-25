@@ -27,8 +27,10 @@ class TestPreviewRequest(BaseModel):
     appType: str = "text"
     variables: dict[str, Any] = Field(default_factory=dict)
     systemPrompt: str | None = ""
+    userPrompt: str | None = ""
     testImageBase64: str | None = None
     status: str | None = None
+    workflowIdentity: dict[str, Any] | None = None
 
 
 class TestPreviewResponse(BaseModel):
@@ -296,6 +298,9 @@ async def test_preview(request: Request, body: TestPreviewRequest):
     app_type = (body.appType or "text").lower()
     is_ready = body.status == "ready" or getattr(body, "status", None) == "ready"
 
+    # Workflow identity (if provided) should drive preview/template selection
+    workflow_identity = body.workflowIdentity or None
+
     # Filter out any "default" or "template" variables that are not explicitly extracted
     bloat_patterns = [
         r"date\s*of\s*creation", r"jump\s*scare", r"video\s*title", r"age\s*rating",
@@ -319,11 +324,16 @@ async def test_preview(request: Request, body: TestPreviewRequest):
             "config": {}
         }
     else:
-        # Construct combined context to query RAG blueprints
+        # Construct combined context to query RAG blueprints. Include workflow_identity
         transform_goal = "; ".join(
             f"{k}: {v}" for k, v in body.variables.items() if v
         )
         combined_context = f"{transform_goal}\n\n{body.systemPrompt}"
+        if workflow_identity and isinstance(workflow_identity, dict):
+            wf_name = workflow_identity.get("workflow_name") or workflow_identity.get("workflowName") or None
+            wf_conf = workflow_identity.get("workflow_confidence") or workflow_identity.get("confidence") or None
+            if wf_name:
+                combined_context += f"\n\nInferred workflow: {wf_name} (confidence: {wf_conf})"
 
         # Resolve transformation tool using RAG
         blueprint = await _resolve_transformation_tool(combined_context, request.app.state)
@@ -500,16 +510,42 @@ async def test_preview(request: Request, body: TestPreviewRequest):
                 "scripted_conversation", "script", "content", "text", "dialogue",
                 "narration", "transcript", "message", "body", "story", "speech", "input"
             ]
-            user_script_field = next(
-                (k for k in body.variables if any(kw in k.lower().replace(" ", "_").replace("-", "_") for kw in script_keywords)
-                 and len(str(body.variables[k]).strip()) > 0),
-                None,
-            )
+            # Prefer an explicit user-provided script only if the field looks substantive
+            def _is_substantive(val: str) -> bool:
+                s = str(val or "").strip()
+                if len(s) < 80:
+                    return False
+                # count words
+                if len(s.split()) < 15:
+                    return False
+                return True
 
-            if user_script_field:
-                script_content = str(body.variables[user_script_field]).strip()
-            else:
-                # Generate script via Groq
+            user_script_field = None
+            script_content = None
+
+            # First pass: find a substantive field matching script keywords
+            for k in body.variables:
+                key_norm = k.lower().replace(" ", "_").replace("-", "_")
+                if any(kw in key_norm for kw in script_keywords) and _is_substantive(body.variables[k]):
+                    user_script_field = k
+                    script_content = str(body.variables[k]).strip()
+                    break
+
+            # Second pass: fallback to any matching non-empty field (legacy behavior)
+            if not user_script_field:
+                user_script_field = next(
+                    (k for k in body.variables if any(kw in k.lower().replace(" ", "_").replace("-", "_") for kw in script_keywords)
+                     and len(str(body.variables[k]).strip()) > 0),
+                    None,
+                )
+
+            # If fallback field is non-substantive (e.g., 'formal'), ignore it to force LLM generation
+            if user_script_field and not _is_substantive(body.variables.get(user_script_field, "")):
+                user_script_field = None
+                script_content = None
+
+            # If no substantive user script provided, generate a full script via the LLM
+            if not user_script_field:
                 result = await llm.groq_chat(
                     system_prompt=(
                         "You write ONLY the exact words a voice actor will read aloud. "
@@ -612,17 +648,48 @@ async def test_preview(request: Request, body: TestPreviewRequest):
             
             vision_prompt = f"{analysis_goal} Provide a {detail_level} analysis."
             
+            vision_text = None
+            # Primary: try Groq Vision (if configured)
             try:
-                res = await llm.groq_vision(
-                    image_data_url=image_url,
-                    prompt=vision_prompt,
-                    model="llava-v1.5-7b-4096-preview",
-                    max_tokens=1000
-                )
-                vision_text = res
+                if llm.has_groq:
+                    res = await llm.groq_vision(
+                        image_data_url=image_url,
+                        prompt=vision_prompt,
+                        model="meta-llama/llama-4-scout-17b-16e-instruct",
+                        max_tokens=1000
+                    )
+                    vision_text = res
             except Exception as vision_err:
-                logger.error(f"Vision analysis preview error: {vision_err}")
-                vision_text = f"👁️ **Vision Analysis Complete (with error: {vision_err})**\n\nFallback: could not analyze image."
+                logger.warning(f"Groq vision analysis failed: {vision_err}")
+
+            # Fallback: try OpenRouter / Gemini if available
+            if not vision_text:
+                try:
+                    if llm.has_openrouter:
+                        system_prompt = (
+                            "You are a highly capable multimodal vision analysis assistant. "
+                            "Provide a concise, structured analysis of the image and key observations. "
+                            "Return plain text only."
+                        )
+                        # Use Gemini 2.5 Pro model via OpenRouter as fallback
+                        gemini_model = "google/gemini-2.5-pro"
+                        user_content = (
+                            f"Image data or URL:\n{image_url}\n\nAnalysis instructions:\n{vision_prompt}\n\n"
+                        )
+                        res = await llm.openrouter_chat(
+                            system_prompt=system_prompt,
+                            user_content=user_content,
+                            model=gemini_model,
+                            max_tokens=1000,
+                            temperature=0.2,
+                        )
+                        vision_text = res
+                except Exception as gem_err:
+                    logger.warning(f"Gemini/OpenRouter vision fallback failed: {gem_err}")
+
+            if not vision_text:
+                logger.error("Vision analysis preview failed for both Groq and Gemini/OpenRouter")
+                vision_text = f"👁️ **Vision Analysis Complete (with error)**\n\nFallback: could not analyze image."
 
             preview_result = {
                 "type": "multimodal",
@@ -634,6 +701,35 @@ async def test_preview(request: Request, body: TestPreviewRequest):
         if ui_meta is None:
             ui_meta = {}
         ui_meta["variables"] = list(body.variables.keys())
+
+        # Consistency validation & debug logging
+        try:
+            wf_name = None
+            wf_conf = None
+            if workflow_identity and isinstance(workflow_identity, dict):
+                wf_name = workflow_identity.get("workflow_name") or workflow_identity.get("workflowName")
+                wf_conf = workflow_identity.get("workflow_confidence") or workflow_identity.get("confidence")
+
+            # Simple semantic overlap check between workflow name and prompts/variables
+            tokens = set(re.findall(r"\w+", (body.systemPrompt or "") + " " + " ".join(list(body.variables.keys()))))
+            wf_tokens = set(re.findall(r"\w+", str(wf_name or "")))
+            overlap = tokens.intersection(wf_tokens)
+            consistency_score = 0.0
+            if wf_tokens:
+                consistency_score = float(len(overlap)) / float(len(wf_tokens))
+
+            debug = {
+                "workflow_identity": wf_name,
+                "workflow_confidence": wf_conf,
+                "app_type": app_type,
+                "selected_template": preview_result.get("type") if isinstance(preview_result, dict) else None,
+                "variable_source_reasoning": "workflow_preference" if wf_name else "modality_fallback",
+                "prompt_goal": (body.systemPrompt or "")[:240],
+                "consistency_score": round(consistency_score, 3),
+            }
+            logger.info(f"[preview_debug] {json.dumps(debug)}")
+        except Exception:
+            logger.exception("Failed to compute preview debug info")
 
         return TestPreviewResponse(success=True, preview=preview_result, ui_meta=ui_meta)
 

@@ -2,6 +2,11 @@
 
 import re
 
+VISION_SOURCE_RE = re.compile(
+    r"\b(?:pitch\s+decks?|decks?|slides?|presentations?|pdfs?|resumes?|cvs?|documents?|reports?|brochures?|portfolios?|images?|photos?|pictures?|screenshots?|profiles?|webpages?|x[\-\s]?rays?|scans?|receipts?|invoices?|certificates?|diagrams?|charts?|infographics?|flyers?|posters?|menus?|labels?|badges?|tickets?|forms?)\b",
+    re.IGNORECASE,
+)
+
 
 def detect_language(message: str) -> str:
     text = str(message or "")
@@ -32,7 +37,52 @@ def detect_budget(message: str) -> tuple[str | None, str]:
 
 def infer_app_type(message: str) -> tuple[str | None, str]:
     lower = message.lower()
-    # Check compound target media conversion patterns first (e.g. text to audio, image to video)
+    
+    # 1. Detect Task Type
+    task_type = None
+    if re.search(r"\b(analyz\w*|evaluat\w*|review\w*|audit\w*|score\w*|assess\w*|inspect\w*|read\w*|extract\w*|detect\w*|check\w*|verif\w*|validat\w*|optimiz\w*|classif\w*|summariz\w*|feedbacks?|ocr)\b", lower):
+        task_type = "analyze"
+    elif re.search(r"\b(edit\w*|chang\w*|modif\w*|alter\w*|transform\w*|tweak\w*|adjust\w*|filter\w*|enhance\w*|remove\s+background|bg\s+remover)\b", lower):
+        task_type = "edit"
+    elif re.search(r"\b(generat\w*|creat\w*|make\w*|design\w*|draw\w*|render\w*|write\w*|craft\w*|produc\w*|synthesiz\w*)\b", lower):
+        task_type = "generate"
+        
+    # 2. Detect Artifact Type
+    artifact_type = None
+    if re.search(r"\b(videos?|animations?|movies?|reels?|clips?)\b", lower):
+        artifact_type = "video"
+    elif re.search(r"\b(audios?|voices?|sounds?|podcasts?|songs?|speech|music|melod(?:y|ies)|tts|text-to-speech|text-to-audio)\b", lower):
+        artifact_type = "audio"
+    elif re.search(r"\b(pitch\s+decks?|decks?|slides?|presentations?|pdfs?|resumes?|cvs?|documents?|reports?|brochures?|portfolios?|menus?|invoices?|receipts?|bills?|tickets?|certificates?|web\s+links?|urls?|websites?|webpages?|forms?|profiles?)\b", lower):
+        artifact_type = "document"
+    elif re.search(r"\b(images?|imagery|photos?|photographs?|photography|pictures?|posters?|logos?|banners?|art|arts|artworks?|avatars?|illustrations?|graphics?|icons?|thumbnails?|screenshots?|scans?|x[\-\s]?rays?|diagrams?|charts?|infographics?|flyers?|visuals?)\b", lower):
+        artifact_type = "image"
+    elif re.search(r"\b(texts?|blogs?|articles?|stories?|prompts?|scripts?|cop(?:y|ies)|paragraphs?|letters?|essays?)\b", lower):
+        artifact_type = "text"
+        
+    # 3. Derive App Type based on (Artifact Type, Task Type)
+    if task_type == "analyze":
+        if artifact_type in ("image", "document"):
+            return "vision", "HIGH"
+        elif artifact_type == "audio":
+            return "audio", "HIGH"
+        elif artifact_type == "video":
+            return "video", "HIGH"
+        elif artifact_type == "text":
+            return "text", "HIGH"
+    elif task_type in ("edit", "generate"):
+        if artifact_type == "image":
+            return "image", "HIGH"
+        elif artifact_type == "document":
+            return "text", "HIGH"
+        elif artifact_type == "audio":
+            return "audio", "HIGH"
+        elif artifact_type == "video":
+            return "video", "HIGH"
+        elif artifact_type == "text":
+            return "text", "HIGH"
+
+    # 4. Fallback compound patterns
     if re.search(r"(text\s*to\s*(audio|speech|voice|sound|tts|music|mp3|podcast|song))", lower) or "tts" in lower or "text-to-speech" in lower or "text-to-audio" in lower:
         return "audio", "HIGH"
     if re.search(r"((image|photo|picture)\s*to\s*video)", lower) or "photo animation" in lower:
@@ -42,6 +92,7 @@ def infer_app_type(message: str) -> tuple[str | None, str]:
     if re.search(r"((image|photo|picture)\s*to\s*(text|data|csv|json|words|ocr))", lower) or "ocr" in lower:
         return "vision", "HIGH"
 
+    # 5. General fallback keyword checks
     if re.search(r"(video|animate|reel|cinematic|movie)", lower):
         return "video", "HIGH"
     if re.search(r"(voice|audio|music|podcast|song|speech)", lower):

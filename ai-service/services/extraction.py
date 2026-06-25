@@ -16,6 +16,32 @@ from services.language_directive import LANGUAGE_MIRROR_DIRECTIVE
 from services.extraction_normalizer import normalize_extraction
 from services.llm import LLMService
 
+
+def _msg_content(m: Any) -> str:
+    try:
+        if hasattr(m, "get"):
+            return m.get("content", "") or ""
+        if hasattr(m, "content"):
+            return getattr(m, "content") or ""
+        if isinstance(m, str):
+            return m
+        return str(m)
+    except Exception:
+        return ""
+
+
+def _msg_role(m: Any) -> str:
+    try:
+        if hasattr(m, "get"):
+            return m.get("role", "user") or "user"
+        if hasattr(m, "role"):
+            return getattr(m, "role") or "user"
+        if hasattr(m, "type"):
+            return getattr(m, "type") or "user"
+        return "user"
+    except Exception:
+        return "user"
+
 GROQ_SYSTEM_PROMPT = f"""You are a strict data extraction engine for RentPrompts — a platform where users CREATE and PUBLISH AI-powered apps.
 
 Users describe an app they want to build.
@@ -27,7 +53,10 @@ APP TYPE RULES — read every word carefully:
 - "video" app: creates videos, animations, reels, cinematic clips, animates photos, talking avatars
 - "text" app: generates written content — blogs, emails, captions, scripts, stories, reports, product descriptions, resumes, cover letters, proposals, invoices, contracts, workout PLANS, meal PLANS, diet plans, study guides, itineraries, recipes, newsletters, SOPs, any document or written plan output
 - "audio" app: voice, music, speech, podcast, sound effects, text to speech, transcription
-- "vision" app: analyzes images, reads text from images, detects objects, medical image analysis
+- "vision" app: analyzes images, reads text from images, detects objects, medical image analysis,
+  evaluates documents/PDFs/pitch decks/resumes/presentations/screenshots, reviews profiles or
+  webpages by analyzing their visual content. If the user wants to ANALYZE or EVALUATE something
+  they will UPLOAD (a file, deck, resume, profile, screenshot, webpage), it is "vision".
 
 CRITICAL IMAGE vs TEXT — this is the #1 mistake to avoid:
 - If the user mentions "photo", "picture", "image", "card" and the OUTPUT is a VISUAL (image with text on it, greeting card, poster, meme) → appType = "image"
@@ -88,60 +117,120 @@ Return ONLY valid JSON. No markdown. No explanation.
 
 ALLOWED_TRIAGE_APP_FORMATS = ["text", "image", "audio", "video", "vision"]
 
-TRIAGE_INSTRUCTION = """You are the Dynamic Context Triage Node inside a LangGraph framework grounded dynamically via a ChromaDB vector store.
-Your job is to analyze the user's application concept ('appPurpose') and determine exactly 3 critical, domain-specific parameter slots required to build a highly tailored prompt blueprint for this specific app vertical.
+TRIAGE_INSTRUCTION = """You are the Dynamic Context Triage Node inside a LangGraph pipeline grounded via ChromaDB.
 
-Act like an expert Product Manager and AI Prompt Engineer. Your goal is to extract structural inputs that let users generate rich, customizable outputs.
+Your job: given an app concept, determine the 3 most critical parameter slots needed to build a tailored prompt, then ask for them one at a time.
 
 ═══════════════════════════════════════
-SLOT SELECTION MANDATE BY DOMAIN ARCHETYPE
+STEP 1 — CLASSIFY THE APP ON 3 AXES
 ═══════════════════════════════════════
-You must adapt your 3 parameter slots dynamically to the domain vertical. Avoid generic placeholders (e.g., "script text", "topic") when specific architectural parameters are required.
 
-1. FOR CREATIVE / GAMING / FICTION DOMAINS (e.g., RPG Quests, Murder Mysteries, Fantasy Maps):
-   - Focus on systemic constraints and creative direction variables.
-   - RPG Quests: [Quest Difficulty, Main Hero/Protagonist Class, Reward Type/Rarity, Faction/Setting]
-   - Murder Mysteries: [Mystery Setting, Number of Suspects, Detective Archetype, Difficulty Tier]
-   - Fantasy Maps: [Setting Type, Landmass Style, Temporal Era, Major Kingdoms]
+AXIS 1 — INPUT TYPE (what does the user provide to the app?):
+- UPLOAD    → user submits a file, image, PDF, screenshot, deck, resume, webpage, document
+- STRUCTURED → user enters specific data points (birth date, name, number, location)
+- FREE_TEXT  → user describes something in natural language (topic, idea, story)
+- NONE       → app generates purely from parameter selections
 
-2. FOR EDUCATIONAL / FUNCTIONAL DOMAINS (e.g., Study Plans, Meal Planners, Coding Tutors):
-   - Focus on user baselines, resource parameters, and objective scopes.
-   - Study Plans: [Target Exam/Objective, User's Current Skill Level, Daily Study Allocation Window, Core Weaknesses]
-   - Workout/Meal Planners: [Fitness Goal, Dietary Restrictions, Equipment Availability, Weekly Schedule Split]
+AXIS 2 — OUTPUT TYPE (what does the app produce?):
+- ANALYSIS     → scores, evaluates, critiques, extracts from something provided
+- GENERATION   → creates new content (text, image, audio, video)
+- TRANSFORMATION → converts input to a different format or style
+- EXTRACTION   → pulls structured data out of unstructured input
 
-3. FOR AUDIO & VISUAL FORMATS (Image, Video, Voice):
-   - Graphics/Video: Focus strictly on physical descriptions [Visual Subject, Environmental Setting, Composition/Framing, Aesthetic/Art Style]
-   - Audio: Focus on acoustic properties [Voice Gender/Age, Vocal Tone/Mood, Background Music Genre, Delivery Pacing]
+AXIS 3 — DOMAIN SENSITIVITY:
+- PROFESSIONAL → legal, medical, financial, academic, enterprise
+- CREATIVE     → fiction, art, entertainment, gaming
+- PERSONAL     → health, relationships, self-improvement, astrology
+- GENERAL      → everything else
 
-CRITICAL CONVERSATIONAL BEHAVIOR:
-- NEVER format your question as a multiple-choice menu, numbered checklist, or structured bracket.
-- ALWAYS return the question as natural, flowing conversational prose.
-- Ask exactly ONE friendly, open-ended question tailored precisely to the current missing slot.
-- If the user's concept is clear and all 3 domain slots are satisfied in the already captured attributes, set status = "ready".
+═══════════════════════════════════════
+STEP 2 — DETERMINE FIRST QUESTION
+═══════════════════════════════════════
 
-ANTI-LOOP PROTECTION:
-- Read the already captured attributes. If a key or its semantic equivalent is populated, you are strictly forbidden from re-asking it. Choose a different missing attribute, or set status to "ready".
+Use the INPUT ARTIFACT field provided in the user task below.
+That field contains the exact noun to use in your question.
+
+If INPUT ARTIFACT is provided:
+  → Ask how users will provide it. Use that exact noun. Nothing else.
+
+If INPUT ARTIFACT is null:
+  → App is pure generation. Ask about the most domain-critical slot first.
+  → Never ask about input format for generation apps.
+  → Never use "intended audience" or "target audience" as slot 3.
+    It is too generic. Always prefer a domain-specific slot instead:
+    TTS/audio converter  → ask content_type (educational/story/news/corporate)
+    Image generator      → ask visual style or aspect ratio
+    Text generator       → ask tone or output format
+    Video generator      → ask scene style or platform target
+
+AXIS ordering priority:
+  UPLOAD + ANALYSIS → ask input format first (use INPUT ARTIFACT noun)
+  STRUCTURED        → ask for the most critical data field first
+  GENERATION        → ask about output style or constraints first
+
+
+═══════════════════════════════════════
+STEP 3 — USE RAG TO NAME THE SLOTS
+═══════════════════════════════════════
+
+The Marketplace Reference Guidelines (if provided) give you domain-specific slot names and examples.
+Use them to name variables precisely. Do NOT copy their literal content into questions.
+Ground every question 100% in THIS app's concept. Never blend concepts from different domains.
+
+ANTI-CONTAMINATION RULE: If the RAG context mentions "podcast episodes", "dating profiles", "crop diseases", 
+"coding interviews" — and the user's app is NOT about those things — ignore those terms completely.
+
+═══════════════════════════════════════
+CRITICAL BEHAVIORAL RULES
+═══════════════════════════════════════
+- Ask exactly ONE question at a time, as natural conversational prose. No menus, no numbered lists.
+- NEVER blend two domains into one question.
+- NEVER ask about a slot that is already answered in "Already captured attributes".
+- SEMANTIC ANSWER RECOGNITION: When checking if a slot is answered,
+  treat these as equivalent:
+  "tone" slot → answered by: formal, casual, friendly, professional,
+                conversational, technical, simple, format, clear
+  "output_format" slot → answered by: paragraph, bullets, summary,
+                         structured, short, long, format, brief
+  "content_type" slot → answered by: any domain word the user provides
+  If the user's answer is a style/format word, treat the tone/format
+  slot as ANSWERED. Do not re-ask it. Move to the next missing slot.
+- TYPO AND NEAR-MATCH HANDLING: If the user's answer is a near-match
+  or common typo of a valid answer, treat it as answered:
+  "format" when asked about tone → treat as "formal"
+  "casul" → "casual"
+  "profesional" → "professional"
+  "freindly" → "friendly"
+  
+  RULE: If the user's answer is within 1-2 characters of a valid
+  option AND the slot question was just asked → accept it as answered.
+  Never re-ask a slot because of a minor typo.
+- SINGLE WORD SHORT ANSWERS: If the user gives a single word answer
+  to any slot question, always treat it as answering that slot —
+  even if it's ambiguous. Store it and move on.
+  Never leave a slot as unanswered because the answer was too short.
+- You MUST define exactly 3 distinct slots in the "slots" array at all times. Never return fewer than 3 slots.
+- If all 3 slots are answered, set status = "ready".
+- BANNED generic slot 3 fallbacks — never use these as a third question
+  unless the user's app is explicitly about that topic:
+  × "Who is the intended audience?"
+  × "What is the target audience?"
+  × "Who will use this app?"
+  × "What is the purpose of the app?"
+  These are meaningless for slot 3. Always ask something operational:
+  content type, output format, language, length, speed, or domain topic.
 
 Return strict JSON only (no markdown, no other text):
 {
   "status": "needs_context|ready",
-  "question": "Clear natural flowing prose follow-up question if needs_context, else null",
-  "slot_key": "The snake_case key variable name for state mapping, else null",
+  "question": "Single natural prose question, or null if ready",
+  "slot_key": "snake_case key for this slot, or null",
   "slots": [
-    {
-      "key": "slot_key_name_1",
-      "question": "Default dynamic friendly question for slot 1"
-    },
-    {
-      "key": "slot_key_name_2",
-      "question": "Default dynamic friendly question for slot 2"
-    },
-    {
-      "key": "slot_key_name_3",
-      "question": "Default dynamic friendly question for slot 3"
-    }
+    {"key": "slot_key_1", "question": "question for slot 1"},
+    {"key": "slot_key_2", "question": "question for slot 2"},
+    {"key": "slot_key_3", "question": "question for slot 3"}
   ],
-  "corrected_app_type": "Retain the incoming specialized app type string (text|image|audio|video|vision)",
+  "corrected_app_type": "text|image|audio|video|vision",
   "domain_identified": "text|image|audio|video|vision|hybrid",
   "confidence_score": 0-100,
   "form": {
@@ -156,10 +245,10 @@ Return strict JSON only (no markdown, no other text):
   }
 }
 
-VARIABLE CONFIGURATION RULES (when status is "ready"):
-- Extract 3–6 variable structures. They must be user-facing and directly fuel the prompt template.
-- Translate names into clear title case (e.g. 'Quest Difficulty' instead of 'difficulty'). Never name variables 'input', 'text', 'data', or 'param'.
-- Match placeholders to types: Date -> 'DD/MM/YYYY', Time -> 'HH:MM AM/PM', Location -> 'City, Country'. For creative fields, provide realistic contextual entities."""
+VARIABLE CONFIGURATION RULES (when status = "ready"):
+- 3–6 variables, atomic (one fact per variable), user-facing, directly fuel the prompt template.
+- Title case names. Never use: input, text, data, param, details.
+- Realistic placeholders. Date → 'DD/MM/YYYY', Location → 'City, Country'."""
 
 
 def _is_rate_limit_error(error: Exception) -> bool:
@@ -243,6 +332,13 @@ def _prettify_variable_name(name: str, app_type: str) -> str:
 def is_personal_boilerplate(name: str, app_purpose: str) -> bool:
     n = name.lower()
     p = app_purpose.lower()
+    
+    # 🛡️ General profile/calculation domain exceptions
+    personal_input_domains = ("astrology", "horoscope", "birth chart", "zodiac", "compatibility", "numerology", "divination")
+    if any(kw in p for kw in personal_input_domains):
+        if any(term in n for term in ("birth date", "date of birth", "dob", "age", "birth time", "birth location")):
+            return False
+            
     boilerplate = [
         "user name", "username", "date of birth", "dob", "birth date", "age",
         "creation date", "current date", "today's date", "date of creation", "creationdate",
@@ -406,6 +502,125 @@ def build_dynamic_context_fallback(
     return type_defaults.get(safe_type) or type_defaults["text"]
 
 
+async def extract_domain_noun(app_purpose: str, llm) -> str | None:
+    """
+    Dynamically extract the primary input artifact noun from app_purpose using LLM.
+    This replaces all hardcoded domain noun lists permanently.
+    Works for ANY domain without ever needing code changes.
+    """
+    if not app_purpose:
+        return None
+
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "You extract the primary input artifact a user will provide or upload to an AI app. "
+                "If the app purpose is to generate, write, or create something new (e.g. workout plans, blog posts, essays) "
+                "from a general text description or prompt rather than analyzing an uploaded input document, "
+                "return null. The input artifact must be something the user provides or uploads to the app. "
+                "Return ONLY valid JSON with one key: input_artifact (string or null). "
+                "No explanation. No markdown."
+            ),
+        },
+        {
+            "role": "user",
+            "content": (
+                f'App purpose: "{app_purpose}"\n\n'
+                "What is the PRIMARY INPUT ARTIFACT the user uploads or provides to be analyzed/scored/processed? "
+                "Remember: if it is a pure generation app (e.g. creates workout plans, writes blog posts, generates code) "
+                "where the user only provides a topic prompt rather than an input document to analyze, return null.\n"
+                "Examples:\n"
+                '- "analyzes restaurant menu photos" → {"input_artifact": "menu"}\n'
+                '- "evaluates startup pitch decks" → {"input_artifact": "pitch deck"}\n'
+                '- "reads lab test reports" → {"input_artifact": "lab report"}\n'
+                '- "reviews Airbnb listings" → {"input_artifact": "listing"}\n'
+                '- "analyzes cricket scorecards" → {"input_artifact": "scorecard"}\n'
+                '- "generates blog posts about travel" → {"input_artifact": null}\n'
+                '- "creates workout plans" → {"input_artifact": null}\n'
+                '- "generates workout plans" → {"input_artifact": null}\n'
+                '- "writes blog posts" → {"input_artifact": null}\n\n'
+                "Return JSON only: {\"input_artifact\": \"noun or null\"}"
+            ),
+        },
+    ]
+
+    if llm.has_groq:
+        try:
+            result = await llm.groq_completion(
+                messages=messages,
+                model="llama-3.1-8b-instant",
+                response_format={"type": "json_object"},
+                max_tokens=30,
+                temperature=0.0,
+            )
+            content = result["choices"][0]["message"]["content"]
+            parsed = json.loads(content)
+            noun = parsed.get("input_artifact")
+            return str(noun).strip().lower() if noun and str(noun).strip().lower() != "null" else None
+        except Exception as e:
+            logger.warning(f"extract_domain_noun (Groq) failed: {e}. Trying OpenRouter fallback...")
+
+    if llm.has_openrouter:
+        try:
+            content = await llm.openrouter_completion(
+                messages=messages,
+                model="meta-llama/llama-3.3-70b-instruct",
+                max_tokens=30,
+                temperature=0.0,
+                response_format={"type": "json_object"},
+            )
+            parsed = json.loads(content)
+            noun = parsed.get("input_artifact")
+            return str(noun).strip().lower() if noun and str(noun).strip().lower() != "null" else None
+        except Exception as e:
+            logger.warning(f"extract_domain_noun (OpenRouter fallback) failed: {e}")
+
+    return None
+
+
+def clean_leaked_rag_terms(text: str, app_purpose: str, domain_noun: str | None = None) -> str:
+    """
+    Replace foreign domain nouns in LLM output with the user's actual domain noun.
+    domain_noun comes from extract_domain_noun() — no hardcoded lists needed.
+    """
+    if not text:
+        return text
+    if not domain_noun:
+        return text
+
+    # These are known RAG example nouns that frequently leak.
+    # This list only needs to contain nouns that EXIST IN YOUR CHROMADB EXAMPLES.
+    # It does NOT need to cover every possible user domain — that's handled by domain_noun.
+    KNOWN_RAG_ARTIFACT_NOUNS = [
+        "pitch deck", "startup deck", "investor deck",
+        "resume", "cv",
+        "invoice", "receipt",
+        "podcast", "podcast episode", "episode",
+        "dating profile",
+        "crop disease", "plant disease",
+        "linkedin profile",
+        "menu",
+        "screenshot",
+        "product photo",
+    ]
+
+    domain_lower = domain_noun.lower().strip()
+
+    for noun in KNOWN_RAG_ARTIFACT_NOUNS:
+        # Only replace if it's a foreign noun (not the user's own domain noun)
+        if noun.lower() == domain_lower:
+            continue
+        # Skip if the noun is actually part of the user's app purpose
+        if noun.lower() in app_purpose.lower():
+            continue
+        pattern = re.compile(r"\b" + re.escape(noun) + r"\b", re.I)
+        if pattern.search(text):
+            text = pattern.sub(domain_noun, text)
+
+    return text
+
+
 def _parse_dynamic_context_payload(
     raw_content: str, app_type: str, app_purpose: str, language_hint: str
 ) -> dict:
@@ -413,10 +628,20 @@ def _parse_dynamic_context_payload(
     try:
         cleaned = re.sub(r"```json|```", "", str(raw_content or "{}"), flags=re.I).strip()
         parsed = json.loads(cleaned)
+        
+        # Clean leaked RAG terms inside variables list
+        variables = parsed.get("variables") or []
+        if isinstance(variables, list):
+            for v in variables:
+                if isinstance(v, dict):
+                    for k in ["name", "label", "placeholder", "description", "test_value"]:
+                        if v.get(k):
+                            v[k] = clean_leaked_rag_terms(v[k], app_purpose)
+                            
         return {
             "options": _sanitize_string_list(parsed.get("options"), 4, 4, fallback["options"]),
             "variables": _sanitize_variable_objects(
-                parsed.get("variables"), 3, 8, fallback["variables"], app_type, app_purpose
+                variables, 3, 8, fallback["variables"], app_type, app_purpose
             ),
         }
     except Exception:
@@ -438,7 +663,7 @@ def _map_history_to_triage_messages(conversation_history: list) -> list[dict]:
 
 
 def _parse_triage_response(
-    raw_content: str, format_fallback: str, app_purpose: str, language_hint: str
+    raw_content: str, format_fallback: str, app_purpose: str, language_hint: str, domain_noun: str | None = None
 ) -> dict:
     fallback_type = format_fallback if format_fallback in ALLOWED_TRIAGE_APP_FORMATS else "text"
     safe_purpose = str(app_purpose or "").strip()
@@ -479,6 +704,9 @@ def _parse_triage_response(
 
         if parsed.get("status") == "needs_context":
             question = str(parsed.get("question") or "").strip()
+            # Clean leaked RAG terms in main question
+            question = clean_leaked_rag_terms(question, safe_purpose, domain_noun)
+            
             if not question or len(question) < 10:
                 fb_form = build_dynamic_context_fallback(fallback_type, safe_purpose, language_hint)
                 return ready_shape(domain, fallback_type, fb_form, slots, confidence)
@@ -487,6 +715,17 @@ def _parse_triage_response(
                 opts = [str(o or "").strip() for o in parsed["suggested_options"] if str(o or "").strip()]
                 suggested = opts[:6] if len(opts) >= 2 else None
             slot_key = str(parsed.get("slot_key") or "").strip().lower() or None
+            
+            # Clean leaked RAG terms in slots questions/keys
+            for s in slots:
+                if isinstance(s, dict):
+                    if s.get("question"):
+                        s["question"] = clean_leaked_rag_terms(s["question"], safe_purpose, domain_noun)
+                    if s.get("key"):
+                        s["key"] = clean_leaked_rag_terms(s["key"], safe_purpose, domain_noun).replace(" ", "_").lower()
+            if slot_key:
+                slot_key = clean_leaked_rag_terms(slot_key, safe_purpose, domain_noun).replace(" ", "_").lower()
+                
             return {
                 "status": "needs_context",
                 "domain": domain,
@@ -670,7 +909,24 @@ CRITICAL RULES:
                            desired_outcome, case_urgency
    - Interior design     → room_type, design_style, color_theme, budget_range
    - Marketing copy      → product_name, target_audience, tone, platform
+   - Astrology app       → birth_date, birth_time, birth_location, zodiac_sign,
+                           astrology_type, output_tone
+   - Audiobook app       → book_genre, narrator_gender, narration_pace,
+                           audio_format, target_listeners
+   - Text to audio / TTS converter → content_type (educational/news/story/corporate),
+                           voice_style, output_language, audio_speed, content_topic
+   - Podcast script generator → episode_topic, episode_length, host_style,
+                           target_audience, segment_structure
+   - Study material to audio → subject_area, difficulty_level, narration_pace,
+                           voice_gender, output_language
+   - News/article reader → content_source, voice_tone, playback_speed,
+                           output_language, summary_length
    Always infer from actual app purpose — never use these as defaults.
+
+CRITICAL RAG ISOLATION & NO-LEAK RULE:
+- The reference guidelines and examples (e.g., podcast episodes, resumes, pitch decks, dating profiles) are for structural style reference ONLY.
+- Do NOT copy their literal domain terms, variable names, or concepts.
+- Ground all variables 100% in the user's specific app concept. E.g., if the user wants an audiobook app, do NOT use "episode_length" or "podcast_genre" — use "narration_speed", "voice_style", etc.
 
 5. Generate exactly 4-7 variables. Quality over quantity.
 
@@ -700,7 +956,7 @@ Return ONLY valid JSON, no markdown, no explanation:
     history_block = ""
     if conversation_history:
         history_block = "\nConversation so far:\n" + "\n".join(
-            f"{m.get('role','user')}: {m.get('content','')}"
+            f"{_msg_role(m)}: {_msg_content(m)}"
             for m in (conversation_history or [])[-6:]
         )
 
@@ -774,62 +1030,171 @@ async def triage_dynamic_context(
     language_hint: str = "English",
     conversation_history: list | None = None,
     deep_answers: dict | None = None,
-    rag_context: str = "", # 🚀 ADDED: Dynamic grounding database parameter slot
+    rag_context: str = "",
 ) -> dict:
-    committed = None
-    if app_type and str(app_type).strip().lower() in ALLOWED_TRIAGE_APP_FORMATS:
-        committed = str(app_type).strip().lower()
-    format_fallback = committed or "text"
-    safe_purpose = str(app_purpose or "").strip() or "general assistant app"
-    safe_lang = _normalize_language_hint(language_hint)
-    history = conversation_history or []
-
-    clean_answers = {k: v for k, v in deep_answers.items() if not k.startswith("_")} if deep_answers else {}
-    answered_context = f"\nAlready captured attributes: {json.dumps(clean_answers)}" if clean_answers else ""
-    rag_metadata = f"\nMarketplace Reference Guidelines:\n{rag_context}" if rag_context else ""
-
-    user_task = (
-        f"Active App Concept: {safe_purpose}\n"
-        f"Format Type: {format_fallback}\n"
-        f"Language: {safe_lang}.{answered_context}{rag_metadata}\n\n"
-        "Evaluate the history. If the operational target is clear, mark ready. Otherwise issue ONE open-ended inquiry."
+    from services.clarification_planner import (
+        recover_app_purpose,
+        build_known_information,
+        plan_clarification,
+        log_clarification_trace,
+        clarification_is_complete,
     )
 
-    triage_messages = [
-        {"role": "system", "content": TRIAGE_INSTRUCTION},
-        *_map_history_to_triage_messages(history),
-        {"role": "user", "content": user_task},
+    fallback_type = app_type if app_type in ALLOWED_TRIAGE_APP_FORMATS else "text"
+    safe_purpose, recovered = recover_app_purpose(
+        {"appPurpose": app_purpose}, app_purpose, conversation_history
+    )
+    if recovered:
+        logger.info(f"[WORKFLOW] appPurpose recovered: {safe_purpose}")
+    safe_purpose = str(safe_purpose or "").strip() or "general assistant app"
+    safe_lang = _normalize_language_hint(language_hint)
+
+    known = build_known_information({"appPurpose": safe_purpose}, deep_answers, safe_purpose)
+
+    plan = await plan_clarification(
+        llm=llm,
+        app_purpose=safe_purpose,
+        app_type=fallback_type,
+        known_information=known,
+        conversation_history=conversation_history,
+        asked_keys=[],
+        asked_questions=[],
+        triage_rounds=0,
+    )
+
+    missing_items = plan.get("missing_information") or []
+    known_items = plan.get("known_information") or []
+    slots = [
+        {"key": m["key"], "question": m["question"]} for m in missing_items
+    ] + [
+        {"key": k["key"], "question": k.get("value", "")} for k in known_items
     ]
 
-    if llm.has_groq:
-        try:
-            result = await llm.groq_completion(
-                messages=triage_messages,
-                model="llama-3.3-70b-versatile",
-                response_format={"type": "json_object"},
-            )
-            content = result.get("choices", [{}])[0].get("message", {}).get("content", "{}")
-            return _parse_triage_response(content, format_fallback, safe_purpose, safe_lang)
-        except Exception as error:
-            if not _is_rate_limit_error(error):
-                logger.error(f"Groq triage error, falling back: {error}")
+    complete = clarification_is_complete(plan)
+    log_clarification_trace(
+        app_purpose=safe_purpose,
+        plan=plan,
+        clarification_complete=complete,
+    )
 
-    if llm.has_openrouter:
-        try:
-            raw = await llm.openrouter_completion(
-                messages=triage_messages,
-                model="meta-llama/llama-3.3-70b-instruct",
-                response_format={"type": "json_object"},
-            )
-            return _parse_triage_response(raw, format_fallback, safe_purpose, safe_lang)
-        except Exception as error:
-            logger.error(f"OpenRouter triage fallback failed: {error}")
+    if not complete and plan.get("selected_question"):
+        next_slot_key = plan["selected_key"]
+        next_question = plan["selected_question"]
+
+        domain_noun = await extract_domain_noun(safe_purpose, llm) if safe_purpose else None
+        next_question = clean_leaked_rag_terms(next_question, safe_purpose, domain_noun)
+        for s in slots:
+            if s.get("question"):
+                s["question"] = clean_leaked_rag_terms(s["question"], safe_purpose, domain_noun)
+            if s.get("key"):
+                s["key"] = clean_leaked_rag_terms(s["key"], safe_purpose, domain_noun).replace(" ", "_").lower()
+        next_slot_key = clean_leaked_rag_terms(next_slot_key, safe_purpose, domain_noun).replace(" ", "_").lower()
+
+        return {
+            "status": "needs_context",
+            "domain": "behavior_driven",
+            "confidence_score": 100.0,
+            "question": next_question,
+            "slot_key": next_slot_key,
+            "suggested_options": None,
+            "corrected_app_type": fallback_type,
+            "form": None,
+            "app_format": None,
+            "slots": slots,
+        }
+
+    form = await generate_dynamic_context(
+        llm=llm,
+        app_type=fallback_type,
+        app_purpose=safe_purpose,
+        language_hint=safe_lang,
+        rag_context=rag_context,
+        deep_answers=deep_answers,
+        conversation_history=conversation_history,
+    )
 
     return {
         "status": "ready",
-        "domain": None,
+        "domain": "behavior_driven",
+        "confidence_score": 100.0,
         "question": None,
-        "app_format": format_fallback,
-        "slots": [],
-        "form": build_dynamic_context_fallback(format_fallback, safe_purpose, safe_lang),
+        "app_format": fallback_type,
+        "slots": slots,
+        "form": form,
     }
+
+
+async def generate_dynamic_workflow(app_purpose: str, llm: LLMService) -> dict:
+    """
+    Legacy adapter — delegates to behavior-driven clarification planner.
+    Returns workflow-shaped dict for backward compatibility.
+    """
+    from services.clarification_planner import plan_clarification, build_known_information
+
+    plan = await plan_clarification(
+        llm=llm,
+        app_purpose=app_purpose,
+        known_information=build_known_information({"appPurpose": app_purpose}, {}),
+    )
+
+    missing = plan.get("missing_information") or []
+    known = plan.get("known_information") or []
+
+    required_fields = [m["key"] for m in missing] + [k["key"] for k in known]
+    field_questions = {m["key"]: m["question"] for m in missing}
+
+    if not required_fields and not plan.get("ready"):
+        return {
+            "behavior_goal": plan.get("behavior_goal", ""),
+            "required_fields": [],
+            "field_questions": {},
+        }
+
+    return {
+        "behavior_goal": plan.get("behavior_goal", ""),
+        "required_fields": required_fields,
+        "field_questions": field_questions,
+    }
+
+
+def _slot_is_captured(slot_key: str, captured_slots: dict) -> bool:
+    """Check if a slot has been answered, using semantic key matching."""
+    slot_key = slot_key.lower().strip()
+    
+    # Direct key match
+    if slot_key in captured_slots:
+        return True
+    
+    # Substring match on key names
+    for k in captured_slots:
+        if slot_key in k or k in slot_key:
+            return True
+    
+    # Semantic alias matching — common slot name variations
+    SEMANTIC_ALIASES = {
+        "tone": ["tone", "writing_tone", "explanation_tone", "voice_tone",
+                 "style", "writing_style", "output_tone", "format",
+                 "formal", "casual", "friendly", "professional"],
+        "voice_tone": ["tone", "voice", "style", "format", "writing_style"],
+        "writing_tone": ["tone", "style", "format", "writing_style"],
+        "output_format": ["format", "output_format", "output_style",
+                           "structure", "layout"],
+        "content_type": ["type", "content_type", "category", "domain",
+                         "subject", "topic_type"],
+        "input_format": ["format", "input", "how", "provide", "delivery"],
+        "language": ["language", "lang", "locale"],
+        "length": ["length", "word_count", "size", "long", "short"],
+    }
+    
+    # Check if any alias of this slot_key matches a captured key
+    for canonical, aliases in SEMANTIC_ALIASES.items():
+        if slot_key == canonical or slot_key in aliases:
+            for alias in aliases:
+                if alias in captured_slots:
+                    return True
+                for k in captured_slots:
+                    if alias in k or k in alias:
+                        return True
+    
+    return False
+

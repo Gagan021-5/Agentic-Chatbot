@@ -12,6 +12,7 @@ from typing import Any
 from loguru import logger
 
 from services.llm import LLMService
+from services.extraction import _slot_is_captured
 
 ORCHESTRATOR_TOOL = {
     "type": "function",
@@ -34,6 +35,9 @@ ORCHESTRATOR_TOOL = {
                         "EDIT_APP",
                         "PIVOT_APP",
                         "HANDLE_OFF_TOPIC",
+                        "PUBLISH_APP",
+                        "SAVE_DRAFT",
+                        "REVIEW_SEO",
                     ],
                 },
                 "app_type": {
@@ -58,14 +62,106 @@ ORCHESTRATOR_TOOL = {
                         "DOMAIN_SHIFT = user wants a completely different kind of app"
                     )
                 },
+                "ingestion_vector": {
+                    "type": "string",
+                    "enum": ["url", "screenshots", "source_code", "figma_files", "plain_text", "missing"],
+                    "description": "How the application receives its main input data (URL, screenshots, figma, source code, plain_text, or missing)."
+                },
+                "ingestion_vector_status": {
+                    "type": "string",
+                    "enum": ["explicit", "inferred", "missing"],
+                    "description": "Whether the ingestion vector was explicitly declared by the user, inferred from context, or is missing/unspecified."
+                },
+                "app_type_status": {
+                    "type": "string",
+                    "enum": ["explicit", "inferred", "missing"],
+                    "description": "Whether the app modality was explicitly stated by the user, inferred, or missing."
+                },
+                "budget_tier": {
+                    "type": "string",
+                    "enum": ["free", "low", "medium", "premium", "ultra", "missing"],
+                    "description": "Selected or inferred budget tier limit preference."
+                },
+                "budget_status": {
+                    "type": "string",
+                    "enum": ["explicit", "inferred", "missing"],
+                    "description": "Whether the budget tier was explicitly declared by the user, inferred, or is missing."
+                },
+                "ui_event": {
+                    "type": "string",
+                    "enum": ["multi_select_form", "seo_publish", "seo_draft", "confirm_seo", "model_select", "none"],
+                    "description": "Classify the UI action event type if this message represents a UI action prefix trigger."
+                },
+                "ui_payload": {
+                    "type": "string",
+                    "description": "The JSON payload or metadata associated with the UI event."
+                }
             },
-            "required": ["recommended_action", "app_type", "confidence", "reasoning", "edit_scope"],
+            "required": [
+                "recommended_action", "app_type", "confidence", "reasoning", 
+                "edit_scope", "ingestion_vector", "ingestion_vector_status",
+                "app_type_status", "budget_tier", "budget_status", "ui_event", "ui_payload"
+            ],
         },
     },
 }
 
 ORCHESTRATOR_SYSTEM_PROMPT = """You are the Master Intent Classifier and Orchestrator Node for RentPrompts — a platform where users CREATE and PUBLISH AI-powered apps.
 Your job is to read the latest user message, evaluate the multi-turn session state memory, and select the next deterministic action.
+
+═══════════════════════════════════════
+ARCHITECTURAL DISCOVERY DIRECTIVE
+═══════════════════════════════════════
+You are an architectural discovery orchestrator. Descriptive adjectives like 'visual' or 'SEO' define the target application goals, NOT the ingestion boundary. You must treat the input delivery transmission vector (how data gets into the application) as an unresolved missing parameter until the user explicitly dictates it. Do not recommend PROCESS_FORM or SHOW_MODEL_CARDS while ingestion vectors are ambiguous.
+
+═══════════════════════════════════════
+CONFIRMATION METRICS DIRECTIVE
+═══════════════════════════════════════
+You must classify and track the confirmation status of critical application fields:
+1. APP TYPE STATUS (app_type_status):
+   - 'explicit': The user has explicitly stated their preferred modality (e.g. "I want a vision app", "it is a text app", "make it text app instead").
+   - 'inferred': Modality has been inferred from the task context (e.g. "reviews menus" implies vision).
+     - "evaluates pitch decks" → app_type = "vision", ingestion_vector = "screenshots" (user uploads the deck)
+     - "scores resumes" → app_type = "vision", ingestion_vector = "screenshots"
+     - "reviews LinkedIn profiles" → app_type = "vision", ingestion_vector = "screenshots"
+     - "reads invoices / receipts" → app_type = "vision", ingestion_vector = "screenshots"
+     RULE: If the app ANALYZES or EVALUATES an UPLOADED file/document/profile → vision + ingestion_vector = "screenshots"
+   - 'missing': No modality has been established yet.
+
+2. INGESTION VECTOR STATUS (ingestion_vector_status):
+   - 'explicit': The user has explicitly stated the data delivery method (e.g. "uploaded photos", "PDF menus", "Github URL").
+   - 'inferred': The delivery method is guessed but not verified.
+   - 'missing': No ingestion delivery method has been specified.
+
+3. BUDGET STATUS (budget_status):
+   - 'explicit': The user has selected a specific budget preference/tier (e.g. "Free models only", "Low budget", or chosen from options).
+   - 'inferred': Budget is guessed but not verified.
+   - 'missing': Budget preference has not been specified.
+
+═══════════════════════════════════════
+CRITICAL ANTI-INFERENCE RULE
+═══════════════════════════════════════
+- Do NOT mark app_type_status as 'explicit' based on descriptive adjectives like 'visual', 'design', 'analytics', 'SEO', 'creative', or 'professional'. These describe the application's goal domain, NOT the AI modality.
+- 'explicit' requires the user to DIRECTLY and UNAMBIGUOUSLY name the modality: 'it is a vision app', 'use text', 'I want image generation', 'make it an audio app'.
+- Descriptive goals like 'analyze visual design appeal' should set app_type to 'vision' with app_type_status 'inferred', NOT 'explicit'.
+- Similarly, do NOT mark ingestion_vector_status as 'explicit' unless the user has directly stated the delivery method (e.g. 'upload screenshots', 'paste the URL', 'from my GitHub repo').
+- If the user describes WHAT they want analyzed but not HOW data arrives, ingestion_vector_status must remain 'missing'.
+- EXCEPTION: For pure text generation apps (blog writers, rewriters, content generators, workout planners, meal planners, email writers) where the app GENERATES output rather than ANALYZES uploaded content:
+  Set ingestion_vector = "plain_text" and ingestion_vector_status = "explicit" automatically. These apps do not require file upload discovery.
+- If user says "text", "it is of text", "paste", "plain text", "type it", "I'll type" in response to an input format question:
+  ingestion_vector = "plain_text", ingestion_vector_status = "explicit".
+  NEVER ask about input format again after this.
+
+═══════════════════════════════════════
+UI EVENT PAYLOAD PARSING
+═══════════════════════════════════════
+You must parse structured UI events and payloads when they are provided as user messages:
+- If the message starts with 'multi_select_form::', select recommended_action = 'PROCESS_FORM', ui_event = 'multi_select_form', and set ui_payload to the trailing JSON string.
+- If the message starts with 'SEO_PUBLISH::', select recommended_action = 'PUBLISH_APP', ui_event = 'seo_publish', and set ui_payload to the trailing JSON string.
+- If the message starts with 'SEO_DRAFT::', select recommended_action = 'SAVE_DRAFT', ui_event = 'seo_draft', and set ui_payload to the trailing JSON string.
+- If the message starts with 'confirm seo::' or matches 'approve app' / 'approve', select recommended_action = 'REVIEW_SEO', ui_event = 'confirm_seo', and set ui_payload to the user message.
+- If the message starts with 'select ' or is 'selected model: <model_id>', select recommended_action = 'GENERATE_PREVIEW', ui_event = 'model_select', and set ui_payload to the user message.
+- If the message starts with 'edit prompt::' or matches 'edit app', select recommended_action = 'EDIT_APP', ui_event = 'none', and set ui_payload to the user message.
 
 ═══════════════════════════════════════
 PIPELINE STAGE LOGIC
@@ -116,7 +212,23 @@ PRD COMPLIANCE & STATE RULES
 
 1. CRITICAL STATE PRESERVATION: Look at the existing session state format ('appType' or 'app_type'). If it is locked as "audio", "video", "image", or "vision", do NOT change it to "text" or "None" unless the recommended_action is explicitly "PIVOT_APP".
 2. If the user is answering a clarification follow-up question, you MUST continue returning "GATHER_REQUIREMENTS".
-3. Do not jump to "SHOW_MODEL_CARDS" or "GENERATE_PREVIEW" prematurely unless the core application domain is well-scoped with at least 3 distinct metadata attributes captured in deepAnswers or state parameters (such as primary subject, setting, style, tone, length, theme, audience, etc.).
+3. Do not jump to "SHOW_MODEL_CARDS" or "GENERATE_PREVIEW" prematurely unless the core application domain is well-scoped with at least 3 distinct metadata attributes (for image, video, vision apps) or at least 1 distinct metadata attribute (for text, audio apps) captured in deepAnswers or state parameters (such as primary subject, setting, style, tone, length, theme, audience, etc.).
+
+
+═══════════════════════════════════════
+READINESS HEURISTIC — WHEN TO STOP GATHERING
+═══════════════════════════════════════
+Transition to SHOW_MODEL_CARDS when ALL of the following are true:
+1. app_type_status = "explicit" (user confirmed or stated the modality)
+2. ingestion_vector_status = "explicit" OR app type is text/audio with no file upload
+3. budget_status = "explicit" (user chose from budget chips)
+4. session.triageRounds >= 2 AND at least one domain-specific slot is captured
+   in deepAnswers (anything other than budget and ingestion_vector)
+
+Do NOT keep gathering if you are just waiting for "more detail" on a purpose 
+that is already actionable. "I want a vintage logo generator" is enough. 
+"I want an app that reviews restaurant menus from photos" is enough.
+If the app purpose is a complete sentence with a subject and a verb, it is enough.
 
 Return ONLY the function call orchestrate_pipeline. Never respond with plain text."""
 
@@ -142,6 +254,60 @@ def enforce_prd_rules(decision: dict, session: dict) -> dict:
     if is_answering_clarification:
         action = "GATHER_REQUIREMENTS"
         decision["recommended_action"] = action
+        if current_app_type:
+            decision["app_type"] = current_app_type
+            decision["app_type_status"] = "explicit"
+
+    # Rule 4: Preview stage state preservation
+    # If we are at the app preview stage (step == 2) and a model is selected,
+    # any attempt to go back to GATHER_REQUIREMENTS should be redirected to EDIT_APP
+    # unless it's a major pivot.
+    if session.get("step") == 2 and session.get("modelId") and action == "GATHER_REQUIREMENTS":
+        action = "EDIT_APP"
+        decision["recommended_action"] = action
+        decision["edit_scope"] = "PATCH_PROMPT"
+
+    # ─── 🛡️ ARCHITECTURAL DISCOVERY OVERRIDE ───
+    v_meta = session.get("verificationMetadata") or {}
+
+    # Check session-persisted ingestion vector FIRST before reading fresh decision
+    # This prevents re-asking after user already answered in a previous turn
+    persisted_ing_vec = session.get("ingestionVector")
+    persisted_ing_status = v_meta.get("ingestion_vector") or "missing"
+
+    # If session already has an explicit ingestion vector, trust it — never re-ask
+    if persisted_ing_vec and persisted_ing_status == "explicit":
+        ing_status = "explicit"
+    else:
+        ing_status = (
+            decision.get("ingestion_vector_status")
+            or persisted_ing_status
+            or "missing"
+        )
+
+    # For pure text generation apps (blog writers, rewriters, planners etc.)
+    # ingestion_vector is not required — these apps have no file upload
+    app_type_for_check = (
+        decision.get("app_type")
+        or session.get("appType")
+        or "text"
+    )
+    extraction = session.get("extraction") or {}
+    wants_image_input = bool(extraction.get("wantsImageInput"))
+    PURE_GENERATION_TYPES = {"text", "audio"}
+    if app_type_for_check in PURE_GENERATION_TYPES and not wants_image_input:
+        decision["ingestion_vector"] = "plain_text"
+        decision["ingestion_vector_status"] = "explicit"
+        # Update v_meta too
+        v_meta["ingestion_vector"] = "not_required"
+        ing_status = "not_required"
+
+    budget_status = decision.get("budget_status") or v_meta.get("budget") or "missing"
+
+    if ing_status in ("missing", "inferred") or budget_status in ("missing", "inferred"):
+        if action in ("PROCESS_FORM", "SHOW_MODEL_CARDS", "GENERATE_PREVIEW"):
+            action = "GATHER_REQUIREMENTS"
+            decision["recommended_action"] = action
 
     # Rule 3: Premature progression check
     captured_attributes = set()
@@ -163,20 +329,30 @@ def enforce_prd_rules(decision: dict, session: dict) -> dict:
     current_type = (session.get("appType") or "text").lower()
     min_required = 3 if current_type in ("image", "video", "vision") else 1
     
-    if len(captured_attributes) < min_required and action in ("SHOW_MODEL_CARDS", "GENERATE_PREVIEW"):
-        action = "GATHER_REQUIREMENTS"
-        decision["recommended_action"] = action
+    is_confirmed = bool(session.get("formConfirmed") or session.get("form_confirmed"))
+    if not is_confirmed:
+        dynamic_slots = session.get("dynamicSlots") or []
+        deep_answers = session.get("deepAnswers") or {}
         
-    # ─── 🛡️ FIXED PROGRESSION RULE: ENFORCE COMPLETE DYNAMIC TRIAGE ───
-    dynamic_slots = session.get("dynamicSlots") or []
-    deep_answers = session.get("deepAnswers") or {}
-    
-    # If the triage node has defined dynamic requirement slots for a domain,
-    # we MUST force the user to answer them before allowing progression to model selection or previews.
-    if dynamic_slots and len(deep_answers) < len(dynamic_slots):
-        if action in ("SHOW_MODEL_CARDS", "GENERATE_PREVIEW"):
-            action = "GATHER_REQUIREMENTS"
-            decision["recommended_action"] = action
+        # If the triage node has defined dynamic requirement slots for a domain,
+        # we MUST force the user to answer them before allowing progression to model selection or previews.
+        if dynamic_slots:
+            # Build normalized key-value mapping of answers
+            captured_answers = {str(k).lower().strip(): str(v).strip() for k, v in deep_answers.items() if v and str(v).strip()}
+            missing_any = False
+            for slot_obj in dynamic_slots:
+                slot_key = str(slot_obj.get("key") or "").lower().strip()
+                if not _slot_is_captured(slot_key, captured_answers):
+                    missing_any = True
+                    break
+            if missing_any:
+                if action in ("SHOW_MODEL_CARDS", "GENERATE_PREVIEW"):
+                    action = "GATHER_REQUIREMENTS"
+                    decision["recommended_action"] = action
+        else:
+            if len(captured_attributes) < min_required and action in ("SHOW_MODEL_CARDS", "GENERATE_PREVIEW"):
+                action = "GATHER_REQUIREMENTS"
+                decision["recommended_action"] = action
         
     # Normalize confidence to uppercase
     conf = str(decision.get("confidence") or "MEDIUM").upper()
@@ -221,103 +397,128 @@ def build_session_snapshot(session: dict | None) -> dict:
     }
 
 
+def parse_ui_event_payload_to_schema(text: str, session: dict | None) -> dict | None:
+    t = str(text or "").strip()
+    lower = t.lower()
+    s = session or {}
+    app_type = s.get("appType") or "text"
+
+    if t.lower().startswith("multi_select_form::"):
+        return {
+            "recommended_action": "PROCESS_FORM",
+            "app_type": app_type,
+            "confidence": "HIGH",
+            "reasoning": "Form submitted.",
+            "edit_scope": "PATCH_PROMPT",
+            "ingestion_vector": s.get("ingestionVector") or "missing",
+            "ingestion_vector_status": s.get("verificationMetadata", {}).get("ingestion_vector") or "missing",
+            "app_type_status": s.get("verificationMetadata", {}).get("app_type") or "inferred",
+            "budget_tier": s.get("deepAnswers", {}).get("budgetPreference") or "missing",
+            "budget_status": s.get("verificationMetadata", {}).get("budget") or "missing",
+            "ui_event": "multi_select_form",
+            "ui_payload": t[len("multi_select_form::"):],
+        }
+
+    if t.startswith("SEO_PUBLISH::"):
+        return {
+            "recommended_action": "PUBLISH_APP",
+            "app_type": app_type,
+            "confidence": "HIGH",
+            "reasoning": "Publish app event.",
+            "edit_scope": "PATCH_PROMPT",
+            "ingestion_vector": s.get("ingestionVector") or "missing",
+            "ingestion_vector_status": s.get("verificationMetadata", {}).get("ingestion_vector") or "missing",
+            "app_type_status": s.get("verificationMetadata", {}).get("app_type") or "inferred",
+            "budget_tier": s.get("deepAnswers", {}).get("budgetPreference") or "missing",
+            "budget_status": s.get("verificationMetadata", {}).get("budget") or "missing",
+            "ui_event": "seo_publish",
+            "ui_payload": t[len("SEO_PUBLISH::"):],
+        }
+
+    if t.startswith("SEO_DRAFT::"):
+        return {
+            "recommended_action": "SAVE_DRAFT",
+            "app_type": app_type,
+            "confidence": "HIGH",
+            "reasoning": "Save draft event.",
+            "edit_scope": "PATCH_PROMPT",
+            "ingestion_vector": s.get("ingestionVector") or "missing",
+            "ingestion_vector_status": s.get("verificationMetadata", {}).get("ingestion_vector") or "missing",
+            "app_type_status": s.get("verificationMetadata", {}).get("app_type") or "inferred",
+            "budget_tier": s.get("deepAnswers", {}).get("budgetPreference") or "missing",
+            "budget_status": s.get("verificationMetadata", {}).get("budget") or "missing",
+            "ui_event": "seo_draft",
+            "ui_payload": t[len("SEO_DRAFT::"):],
+        }
+
+    if t.startswith("confirm seo::") or lower in ("approve app", "approve"):
+        return {
+            "recommended_action": "REVIEW_SEO",
+            "app_type": app_type,
+            "confidence": "HIGH",
+            "reasoning": "Review SEO or Approve App event.",
+            "edit_scope": "PATCH_PROMPT",
+            "ingestion_vector": s.get("ingestionVector") or "missing",
+            "ingestion_vector_status": s.get("verificationMetadata", {}).get("ingestion_vector") or "missing",
+            "app_type_status": s.get("verificationMetadata", {}).get("app_type") or "inferred",
+            "budget_tier": s.get("deepAnswers", {}).get("budgetPreference") or "missing",
+            "budget_status": s.get("verificationMetadata", {}).get("budget") or "missing",
+            "ui_event": "confirm_seo",
+            "ui_payload": t,
+        }
+
+    if t.lower().startswith("select ") or t.lower().startswith("selected model") or re.match(r"^selected\s+model", lower):
+        return {
+            "recommended_action": "GENERATE_PREVIEW",
+            "app_type": app_type,
+            "confidence": "HIGH",
+            "reasoning": "Model selection event.",
+            "edit_scope": "PATCH_PROMPT",
+            "ingestion_vector": s.get("ingestionVector") or "missing",
+            "ingestion_vector_status": s.get("verificationMetadata", {}).get("ingestion_vector") or "missing",
+            "app_type_status": s.get("verificationMetadata", {}).get("app_type") or "inferred",
+            "budget_tier": s.get("deepAnswers", {}).get("budgetPreference") or "missing",
+            "budget_status": s.get("verificationMetadata", {}).get("budget") or "missing",
+            "ui_event": "model_select",
+            "ui_payload": t,
+        }
+
+    # Plain 'Edit App' button or message should directly map to EDIT_APP
+    if lower in ("edit app", "edit"):
+        v_meta = s.get("verificationMetadata") or {}
+        return {
+            "recommended_action": "EDIT_APP",
+            "app_type": app_type,
+            "confidence": "HIGH",
+            "reasoning": "User requested to edit the app (UI button).",
+            "edit_scope": "PATCH_PROMPT",
+            "ingestion_vector": s.get("ingestionVector") or "missing",
+            "ingestion_vector_status": v_meta.get("ingestion_vector") or "missing",
+            "app_type_status": v_meta.get("app_type") or "inferred",
+            "ui_event": "none",
+            "ui_payload": t,
+        }
+
+    return None
+
+
 def try_fast_path(text: str, session: dict | None) -> dict | None:
     t = str(text or "").strip()
     lower = t.lower()
     s = session or {}
     app_type = s.get("appType") or "text"
 
-    # Explicit modality correction and negation handling (e.g. "it is a text app", "i want a text app", "not an image app")
-    modality_pattern = r"\b(?:it is|i want|use|change to|make it|it\'s|want a|need a|not an?|instead of)\s+a?n?\s*(text|image|audio|video|vision)\s*(?:app|tool|generator|model|models)?\b"
-    modality_match = re.search(modality_pattern, lower)
-    if modality_match:
-        matched_type = modality_match.group(1)
-        
-        # Handle negation / rejection phrases (e.g., "not an image", "instead of vision")
-        negation_match = re.search(r"\b(?:not an?|instead of|stop making)\s+a?n?\s*" + re.escape(matched_type), lower)
-        if negation_match:
-            # If the user rejected this matched_type, try to find another modality in the string they are shifting toward
-            other_types = [t_key for t_key in ("text", "image", "audio", "video", "vision") if t_key != matched_type]
-            found_other = None
-            for ot in other_types:
-                if ot in lower:
-                    found_other = ot
-                    break
-            if found_other:
-                matched_type = found_other
-            else:
-                matched_type = "text" if matched_type == "image" else "image"
-                
-        action = "SHOW_MODEL_CARDS" if s.get("formConfirmed") else "GATHER_REQUIREMENTS"
-        return {
-            "recommended_action": action,
-            "app_type": matched_type,
-            "confidence": "HIGH",
-            "reasoning": f"Explicit user correction of app type to {matched_type}.",
-            "_source": "fast_path",
-        }
-
-    if (
-        t.startswith("multi_select_form::")
-        or t.startswith("SEO_PUBLISH::")
-        or t.startswith("SEO_DRAFT::")
-        or t.startswith("SEO_EDIT::")
-        or t.startswith("confirm seo::")
-    ):
-        return {
-            "recommended_action": "GENERATE_PREVIEW",
-            "app_type": app_type,
-            "confidence": "HIGH",
-            "reasoning": "UI transition fast-path triggered.",
-            "_source": "fast_path",
-        }
-
     if t.lower().startswith("edit prompt::"):
+        v_meta = s.get("verificationMetadata") or {}
         return {
             "recommended_action": "EDIT_APP",
             "app_type": app_type,
             "confidence": "HIGH",
             "reasoning": "User prompt edit instruction fast-path.",
             "_source": "fast_path",
-        }
-
-    # ─── 🛡️ FAST-PATH MATCH PAYLOAD CONTRACTS ───
-    if lower in ("approve app", "approve") or re.match(r"^selected\s+model", lower):
-        return {
-            "recommended_action": "GENERATE_PREVIEW",
-            "app_type": app_type,
-            "confidence": "HIGH",
-            "reasoning": "User approval or model confirmation of app configuration.",
-            "_source": "fast_path",
-        }
-
-    if lower in ("edit app", "edit"):
-        return {
-            "recommended_action": "EDIT_APP",
-            "app_type": app_type,
-            "confidence": "HIGH",
-            "reasoning": "User requested edit of application config.",
-            "_source": "fast_path",
-        }
-
-    if lower in ("publish to marketplace", "save draft"):
-        return {
-            "recommended_action": "GENERATE_PREVIEW",
-            "app_type": app_type,
-            "confidence": "HIGH",
-            "reasoning": "Publish/Save UI action triggered.",
-            "_source": "fast_path",
-        }
-
-    if re.match(r"^select\s+\S", t, re.I) and lower not in (
-        "select lean", "select recommended", "select full"
-    ):
-        return {
-            "recommended_action": "GENERATE_PREVIEW",
-            "app_type": app_type,
-            "confidence": "HIGH",
-            "reasoning": "Model selection fast-path.",
-            "_source": "fast_path",
+            "app_type_status": v_meta.get("app_type") or "explicit",
+            "ingestion_vector": s.get("ingestionVector") or "missing",
+            "ingestion_vector_status": v_meta.get("ingestion_vector") or "missing",
         }
 
     budget_map = {
@@ -327,106 +528,36 @@ def try_fast_path(text: str, session: dict | None) -> dict | None:
         "premium (> 20 coins)": "premium",
     }
     if lower in budget_map:
+        v_meta = s.get("verificationMetadata") or {}
         return {
             "recommended_action": "SHOW_MODEL_CARDS" if s.get("formConfirmed") else "GATHER_REQUIREMENTS",
             "app_type": app_type,
             "confidence": "HIGH",
             "reasoning": "Budget selection chip selection.",
             "_source": "fast_path",
-        }
-
-    chip_types = {
-        "text": "text", "image": "image", "audio": "audio", "video": "video", "vision": "vision",
-        "text app": "text", "image app": "image", "audio app": "audio", "video app": "video", "vision app": "vision",
-        "generate images or photos": "image", "image generator": "image",
-        "create videos or animations": "video", "video creator": "video",
-        "write text": "text", "writing tool": "text",
-        "generate voice or music": "audio", "audio generator": "audio",
-        "analyze or understand images": "vision", "image analyzer": "vision",
-    }
-    if lower in chip_types:
-        return {
-            "recommended_action": "SHOW_MODEL_CARDS" if s.get("formConfirmed") else "GATHER_REQUIREMENTS",
-            "app_type": chip_types[lower],
-            "confidence": "HIGH",
-            "reasoning": "App type chip selected by user.",
-            "_source": "fast_path",
+            "app_type_status": v_meta.get("app_type") or "inferred",
+            "ingestion_vector": s.get("ingestionVector") or "missing",
+            "ingestion_vector_status": v_meta.get("ingestion_vector") or "missing",
+            "budget_tier": budget_map[lower],
+            "budget_status": "explicit",
         }
 
     return None
 
 
 def build_fallback_decision(message: str, session: dict | None) -> dict:
-    msg = str(message or "").strip().lower()
-    snapshot = build_session_snapshot(session)
     s = session or {}
-
-    recommended_action = "GATHER_REQUIREMENTS"
-    app_type = snapshot.get("currentAppType") or "text"
-    is_major_pivot = False
-
-    if re.match(r"^(h+e+l+[lo]+|h+[iy]+|hey+|hola|greetings?|yo|sup|namaste)[\s!?.]*$", msg, re.I):
-        recommended_action = "HANDLE_OFF_TOPIC"
-    elif re.match(r"^(help)[\s!.]*$", msg, re.I):
-        recommended_action = "HANDLE_OFF_TOPIC"
-    elif re.search(r"\b(jailbreak|nsfw|nude|hack|exploit|bomb|weapon|illegal)\b", msg, re.I):
-        recommended_action = "HANDLE_OFF_TOPIC"
-    elif re.search(r"\b(free|low|medium|premium)\b", msg, re.I) and re.search(
-        r"\b(coin|budget|model)\b", msg, re.I
-    ):
-        recommended_action = "SHOW_MODEL_CARDS" if snapshot["formConfirmed"] else "GATHER_REQUIREMENTS"
-    elif re.search(r"\b(approve|approved|looks good|proceed|confirm|yes proceed)\b", msg, re.I):
-        recommended_action = "GENERATE_PREVIEW"
-    elif re.search(r"\b(publish|save draft|go live)\b", msg, re.I):
-        recommended_action = "GENERATE_PREVIEW"
-    elif re.search(r"\b(change|switch|different)\b.{0,20}\b(model|ai|engine)\b", msg, re.I):
-        recommended_action = "SHOW_MODEL_CARDS"
-    elif (
-        re.search(r"\b(i want|build|create|make)\b.{2,50}\b(app|tool|generator)\b", msg, re.I)
-        and snapshot["hasPurpose"]
-    ):
-        recommended_action = "PIVOT_APP"
-        is_major_pivot = True
-    elif re.search(r"\b(change|edit|tweak|update|modify|make it|add|remove)\b", msg, re.I) and snapshot["hasPurpose"]:
-        recommended_action = "EDIT_APP"
-    elif snapshot["formConfirmed"] and snapshot["budgetSet"] and not snapshot["modelSelected"]:
-        recommended_action = "SHOW_MODEL_CARDS"
-    elif snapshot["triageComplete"] and not snapshot["formConfirmed"]:
-        recommended_action = "PROCESS_FORM"
-
-    # Avoid substring leaks by using strict word boundaries if length is tiny
-    type_signals = {
-        "image": re.compile(r"\b(image|images|photo|photos|picture|logo|poster|posters|card|avatar|portrait|banner|meme|flyer|art)\b", re.I),
-        "audio": re.compile(r"\b(audio|voice|podcast|tts|speech|narration|music|sound)\b", re.I),
-        "video": re.compile(r"\b(video|animation|animate|reel|cinematic|clip)\b", re.I),
-        "vision": re.compile(r"\b(detect|analyze image|scan|ocr|read from image)\b", re.I),
-        "text": re.compile(r"\b(text|blog|legal|recipe|email|story|script|plan|write|article|debate)\b", re.I),
-    }
-    for t, pattern in type_signals.items():
-        if pattern.search(msg):
-            # Anti-contamination: Double ensure it's not matching 'artificial'
-            if t == "image" and "artificial" in msg and not re.search(r"\bart\b", msg):
-                continue
-            app_type = t
-            break
-
-    edit_scope = "PATCH_PROMPT"
-    if recommended_action == "EDIT_APP":
-        if any(w in msg for w in ["music app", "song", "image generation", "instead", "actually"]):
-            edit_scope = "DOMAIN_SHIFT"
-        elif any(w in msg for w in ["name be", "location to", "change location", "change name", "subject to", "character to"]):
-            edit_scope = "PATCH_VALUE"
-
-    logger.info(f"[Orchestrator:Fallback] Action: {recommended_action} | Confidence: LOW")
-
     decision = {
-        "recommended_action": recommended_action,
-        "app_type": app_type,
+        "recommended_action": "GATHER_REQUIREMENTS",
+        "app_type": s.get("appType") or "text",
         "confidence": "LOW",
-        "reasoning": f"Regex fallback matched action {recommended_action} and app type {app_type}.",
-        "extracted_variables": {},
-        "is_major_pivot": is_major_pivot,
-        "edit_scope": edit_scope,
+        "reasoning": "LLM unavailable, defaulting to requirement gathering.",
+        "ingestion_vector": s.get("ingestionVector") or "missing",
+        "ingestion_vector_status": "missing",
+        "app_type_status": "inferred",
+        "budget_tier": "missing",
+        "budget_status": "missing",
+        "edit_scope": "PATCH_PROMPT",
         "_source": "fallback_regex",
     }
     return enforce_prd_rules(decision, s)
@@ -434,6 +565,11 @@ def build_fallback_decision(message: str, session: dict | None) -> dict:
 
 async def get_agentic_decision(llm: LLMService, message: str, session: dict) -> dict:
     text = str(message or "").strip()
+
+    ui_parsed = parse_ui_event_payload_to_schema(text, session)
+    if ui_parsed:
+        logger.info(f"[Orchestrator] UI Event parsed: {ui_parsed['recommended_action']}")
+        return enforce_prd_rules(ui_parsed, session)
 
     fast = try_fast_path(text, session)
     if fast:
@@ -483,6 +619,9 @@ async def get_agentic_decision(llm: LLMService, message: str, session: dict) -> 
             confidence = parsed.get("confidence") or "MEDIUM"
             reasoning = parsed.get("reasoning") or ""
             edit_scope = parsed.get("edit_scope") or "PATCH_PROMPT"
+            ingestion_vector = parsed.get("ingestion_vector") or "missing"
+            ingestion_vector_status = parsed.get("ingestion_vector_status") or "missing"
+            app_type_status = parsed.get("app_type_status") or ("explicit" if confidence == "HIGH" else "inferred")
 
             decision = {
                 "recommended_action": action,
@@ -490,6 +629,13 @@ async def get_agentic_decision(llm: LLMService, message: str, session: dict) -> 
                 "confidence": confidence,
                 "reasoning": reasoning,
                 "edit_scope": edit_scope,
+                "ingestion_vector": ingestion_vector,
+                "ingestion_vector_status": ingestion_vector_status,
+                "app_type_status": app_type_status,
+                "budget_tier": parsed.get("budget_tier") or "missing",
+                "budget_status": parsed.get("budget_status") or "missing",
+                "ui_event": parsed.get("ui_event") or "none",
+                "ui_payload": parsed.get("ui_payload") or "",
                 "extracted_variables": {},
                 "is_major_pivot": action == "PIVOT_APP",
                 "_source": "llm",
@@ -518,14 +664,77 @@ async def get_agentic_decision(llm: LLMService, message: str, session: dict) -> 
                     pass
         
         import httpx
+        err_msg = ""
         if isinstance(real_err, httpx.HTTPStatusError):
             try:
-                resp_text = real_err.response.text
-                logger.error(f"[Orchestrator] LLM call failed with status {real_err.response.status_code}: {resp_text}")
+                err_msg = real_err.response.text
             except Exception:
-                logger.error(f"[Orchestrator] LLM call failed: {real_err}")
-        else:
-            logger.error(f"[Orchestrator] LLM call failed: {real_err}")
+                pass
+        if not err_msg:
+            err_msg = str(real_err)
+
+        logger.warning(f"[Orchestrator] Groq tool call failed: {err_msg}. Trying OpenRouter fallback...")
+
+        if llm.has_openrouter:
+            try:
+                snapshot = build_session_snapshot(session)
+                history_slice = []
+                for h in (session.get("history") or [])[-8:]:
+                    role = "assistant" if h.get("role") == "agent" else "user"
+                    content = h.get("content", "")
+                    if not isinstance(content, str):
+                        content = json.dumps(content)
+                    history_slice.append({"role": role, "content": content[:400]})
+
+                messages = [
+                    {"role": "system", "content": ORCHESTRATOR_SYSTEM_PROMPT + "\n\nYou MUST return a JSON object containing the orchestrate_pipeline arguments: recommended_action, app_type, confidence, reasoning, edit_scope, ingestion_vector, ingestion_vector_status, app_type_status, budget_tier, budget_status, ui_event, ui_payload."},
+                    {"role": "system", "content": f"SESSION STATE SNAPSHOT:\n{json.dumps(snapshot, indent=2)}"},
+                    *history_slice,
+                    {"role": "user", "content": text},
+                ]
+
+                raw = await llm.openrouter_completion(
+                    messages=messages,
+                    model="meta-llama/llama-3.3-70b-instruct",
+                    max_tokens=400,
+                    temperature=0.1,
+                    response_format={"type": "json_object"},
+                )
+                parsed = json.loads(raw)
+                action = parsed.get("recommended_action") or "GATHER_REQUIREMENTS"
+                app_type = parsed.get("app_type") or "text"
+                confidence = parsed.get("confidence") or "MEDIUM"
+                reasoning = parsed.get("reasoning") or ""
+                edit_scope = parsed.get("edit_scope") or "PATCH_PROMPT"
+                ingestion_vector = parsed.get("ingestion_vector") or "missing"
+                ingestion_vector_status = parsed.get("ingestion_vector_status") or "missing"
+                app_type_status = parsed.get("app_type_status") or ("explicit" if confidence == "HIGH" else "inferred")
+
+                decision = {
+                    "recommended_action": action,
+                    "app_type": app_type,
+                    "confidence": confidence,
+                    "reasoning": reasoning,
+                    "edit_scope": edit_scope,
+                    "ingestion_vector": ingestion_vector,
+                    "ingestion_vector_status": ingestion_vector_status,
+                    "app_type_status": app_type_status,
+                    "budget_tier": parsed.get("budget_tier") or "missing",
+                    "budget_status": parsed.get("budget_status") or "missing",
+                    "ui_event": parsed.get("ui_event") or "none",
+                    "ui_payload": parsed.get("ui_payload") or "",
+                    "extracted_variables": {},
+                    "is_major_pivot": action == "PIVOT_APP",
+                    "_source": "openrouter_fallback",
+                }
+                decision = enforce_prd_rules(decision, session)
+                logger.info(
+                    f"[Orchestrator] OpenRouter fallback Action: {decision['recommended_action']} | "
+                    f"AppType: {decision['app_type']} | Confidence: {decision['confidence']}"
+                )
+                return decision
+            except Exception as or_err:
+                logger.error(f"[Orchestrator] OpenRouter fallback failed: {or_err}")
             
         return build_fallback_decision(text, session)
 
@@ -564,6 +773,12 @@ async def get_agentic_intent(llm: LLMService, message: str, session: dict) -> di
         "confidence": decision.get("confidence"),
         "_source": decision.get("_source"),
         "_decision": decision,
+        "ingestion_vector": decision.get("ingestion_vector"),
+        "ingestion_vector_status": decision.get("ingestion_vector_status"),
+        "app_type_status": decision.get("app_type_status"),
+        "budget_status": decision.get("budget_status"),
+        "ui_event": decision.get("ui_event"),
+        "ui_payload": decision.get("ui_payload"),
     }
 
 
@@ -583,6 +798,11 @@ def infer_category_from_purpose(purpose: str) -> str:
         return "video"
     if any(w in lower for w in ("law", "legal", "ipc", "court", "judge")):
         return "legal"
+    if any(w in lower for w in (
+        "pitch deck", "resume", "cv", "invoice", "receipt",
+        "evaluate", "score", "audit", "analyze", "profile review", "linkedin"
+    )):
+        return "document_analysis"
     return "text"
 
 
@@ -591,7 +811,17 @@ def detect_vertical_mismatch(user_input: str, previous_category: str) -> bool:
         return False
         
     lower = user_input.lower()
-    new_app_intent = any(w in lower for w in ("i want", "build", "create", "make", "change to", "switch to", "instead of", "how about", "new app"))
+    
+    new_app_patterns = [
+        r"\bi\s+want\s+(?:to\s+)?(?:build|create|make|change|switch)\b",
+        r"\bi\s+want\s+(?:an?\s+)?(?:app|tool|generator|builder|system|platform|website|service|program|new|different|another)\b",
+        r"\b(?:build|create|make|switch\s+to|change\s+to)\s+(?:a|an|another|new|different)\s+(?:app|tool|generator|music|song|video|image|text|audio|vision)\b",
+        r"\bnew\s+app\b",
+        r"\binstead\s+of\b",
+        r"\bhow\s+about\s+a\b"
+    ]
+    
+    new_app_intent = any(re.search(pat, lower) for pat in new_app_patterns)
     if not new_app_intent:
         return False
         

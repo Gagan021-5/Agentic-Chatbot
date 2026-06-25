@@ -127,6 +127,18 @@ async def chat(request: Request, body: ChatRequest):
             "model_guidance": session.get("model_guidance") or "",
             "optimization_notes": session.get("optimization_notes") or [],
             "similar_apps": session.get("similar_apps") or [],
+            "language_mode": session.get("languageMode") or "English",
+            "triage_rounds": session.get("triageRounds") or 0,
+            "last_slot_key": session.get("lastSlotKey"),
+            "dynamic_slots": session.get("dynamicSlots") or [],
+            "ingestion_vector": session.get("ingestionVector"),
+            "verification_metadata": session.get("verificationMetadata") or {},
+            "dynamic_workflow": session.get("dynamicWorkflow"),
+            "behavior_goal": session.get("behaviorGoal"),
+            "clarification_plan": session.get("clarificationPlan"),
+            "clarification_complete": session.get("clarificationComplete") or False,
+            "asked_clarification_keys": session.get("askedClarificationKeys") or [],
+            "asked_clarification_questions": session.get("askedClarificationQuestions") or [],
         }
 
         # 5. Invoke conversational state pipeline using the compiled graph
@@ -158,6 +170,18 @@ async def chat(request: Request, body: ChatRequest):
         session["model_guidance"] = final_state.get("model_guidance")
         session["optimization_notes"] = final_state.get("optimization_notes")
         session["similar_apps"] = final_state.get("similar_apps")
+        session["dynamicSlots"] = final_state.get("dynamic_slots") or []
+        session["verificationMetadata"] = final_state.get("verification_metadata") or session.get("verificationMetadata") or {}
+        session["languageMode"] = final_state.get("language_mode") or session.get("languageMode") or "English"
+        session["ingestionVector"] = final_state.get("ingestion_vector")
+        session["triageRounds"] = final_state.get("triage_rounds") or 0
+        session["lastSlotKey"] = final_state.get("last_slot_key")
+        session["dynamicWorkflow"] = final_state.get("dynamic_workflow")
+        session["behaviorGoal"] = final_state.get("behavior_goal")
+        session["clarificationPlan"] = final_state.get("clarification_plan")
+        session["clarificationComplete"] = final_state.get("clarification_complete") or False
+        session["askedClarificationKeys"] = final_state.get("asked_clarification_keys") or []
+        session["askedClarificationQuestions"] = final_state.get("asked_clarification_questions") or []
 
         session["history"].append({"role": "agent", "content": reply})
         await session_svc.save_session(session)

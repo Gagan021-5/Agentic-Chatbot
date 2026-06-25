@@ -13,6 +13,19 @@ from loguru import logger
 from services.language_directive import LANGUAGE_MIRROR_DIRECTIVE
 from services.llm import LLMService
 
+
+def _msg_content(m: Any) -> str:
+    try:
+        if hasattr(m, "get"):
+            return m.get("content", "") or ""
+        if hasattr(m, "content"):
+            return getattr(m, "content") or ""
+        if isinstance(m, str):
+            return m
+        return str(m)
+    except Exception:
+        return ""
+
 UPLOAD_KEYWORDS = [
     "background remov", "background replac", "room design", "interior design",
     "redesign", "style transfer", "face swap", "portrait", "enhance photo",
@@ -83,19 +96,66 @@ def auto_inject_variables(user_prompt: str, vars_list: list[str]) -> str:
     return resolved
 
 
-async def generate_prompt_template(llm: LLMService, session: dict) -> dict:
-    edit_instruction = ""
-    if session.get("deepAnswers", {}).get("lastEditInstruction"):
-        edit_instruction = (
-            f"\n- EDIT INSTRUCTION FROM CREATOR: {session['deepAnswers']['lastEditInstruction']}"
-        )
+# ─── Contamination Detection ────────────────────────────────
+
+CONTAMINATION_PATTERNS = [
+    re.compile(r"\bswipe\s+(?:left|right)\b", re.I),
+    re.compile(r"\bsingles?\s*[,&]\s*couples?\b", re.I),
+    re.compile(r"\bLGBTQ", re.I),
+    re.compile(r"\bdating\s+profile\b", re.I),
+    re.compile(r"\bmatch\s+preferences?\b", re.I),
+    re.compile(r"\bjump\s+scare\b", re.I),
+    re.compile(r"\bhorror\s+genre\b", re.I),
+    re.compile(r"\bepisode\s+(?:title|number)\b", re.I),
+    re.compile(r"\bcompatibility\s+(?:score|match|quiz)\b", re.I),
+    re.compile(r"\brelationship\s+(?:type|preference|status)\b", re.I),
+    re.compile(r"\bsexual\s+orientation\b", re.I),
+    re.compile(r"\bswiping\s+mechanic", re.I),
+]
+
+
+def _detect_rag_contamination(generated_text: str, app_purpose: str) -> list[str]:
+    """Detect domain-specific terms that leaked from RAG examples into the output."""
+    purpose_lower = (app_purpose or "").lower()
+    violations = []
+    for pattern in CONTAMINATION_PATTERNS:
+        for match in pattern.finditer(generated_text):
+            matched_text = match.group(0)
+            if matched_text.lower() not in purpose_lower:
+                violations.append(matched_text)
+    return violations
+
+
+async def generate_prompt_template(
+    llm: LLMService,
+    *,
+    app_type: str,
+    app_purpose: str = "Not specified",
+    model_name: str | None = None,
+    model_id: str | None = None,
+    target_users: str = "General Public",
+    variables: list[dict | str] | None = None,
+    deep_answers: dict[str, Any] | None = None,
+    history: list[dict[str, Any]] | None = None,
+    language_mode: str = "English",
+    web_search_context: dict[str, Any] | None = None,
+    rag_context: str | None = None,
+    edit_instruction: str | None = None,
+) -> dict:
+    _deep = deep_answers or {}
+    _edit = edit_instruction or ""
+    if not _edit and _deep.get("lastEditInstruction"):
+        _edit = str(_deep["lastEditInstruction"])
+    edit_block = f"\n- EDIT INSTRUCTION FROM CREATOR: {_edit}" if _edit else ""
 
     system_prompt = f"""You are an Elite AI Prompt Engineer specializing in production-ready app prompts for the RentPrompts marketplace.
 Your job: generate a HIGHLY SPECIFIC, DOMAIN-AWARE prompt configuration for the app described below.
 {LANGUAGE_MIRROR_DIRECTIVE}
 
-CRITICAL ANTI-CONTAMINATION RULE:
-Look closely at the explicit App Type and App Purpose. Do NOT mix up previous applications or domains from the chat history. If the app purpose is a placement speech generator, do NOT generate a prompt for a horror story or any other unrelated topic. Stay strictly focused on the current App Purpose.
+CRITICAL ANTI-CONTAMINATION & RAG ISOLATION RULES:
+- Look closely at the explicit App Type and App Purpose. Do NOT mix up previous applications or domains from the chat history. 
+- Sandboxed Examples: The REFERENCE EXAMPLES and RAG blocks provided are for STRUCTURAL COMPILATION STYLE REFERENCE ONLY. Do NOT copy their literal text content, options, choices, or target industry details (such as dating references, sexual orientations, swiping terms, or horror genres) into the output prompt template unless the user explicitly requested that specific domain in the current App Purpose field. 
+- Ground all variable options strictly and exclusively within the domain of the user's provided App Purpose (e.g., if the user wants to analyze YouTube Thumbnails for Tech Creators, variables must describe tech layouts, click potential, text visual attributes, etc.).
 
 QUALITY RULES:
 1. systemPrompt: Define a tight AI persona. Include: role, domain expertise, tone, output format rules, and constraints. 3-5 sentences. It MUST be written in the second-person ("You are...") rather than first-person ("I am...").
@@ -116,7 +176,7 @@ Return ONLY valid JSON:
   "variableDescriptions": {{ "$$var1": "What the user enters here" }}
 }}"""
 
-    vars_list = (session.get("dynamicContext") or {}).get("variables") or []
+    vars_list = variables or []
     var_lines = []
     for v in vars_list:
         if isinstance(v, dict):
@@ -125,11 +185,8 @@ Return ONLY valid JSON:
             var_lines.append(f"$${v}")
     var_list = "\n".join(var_lines)
 
-    extraction = session.get("extraction") or {}
-    requirements = session.get("requirements") or {}
-
     web_search_block = ""
-    web_search_ctx = session.get("webSearchContext")
+    web_search_ctx = web_search_context
     if web_search_ctx and isinstance(web_search_ctx, dict):
         summary = web_search_ctx.get("summary") or ""
         sources = web_search_ctx.get("sources") or []
@@ -145,33 +202,69 @@ Return ONLY valid JSON:
             )
 
     rag_block = ""
-    rag_ctx = session.get("ragContext")
+    rag_ctx = rag_context
     if rag_ctx and isinstance(rag_ctx, str):
         rag_block = (
-            f"\n- REFERENCE EXAMPLES FROM KNOWLEDGE BASE "
-            f"(model your prompt structure and variable names on these real published app examples):\n{rag_ctx}"
+            f"\n- STRUCTURAL REFERENCE EXAMPLES (RAG ISOLATION SANDBOX):\n"
+            f"  ⚠️ WARNING: The following are structural prose references ONLY.\n"
+            f"  Do NOT copy their literal text content, variable names, domain-specific options,\n"
+            f"  target audience labels, or industry terminology into the output.\n"
+            f"  Use them ONLY to understand the structural format of a well-written prompt.\n"
+            f"  Ground ALL content exclusively in the user's App Purpose: {app_purpose}.\n"
+            f"{rag_ctx}"
         )
 
-    detected_lang = session.get("languageMode") or (session.get("extraction") or {}).get("detectedLanguage") or "English"
+    detected_lang = language_mode
     user_content = (
         f"Generate a production-ready prompt for this app:\n"
-        f"- App Type: {session.get('appType')}\n"
-        f"- Selected Model: {session.get('modelName') or session.get('modelId') or 'unknown'}\n"
-        f"- App Purpose: {requirements.get('appPurpose') or extraction.get('appPurpose') or 'Not specified'}\n"
-        f"- Target Users: {requirements.get('targetUsers') or extraction.get('targetUsers') or 'General Public'}\n"
+        f"- App Type: {app_type}\n"
+        f"- Selected Model: {model_name or model_id or 'unknown'}\n"
+        f"- App Purpose: {app_purpose}\n"
+        f"- Target Users: {target_users}\n"
         f"- REQUIRED INPUT VARIABLES (You must include EXACTLY these variables as $$ tokens in the prose):\n"
         f"{var_list or 'Use the most logical 3-4 variables for this app type and purpose.'}\n\n"
         f"- Target Output Language: {detected_lang} (You MUST generate all systemPrompt, userPrompt, and variableDescriptions in this language. Do not translate or generate in any other language unless explicitly requested. If English, use English. If Hindi, use Hindi. If Hinglish, use Hinglish.)\n"
-        f"- Optional History Reference: {json.dumps([(h.get('content')) for h in (session.get('history') or [])[-4:]])}\n"
+        f"- Optional History Reference: {json.dumps([_msg_content(h) for h in (history or [])[-4:]])}\n"
         f"{web_search_block}\n"
         f"{rag_block}\n"
-        f"{edit_instruction}"
+        f"{edit_block}"
     )
 
     try:
         parsed = await llm.openrouter_json(system_prompt, user_content)
         if not isinstance(parsed, dict):
             parsed = {}
+
+        # ─── Component 5B: RAG Contamination Scanner & Single-Retry Loop ───
+        user_prompt = parsed.get("userPrompt") or ""
+        violations = _detect_rag_contamination(user_prompt, app_purpose)
+        if violations:
+            logger.warning(f"[generate_prompt_template] RAG contamination detected: {violations}. Triggering single-retry...")
+            strict_system_prompt = system_prompt + (
+                "\n\n⚠️ CRITICAL WARNING: Your previous attempt leaked placeholder content from reference examples (e.g., "
+                f"{', '.join(violations)}). You MUST absolutely purge these terms. Ground the userPrompt "
+                f"strictly and exclusively in the user's App Purpose: {app_purpose}."
+            )
+            try:
+                retry_parsed = await llm.openrouter_json(strict_system_prompt, user_content)
+                if isinstance(retry_parsed, dict) and retry_parsed.get("userPrompt"):
+                    retry_violations = _detect_rag_contamination(retry_parsed["userPrompt"], app_purpose)
+                    if not retry_violations:
+                        parsed = retry_parsed
+                        logger.info("[generate_prompt_template] Retry successfully produced uncontaminated prompt.")
+                    else:
+                        logger.warning(f"[generate_prompt_template] Retry also contained contamination: {retry_violations}. Applying fallback sanitization.")
+                        sanitized_prompt = retry_parsed["userPrompt"]
+                        for pattern in CONTAMINATION_PATTERNS:
+                            sanitized_prompt = pattern.sub("", sanitized_prompt)
+                        retry_parsed["userPrompt"] = sanitized_prompt
+                        parsed = retry_parsed
+            except Exception as retry_err:
+                logger.error(f"[generate_prompt_template] Retry failed: {retry_err}. Applying fallback sanitization to original prompt.")
+                sanitized_prompt = user_prompt
+                for pattern in CONTAMINATION_PATTERNS:
+                    sanitized_prompt = pattern.sub("", sanitized_prompt)
+                parsed["userPrompt"] = sanitized_prompt
 
         # Normalize keys (support snake_case from LLM response)
         if "system_prompt" in parsed and "systemPrompt" not in parsed:
@@ -241,21 +334,19 @@ Return ONLY valid JSON:
         # Fallback validation check
         if not parsed.get("systemPrompt") or not parsed.get("userPrompt"):
             logger.warning("[generate_prompt_template] Parsed JSON missing systemPrompt or userPrompt. Merging fallback.")
-            app_purpose_lower = (
-                requirements.get("appPurpose") or extraction.get("appPurpose") or ""
-            ).lower()
+            app_purpose_lower = (app_purpose or "").lower()
             needs_upload = any(k in app_purpose_lower for k in UPLOAD_KEYWORDS)
             is_generation = any(k in app_purpose_lower for k in GENERATION_KEYWORDS)
             accept_image = (
-                session.get("appType") == "vision"
-                or (session.get("appType") == "image" and needs_upload and not is_generation)
+                app_type == "vision"
+                or (app_type == "image" and needs_upload and not is_generation)
             )
             main_var = vars_list[0].get("name") if vars_list and isinstance(vars_list[0], dict) else "main_input"
             main_var_clean = str(main_var).strip().strip("$").replace(" ", "_").lower()
             
             if not parsed.get("systemPrompt"):
                 parsed["systemPrompt"] = (
-                    f"You are a highly specialized AI assistant for {session.get('appType') or 'content'} generation. "
+                    f"You are a highly specialized AI assistant for {app_type or 'content'} generation. "
                     "Focus exclusively on the app's stated purpose. Provide structured, accurate, and domain-specific outputs only."
                 )
             if not parsed.get("userPrompt"):
@@ -272,21 +363,19 @@ Return ONLY valid JSON:
 
     except Exception as err:
         logger.error(f"[generate_prompt_template] Error: {err}")
-        app_purpose = (
-            requirements.get("appPurpose") or extraction.get("appPurpose") or ""
-        ).lower()
-        needs_upload = any(k in app_purpose for k in UPLOAD_KEYWORDS)
-        is_generation = any(k in app_purpose for k in GENERATION_KEYWORDS)
+        app_purpose_lower = (app_purpose or "").lower()
+        needs_upload = any(k in app_purpose_lower for k in UPLOAD_KEYWORDS)
+        is_generation = any(k in app_purpose_lower for k in GENERATION_KEYWORDS)
         accept_image = (
-            session.get("appType") == "vision"
-            or (session.get("appType") == "image" and needs_upload and not is_generation)
+            app_type == "vision"
+            or (app_type == "image" and needs_upload and not is_generation)
         )
         main_var = vars_list[0].get("name") if vars_list and isinstance(vars_list[0], dict) else "main_input"
         main_var_clean = str(main_var).strip().strip("$").replace(" ", "_").lower()
         return {
             "reasoning": "Fallback triggered.",
             "systemPrompt": (
-                f"You are a highly specialized AI assistant for {session.get('appType') or 'content'} generation. "
+                f"You are a highly specialized AI assistant for {app_type or 'content'} generation. "
                 "Focus exclusively on the app's stated purpose. Provide structured, accurate, and domain-specific outputs only."
             ),
             "userPrompt": (
@@ -297,7 +386,7 @@ Return ONLY valid JSON:
             ),
             "negativePrompt": (
                 "blurry, low quality, distorted, watermark, text overlay, pixelated, overexposed, underexposed"
-                if session.get("appType") in ("image", "vision")
+                if app_type in ("image", "vision")
                 else None
             ),
             "acceptImageInput": accept_image,
@@ -308,12 +397,20 @@ Return ONLY valid JSON:
         }
 
 
-async def generate_seo(llm: LLMService, session: dict, vector_store: Any = None) -> dict:
+async def generate_seo(
+    llm: LLMService,
+    *,
+    app_type: str,
+    app_purpose: str,
+    deep_answers: dict[str, Any] | None = None,
+    history: list[dict[str, Any]] | None = None,
+    language_mode: str | None = None,
+    model_id: str | None = None,
+    vector_store: Any = None,
+) -> dict:
     rag_context = ""
     if vector_store and hasattr(vector_store, "search"):
         try:
-            app_type = (session.get("appType") or "text").lower()
-            app_purpose = (session.get("extraction") or {}).get("appPurpose") or ""
             # Retrieve relevant chunks from marketplace_gold_standards.md with boosted priority
             matches = await vector_store.search(
                 query=f"{app_type} app: {app_purpose} naming description tags",
@@ -381,13 +478,11 @@ Return ONLY valid JSON:
   "category": "creative | business | education | healthcare | entertainment | productivity | social | other"
 }}"""
 
-    extraction = session.get("extraction") or {}
-    app_purpose = extraction.get("appPurpose") or extraction.get("oneLineUnderstanding") or ""
-    deep_answers = session.get("deepAnswers") or {}
+    _deep = deep_answers or {}
     triage_history = " | ".join(
-        str(m.get("content", ""))
-        for m in (session.get("history") or [])
-        if m.get("role") == "user"
+        str(m.get("content") if isinstance(m, dict) else m.content)
+        for m in (history or [])
+        if (m.get("role") if isinstance(m, dict) else getattr(m, "type", "")) in ("user", "human")
     )[:600]
 
     gold_standards_block = ""
@@ -397,15 +492,15 @@ Return ONLY valid JSON:
             f"{rag_context}\n"
         )
 
-    detected_lang = session.get("languageMode") or (session.get("extraction") or {}).get("detectedLanguage") or "English"
+    detected_lang = language_mode or "English"
     user_content = (
         f"Generate premium, high-converting marketplace metadata for this AI app:\n"
         f"- What the app does: {app_purpose}\n"
-        f"- App type: {session.get('appType')}\n"
-        f"- User answers during setup: {json.dumps(deep_answers)}\n"
+        f"- App type: {app_type}\n"
+        f"- User answers during setup: {json.dumps(_deep)}\n"
         f"- Target Output Language: {detected_lang} (You MUST generate the appName, appDescription, and tags in this language. Do not translate or generate in any other language unless explicitly requested. If English, use English. If Hindi, use Hindi. If Hinglish, use Hinglish.)\n"
         f"- Conversation context: {triage_history}\n"
-        f"- Model used (DO NOT use as app name — this is internal only): {session.get('modelId') or 'unknown'}\n"
+        f"- Model used (DO NOT use as app name — this is internal only): {model_id or 'unknown'}\n"
         f"{gold_standards_block}\n"
         "Remember: App name must follow [PowerWord] + [Domain] (2-4 words). "
         "Description must follow [Action Verb] + [User Outcome] + [AI Capability] in under 150 characters. "
@@ -419,7 +514,7 @@ Return ONLY valid JSON:
     except Exception as err:
         logger.error(f"[generate_seo] Error: {err}")
         purpose_clean = (app_purpose or "").strip()
-        type_label = session.get("appType") or "creative"
+        type_label = app_type or "creative"
         name_map = {
             "image": "PixelForge AI",
             "text": "CopyFlow AI",
@@ -450,8 +545,6 @@ Return ONLY valid JSON:
             ],
             "category": "creative",
         }
-
-
 async def run_prompt_test(
     llm: LLMService,
     system_prompt: str,
@@ -465,7 +558,7 @@ async def run_prompt_test(
     triggers the deep OpenRouter completion, and outputs the REAL generated story.
     """
     started = time.time()
-    model = model_hint or "google/gemini-1.5-flash"
+    model = model_hint or "google/gemini-2.5-flash"
     inputs = test_inputs if isinstance(test_inputs, dict) else {}
     resolved = str(user_prompt or "")
      # Trace and replace all dynamic input parameters from the frontend preview state form fields

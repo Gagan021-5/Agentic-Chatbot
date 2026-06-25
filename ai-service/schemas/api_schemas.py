@@ -5,8 +5,25 @@ Pydantic Schemas — Request/Response models for all endpoints
 """
 
 from __future__ import annotations
-from typing import Optional, Any
+from typing import Optional, Any, Literal
 from pydantic import BaseModel, Field
+
+
+# ─── Verification Status Tracking ───────────────────────────
+
+VerificationStatus = Literal["missing", "inferred", "explicit"]
+
+
+class VerificationMetadataSchema(BaseModel):
+    """Tracks lineage status of critical architecture keys.
+    
+    Each field maps to a VerificationStatus indicating whether the value
+    was explicitly declared by the user, inferred from context, or is
+    still unresolved.
+    """
+    app_type: VerificationStatus = "missing"
+    ingestion_vector: VerificationStatus = "missing"
+    budget: VerificationStatus = "missing"
 
 
 # ─── Common ─────────────────────────────────────────────────
@@ -42,6 +59,8 @@ class ChatRequest(BaseModel):
     extraction: dict[str, Any] | None = None
     deep_answers: dict[str, Any] | None = None
     history: list[dict[str, Any]] = Field(default_factory=list)
+    ingestion_vector: str | None = None
+    verification_metadata: VerificationMetadataSchema | None = None
 
 
 class ChatResponse(BaseModel):
@@ -55,6 +74,13 @@ class ChatResponse(BaseModel):
     variables: list[VariableSchema] = Field(default_factory=list)
     web_research: dict[str, Any] | None = None
     processing_time_ms: float = 0
+    app_type: str | None = None
+    app_purpose: str | None = None
+    model_id: str | None = None
+    extraction: dict[str, Any] | None = None
+    deep_answers: dict[str, Any] | None = None
+    ingestion_vector: str | None = None
+    verification_metadata: VerificationMetadataSchema | None = None
 
 
 # ─── /retrieve-context ─────────────────────────────────────

@@ -194,7 +194,7 @@ async def run_tests():
             "survivor_name": "Alice",
             "apocalypse_location": "Atlanta"
         },
-        modelHint="google/gemini-1.5-flash"
+        modelHint="google/gemini-2.5-flash"
     )
     
     # Run the test prompt

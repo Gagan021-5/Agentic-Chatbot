@@ -197,7 +197,7 @@ class LLMService:
         self,
         system_prompt: str,
         user_content: str,
-        model: str = "google/gemini-1.5-flash",
+        model: str = "google/gemini-2.5-flash",
         max_tokens: int = 3000,
         temperature: float = 0.7,
     ) -> str:
@@ -242,7 +242,7 @@ class LLMService:
         self,
         system_prompt: str,
         user_content: str,
-        model: str = "google/gemini-1.5-flash",
+        model: str = "google/gemini-2.5-flash",
         fallback_model: str = "meta-llama/llama-3.3-70b-instruct",
     ) -> dict:
         """Call OpenRouter, extract JSON from response. Auto-fallback on 429."""
