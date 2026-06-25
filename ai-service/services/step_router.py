@@ -36,6 +36,7 @@ from services.clarification_planner import (
     get_max_clarification_turns,
 )
 from services.intent_engine import get_agentic_decision
+from services.artifact_utils import requires_input_artifact, is_creation_workflow
 from services.prompt_generation import (
     apply_prompt_instruction,
     generate_prompt_template,
@@ -878,18 +879,20 @@ async def _build_step0_response_state(state: ConversationState, text: str, app_s
 
     if ing_status in ("missing", "inferred"):
         app_purpose = state.get("extraction", {}).get("appPurpose") or ""
-        question, options = _get_ingestion_vector_question_and_chips(app_purpose)
-        state["last_slot_key"] = "ingestion_vector"
-        state["current_deep_field"] = "ingestion_vector"
-        state["awaiting_deep_answer"] = True
-        state["reply"] = question
-        return {
-            "reply": question,
-            "uiType": "chips",
-            "uiData": {"options": options},
-            "nextStep": 0,
-            "coins": None,
-        }
+        # Only ask about ingestion if the workflow actually requires an uploaded artifact
+        if requires_input_artifact(state.get("app_type") or state.get("extraction", {}).get("appType"), app_purpose):
+            question, options = _get_ingestion_vector_question_and_chips(app_purpose)
+            state["last_slot_key"] = "ingestion_vector"
+            state["current_deep_field"] = "ingestion_vector"
+            state["awaiting_deep_answer"] = True
+            state["reply"] = question
+            return {
+                "reply": question,
+                "uiType": "chips",
+                "uiData": {"options": options},
+                "nextStep": 0,
+                "coins": None,
+            }
 
     deep_answers = state.get("deep_answers") or {}
     if not _session_has_budget(state.get("extraction"), deep_answers):
@@ -2195,7 +2198,9 @@ def check_triage_completeness(state: ConversationState) -> str:
     v_meta = state.get("verification_metadata") or {}
     ing_status = v_meta.get("ingestion_vector", "missing")
     budget_status = v_meta.get("budget", "missing")
-    if ing_status in ("missing", "inferred") or budget_status in ("missing", "inferred"):
+    app_purpose = state.get("app_purpose") or state.get("extraction", {}).get("appPurpose") or ""
+    if ((ing_status in ("missing", "inferred") and requires_input_artifact(state.get("app_type") or state.get("extraction", {}).get("appType"), app_purpose))
+            or budget_status in ("missing", "inferred")):
         return "wait_for_user"
 
     # ─── 🛡️ BUDGET CHECK: Prevent bypassing budget collection ───

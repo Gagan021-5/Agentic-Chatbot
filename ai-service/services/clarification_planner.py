@@ -272,37 +272,8 @@ FORBIDDEN_INPUT_KEYS = frozenset({
     "input_method", "upload_method", "file_type", "input_format", "content_format"
 })
 
-
-def _requires_input_artifact(app_type: str | None, app_purpose: str | None) -> bool:
-    """
-    Return True only when the uploaded artifact is the actual subject of analysis/review.
-    """
-    atype = str(app_type or "").lower().strip()
-    purpose = str(app_purpose or "").lower().strip()
-
-    # Return True for allowed analysis/review concepts:
-    # resume review, pitch deck review, image review, thumbnail review, website audit, document analysis, OCR
-    true_keywords = [
-        "review", "audit", "analyze", "analysis", "ocr", "scanner", "detect", "scrub",
-        "evaluate", "evaluation", "score", "grade", "critique", "diagnose", "diagnosis"
-    ]
-    if any(kw in purpose for kw in true_keywords):
-        return True
-
-    # Return False for generators, planners, writers, converters, astrology, logo generation, audiobook generation
-    false_keywords = [
-        "generator", "planner", "writer", "converter", "convert", "astrology", "horoscope",
-        "birth chart", "zodiac", "logo", "audiobook", "audio book", "cover letter",
-        "story", "pitch deck", "workout", "meal", "seo", "script"
-    ]
-    if any(kw in purpose for kw in false_keywords):
-        return False
-
-    # If the app modality is vision or video or image, and it has not matched false keywords:
-    if atype in ("vision", "video", "image"):
-        return True
-
-    return False
+# Use central artifact helper to decide whether uploaded artifacts are required
+from services.artifact_utils import requires_input_artifact as _requires_input_artifact
 
 
 def is_input_modality_question(key: str, question: str) -> bool:
@@ -969,30 +940,93 @@ async def plan_clarification(
 
     from services.extraction import _slot_is_captured
 
-    filtered_missing = []
+    # Filter out items already captured in known information
+    filtered_missing: list[dict] = []
     for item in plan.get("missing_information") or []:
         key = item.get("key", "")
         if not _slot_is_captured(key, known):
             filtered_missing.append(item)
 
-    plan["missing_information"] = filtered_missing
+    # Materiality scoring heuristic: base on declared priority and textual signals
+    def _materiality_score(item: dict) -> float:
+        score = 0.0
+        key = str(item.get("key") or "").lower()
+        reason = str(item.get("reason") or "")
 
-    if filtered_missing:
+        # Base weight by reason/priority: 'High' -> 2, else 1
+        if "high" in reason.lower():
+            score += 2.0
+        else:
+            score += 1.0
+
+        # Boost if the key appears in the app purpose
+        if key and key in safe_purpose.lower():
+            score += 1.5
+
+        # Boost if the reason contains behavioral justification markers
+        if has_behavior_justification(reason):
+            score += 1.0
+
+        # Penalize generic or input-modality questions
+        if is_input_modality_question(item.get("key", ""), item.get("question", "")):
+            score -= 2.0
+        if is_generic_question_rejected(item.get("key", ""), item.get("question", ""), reason):
+            score -= 1.5
+
+        return float(score)
+
+    annotated_missing = []
+    for it in filtered_missing:
+        k = it.get("key")
+        q = it.get("question")
+        if not k or not q:
+            continue
+        if is_duplicate_clarification(k, q, asked_keys or [], asked_questions or [], known):
+            continue
+        annotated = dict(it)
+        annotated["materiality"] = max(0.0, _materiality_score(annotated))
+        annotated_missing.append(annotated)
+
+    # Sort missing items by materiality (descending)
+    annotated_missing.sort(key=lambda x: x.get("materiality", 0.0), reverse=True)
+    plan["missing_information"] = annotated_missing
+
+    # Planner state per spec
+    planner_state = {
+        "goal": safe_purpose,
+        "behavioral_workflow": plan.get("behavior_goal") or (plan.get("workflow") or {}).get("workflow_name"),
+        "known_information": known,
+        "missing_information": annotated_missing,
+        "readiness_score": float(plan.get("confidence") or 0.0),
+        "clarification_rounds": int(triage_rounds or 0),
+        "next_question": None,
+        "reasoning": plan.get("reason") or "",
+    }
+
+    if annotated_missing:
+        next_item = annotated_missing[0]
         plan["status"] = "needs_clarification"
-        plan["selected_key"] = filtered_missing[0]["key"]
-        plan["selected_question"] = filtered_missing[0]["question"]
         plan["clarification_complete"] = False
+        plan["forced_complete"] = False
+        plan["selected_key"] = next_item.get("key")
+        plan["selected_question"] = next_item.get("question")
+        planner_state["next_question"] = {"key": next_item.get("key"), "question": next_item.get("question"), "materiality": next_item.get("materiality")}
         if not plan.get("reason"):
-            plan["reason"] = filtered_missing[0].get("reason", "")
+            plan["reason"] = next_item.get("reason") or "Missing high-value behavioral dimension"
     else:
         plan["status"] = "ready"
+        plan["clarification_complete"] = True
+        plan["forced_complete"] = False
         plan["selected_key"] = None
         plan["selected_question"] = None
-        plan["clarification_complete"] = True
+        planner_state["next_question"] = None
         if not plan.get("reason"):
-            plan["reason"] = "All behavioral requirements satisfied"
+            plan["reason"] = "All high-value behavioral dimensions satisfied or filtered out"
 
-    return apply_plan_safeguards(
+    plan["planner_state"] = planner_state
+
+    # Apply programmatic safeguards (max turns, confidence override, input modality filters)
+    plan = apply_plan_safeguards(
         plan,
         known=known,
         asked_keys=asked_keys,
@@ -1001,3 +1035,30 @@ async def plan_clarification(
         app_type=app_type,
         app_purpose=safe_purpose,
     )
+
+    # Refresh planner_state after safeguards
+    ps = plan.get("planner_state") or planner_state
+    ps["readiness_score"] = float(plan.get("confidence") or ps.get("readiness_score") or 0.0)
+    ps["clarification_rounds"] = int(triage_rounds or ps.get("clarification_rounds", 0))
+    if plan.get("selected_key"):
+        ps["next_question"] = {"key": plan.get("selected_key"), "question": plan.get("selected_question")}
+    else:
+        ps["next_question"] = None
+    plan["planner_state"] = ps
+
+    # Structured debug output
+    try:
+        debug_trace = {
+            "goal": ps.get("goal"),
+            "behavioral_workflow": ps.get("behavioral_workflow"),
+            "known_information": ps.get("known_information"),
+            "missing_information": [{"key": m.get("key"), "materiality": m.get("materiality"), "reason": m.get("reason")} for m in ps.get("missing_information", [])],
+            "readiness_score": ps.get("readiness_score"),
+            "selected_question": ps.get("next_question"),
+            "reasoning": ps.get("reasoning"),
+        }
+        logger.info(f"[PLANNER_STATE] {json.dumps(debug_trace)}")
+    except Exception:
+        logger.exception("Failed to log planner_state debug trace")
+
+    return plan

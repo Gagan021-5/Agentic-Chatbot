@@ -13,6 +13,7 @@ from loguru import logger
 
 from services.llm import LLMService
 from services.extraction import _slot_is_captured
+from services.artifact_utils import requires_input_artifact, is_creation_workflow
 
 ORCHESTRATOR_TOOL = {
     "type": "function",
@@ -240,9 +241,15 @@ def enforce_prd_rules(decision: dict, session: dict) -> dict:
     # Rule 1: CRITICAL STATE PRESERVATION
     locked_types = {"audio", "video", "image", "vision"}
     current_app_type = session.get("appType") or session.get("app_type")
-    
+    # Allow a targeted override: if the session's stated purpose clearly indicates
+    # an image creation workflow (logo, thumbnail, poster, etc.) and the current
+    # locked type is 'vision' (analysis), permit switching to 'image' generation.
+    session_purpose = (session.get("extraction") or {}).get("appPurpose") or ""
+    is_creation = is_creation_workflow(session_purpose)
+
     if current_app_type in locked_types and action != "PIVOT_APP" and decision.get("_source") != "fast_path":
-        decision["app_type"] = current_app_type
+        if not (current_app_type == "vision" and is_creation):
+            decision["app_type"] = current_app_type
         
     # Rule 2: Clarification follow-up question answering check
     is_answering_clarification = (
@@ -285,8 +292,7 @@ def enforce_prd_rules(decision: dict, session: dict) -> dict:
             or "missing"
         )
 
-    # For pure text generation apps (blog writers, rewriters, planners etc.)
-    # ingestion_vector is not required — these apps have no file upload
+    # For pure generation apps, ingestion vector should not block progression.
     app_type_for_check = (
         decision.get("app_type")
         or session.get("appType")
@@ -295,6 +301,15 @@ def enforce_prd_rules(decision: dict, session: dict) -> dict:
     extraction = session.get("extraction") or {}
     wants_image_input = bool(extraction.get("wantsImageInput"))
     PURE_GENERATION_TYPES = {"text", "audio"}
+
+    # If this is an image creation workflow (logo/thumbnail/etc.), mark ingestion not required
+    # so we don't prompt for uploads during progression.
+    session_purpose = (session.get("extraction") or {}).get("appPurpose") or ""
+    if is_creation_workflow(session_purpose) and str(app_type_for_check) == "image":
+        decision["ingestion_vector"] = "not_required"
+        decision["ingestion_vector_status"] = "explicit"
+        v_meta["ingestion_vector"] = "not_required"
+
     if app_type_for_check in PURE_GENERATION_TYPES and not wants_image_input:
         decision["ingestion_vector"] = "plain_text"
         decision["ingestion_vector_status"] = "explicit"
@@ -304,7 +319,11 @@ def enforce_prd_rules(decision: dict, session: dict) -> dict:
 
     budget_status = decision.get("budget_status") or v_meta.get("budget") or "missing"
 
-    if ing_status in ("missing", "inferred") or budget_status in ("missing", "inferred"):
+    # Only block progression for missing ingestion vectors when the workflow actually
+    # requires an uploaded artifact. Generation workflows should not be blocked.
+    session_purpose = (session.get("extraction") or {}).get("appPurpose") or ""
+    if ((ing_status in ("missing", "inferred") and requires_input_artifact(app_type_for_check, session_purpose))
+            or budget_status in ("missing", "inferred")):
         if action in ("PROCESS_FORM", "SHOW_MODEL_CARDS", "GENERATE_PREVIEW"):
             action = "GATHER_REQUIREMENTS"
             decision["recommended_action"] = action
